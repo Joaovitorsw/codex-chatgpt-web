@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
+import { ChatGptOverthinkingRecoveryTracker } from "../src/adapters/chatgpt-web/browser-worker";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptComposerNeedsReload, chatGptExternalProgressSuppressesDomHealth, chatGptStoppedThinkingIsTerminal, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptMissingFinalAnswerSummary, chatGptToolFinalNeedsSummary, chatGptFinalIsOnlyProspectiveProgress, chatGptLatestNewTurnIdentity, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, retryChatGptTerminalError, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs, chatGptRateLimitBackoffMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
@@ -2864,6 +2865,17 @@ test("the current response error action can be retried once in the same conversa
     });
     await throwIfChatGptTerminalErrorAlert(dialogPage(text, "Retry", false).page);
   }
+});
+
+test("the overthinking notice must remain stagnant and cannot override live tool progress", () => {
+  const tracker = new ChatGptOverthinkingRecoveryTracker(20_000);
+  const notice = "Our systems are thinking a bit more about this request before responding.";
+  expect(tracker.update(notice, true, false, 1_000)).toBeFalse();
+  expect(tracker.update(notice, true, false, 20_999)).toBeFalse();
+  expect(tracker.update(notice, true, false, 21_000)).toBeTrue();
+  expect(tracker.update(`${notice} Still working`, true, false, 21_100)).toBeFalse();
+  expect(tracker.update(`${notice} Still working`, true, true, 50_000)).toBeFalse();
+  expect(tracker.update(notice, false, false, 80_000)).toBeFalse();
 });
 
 test("a previous response error cannot reject a newly accepted user submission", async () => {

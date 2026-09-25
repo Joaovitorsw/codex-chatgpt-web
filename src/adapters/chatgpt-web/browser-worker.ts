@@ -132,6 +132,7 @@ export const CHATGPT_RESPONSE_DOM_GRACE_MS = 120_000;
 export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
+export const CHATGPT_OVERTHINKING_STALL_MS = 20_000;
 // A rendered copy/regenerate action is strong evidence that ChatGPT considers the turn
 // complete, but its React tree may still consolidate the final human summary after that
 // control first appears. Two seconds was short enough to return the last progress paragraph
@@ -923,6 +924,27 @@ export async function retryChatGptTerminalError(scope: ChatGptTextScope): Promis
   return true;
 }
 
+export async function regenerateStalledChatGptResponse(
+  page: Page,
+  responseTurn: Locator,
+  abortSignal?: AbortSignal,
+): Promise<void> {
+  const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+  if (!await stop.isVisible().catch(() => false)) {
+    throw new Error("ChatGPT overthinking recovery lost its active Stop control");
+  }
+  await stop.press("Enter", { timeout: 5_000 });
+  await stop.waitFor({ state: "hidden", timeout: 10_000, signal: abortSignal });
+  const retry = responseTurn.locator([
+    'button[data-testid="regenerate-thread-error-button"]',
+    'button[data-testid="regenerate-turn-action-button"]',
+    'button[aria-label="Regenerate response"]',
+    'button[aria-label="Gerar resposta novamente"]',
+  ].join(", ")).filter({ visible: true }).last();
+  await retry.waitFor({ state: "visible", timeout: 10_000, signal: abortSignal });
+  await retry.press("Enter", { timeout: 5_000 });
+}
+
 export async function resolveChatGptToolConfirmation(
   page: Page,
   appName: string,
@@ -1625,6 +1647,35 @@ export class ChatGptCompletionTracker {
     }
     const settleMs = state.completionActionVisible ? this.stableMs : this.missingActionStableMs;
     return now - this.candidate.since >= settleMs;
+  }
+}
+
+const CHATGPT_OVERTHINKING_NOTICE = "our systems are thinking a bit more about this request before responding";
+
+/** Requires a stable notice and no live tool work before retrying the same response. */
+export class ChatGptOverthinkingRecoveryTracker {
+  private observedAt?: number;
+  private observedText = "";
+
+  constructor(private readonly stallMs = CHATGPT_OVERTHINKING_STALL_MS) {}
+
+  update(text: string, running: boolean, externalProgressLive: boolean, now = Date.now()): boolean {
+    const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!running || externalProgressLive || !normalized.includes(CHATGPT_OVERTHINKING_NOTICE)) {
+      this.reset();
+      return false;
+    }
+    if (normalized !== this.observedText) {
+      this.observedText = normalized;
+      this.observedAt = now;
+      return false;
+    }
+    return this.observedAt !== undefined && now - this.observedAt >= this.stallMs;
+  }
+
+  reset(): void {
+    this.observedAt = undefined;
+    this.observedText = "";
   }
 }
 
@@ -5720,6 +5771,7 @@ export class ChatGptBrowserWorker {
       let capturedResponse = false;
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
+      const overthinkingRecovery = new ChatGptOverthinkingRecoveryTracker();
       const completedActionLabels: string[] = [];
       const deferAnswerMarkdownUntilCompletion = turn.completionFence !== undefined;
       const markdownDelivery = new ChatGptAnswerMarkdownDelivery(deferAnswerMarkdownUntilCompletion);
@@ -5770,6 +5822,7 @@ export class ChatGptBrowserWorker {
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
       let automaticResponseRetries = 0;
+      let automaticOverthinkingRecoveries = 0;
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5896,6 +5949,18 @@ export class ChatGptBrowserWorker {
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
+        if (automaticOverthinkingRecoveries < 1
+          && overthinkingRecovery.update(snapshot.visibleText, running, externalProgressLive)) {
+          await diagnostics.capture(page, "overthinking-stall-detected");
+          await regenerateStalledChatGptResponse(page, responseTurn.locator, turn.abortSignal);
+          automaticOverthinkingRecoveries += 1;
+          overthinkingRecovery.reset();
+          responseDomCache.key = undefined;
+          responseDomCache.snapshot = undefined;
+          domHealthTracker.clearMissingResponse();
+          await diagnostics.capture(page, "overthinking-response-regenerated");
+          continue;
+        }
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;

@@ -227,11 +227,18 @@ export async function selectChatGptEffortTick(
   if (targetIndex < 0 || targetValue > state.max) {
     throw new Error(`ChatGPT effort target ${targetValue} is outside its slider range`);
   }
-  const ticks = sliderContainer.locator([
+  let ticks = sliderContainer.locator([
     "[data-locked][data-selected]",
     "[data-model-picker-power-slider] [data-selected]",
   ].join(", "));
-  if (await ticks.count() !== state.max - state.min + 1) {
+  const expected = state.max - state.min + 1;
+  if (await ticks.count() !== expected && expected === CHATGPT_EFFORT_SLIDER_MAX_OPTIONS) {
+    // Current Pro accounts expose the complete five-position semantic range while
+    // omitting data-locked from unlocked leaf ticks. Keep this fallback restricted
+    // to that authoritative full range so a Plus upsell cannot become selectable.
+    ticks = sliderContainer.locator("[data-selected]:not(:has([data-selected]))");
+  }
+  if (await ticks.count() !== expected) {
     throw new Error("ChatGPT effort ticks do not match its semantic slider range");
   }
   const target = ticks.nth(targetIndex);
@@ -248,17 +255,29 @@ export async function readChatGptEffortAvailability(
 ): Promise<boolean[]> {
   // Plus exposes a fourth ARIA position for a locked Pro upsell. Only the ticks
   // carry both attributes; the slider root also has data-locked and is not a choice.
-  const locks = await sliderContainer.evaluate(container => {
+  const availability = await sliderContainer.evaluate(container => {
     const power = container.hasAttribute("data-model-picker-power-slider")
       && Boolean(container.querySelector('[data-orientation="horizontal"][aria-disabled="false"]'));
-    return Array.from(container.querySelectorAll("[data-selected]"), tick =>
-      tick.getAttribute("data-locked") ?? (power ? "false" : null));
+    const menuOwned = ["menu", "group"].includes(container.getAttribute("role") ?? "")
+      || container.getAttribute("data-testid") === "composer-intelligence-picker-content";
+    return {
+      trustedOwner: power || menuOwned,
+      locks: Array.from(container.querySelectorAll("[data-selected]:not(:has([data-selected]))"), tick =>
+        tick.getAttribute("data-locked") ?? (power ? "false" : null)),
+    };
   });
-  if (locks.length !== state.max - state.min + 1
-    || locks.some(lock => lock !== "true" && lock !== "false")) {
+  const expected = state.max - state.min + 1;
+  // The current Pro picker proves all five choices through the semantic ARIA range,
+  // but no longer repeats data-locked="false" on each unlocked leaf. Missing lock
+  // metadata remains invalid for shorter ranges, where the last row may be an upsell.
+  const normalized = expected === CHATGPT_EFFORT_SLIDER_MAX_OPTIONS && availability.trustedOwner
+    ? availability.locks.map(lock => lock ?? "false")
+    : availability.locks;
+  if (normalized.length !== expected
+    || normalized.some(lock => lock !== "true" && lock !== "false")) {
     throw new Error("ChatGPT effort availability could not be verified from its slider ticks");
   }
-  return locks.map(lock => lock === "false");
+  return normalized.map(lock => lock === "false");
 }
 
 async function anyVisible(locator: Locator): Promise<boolean> {

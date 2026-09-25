@@ -915,6 +915,14 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
+/** Retry the current bound response once without abandoning its retained conversation. */
+export async function retryChatGptTerminalError(scope: ChatGptTextScope): Promise<boolean> {
+  const retry = scope.getByTestId("regenerate-thread-error-button").last();
+  if (!await retry.isVisible().catch(() => false)) return false;
+  await retry.press("Enter", { timeout: 5_000 });
+  return true;
+}
+
 export async function resolveChatGptToolConfirmation(
   page: Page,
   appName: string,
@@ -4031,6 +4039,7 @@ export class ChatGptBrowserWorker {
     );
     const responseDomCache: ChatGptResponseDomCache = {};
     let responseTurn = initialResponseTurn;
+    let automaticResponseRetries = 0;
     for (;;) {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       if (abortSignal?.aborted) {
@@ -4042,6 +4051,13 @@ export class ChatGptBrowserWorker {
         throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
       }
       await throwIfChatGptSessionFailureAlert(page);
+      if (automaticResponseRetries < 1 && await retryChatGptTerminalError(responseTurn.locator)) {
+        automaticResponseRetries += 1;
+        responseDomCache.key = undefined;
+        responseDomCache.snapshot = undefined;
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 500));
+        continue;
+      }
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
@@ -5753,6 +5769,7 @@ export class ChatGptBrowserWorker {
       let internalObservationFaults = 0;
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
+      let automaticResponseRetries = 0;
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -5774,6 +5791,14 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
+        if (automaticResponseRetries < 1 && await retryChatGptTerminalError(responseTurn.locator)) {
+          automaticResponseRetries += 1;
+          responseDomCache.key = undefined;
+          responseDomCache.snapshot = undefined;
+          await diagnostics.capture(page, "response-error-auto-retried");
+          await new Promise(resolveSleep => setTimeout(resolveSleep, 500));
+          continue;
+        }
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(

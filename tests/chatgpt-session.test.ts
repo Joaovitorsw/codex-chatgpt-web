@@ -270,7 +270,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; loseSelectionOnClose?: boolean; compactLabel?: boolean; power?: boolean; disabled?: string } = {}) {
+function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; loseSelectionOnClose?: boolean; compactLabel?: boolean; power?: boolean; menuOwned?: boolean; disabled?: string } = {}) {
   let value = 0;
   let opened = true;
   const clicks: number[] = [];
@@ -304,7 +304,7 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
       // ticks have data-selected. Its fourth position is a locked Pro upsell.
       const locks = options.locks ?? Array.from({ length: Number(options.max ?? "4") + 1 }, () => "false");
       const attribute = options.power ? "data-model-picker-power-slider" : "data-model-reasoning-effort-slider";
-      const document = createDocument(`<div ${attribute}>
+      const document = createDocument(`<div ${attribute}${options.menuOwned ? ' role="menu"' : ""}>
         <span data-locked="false" data-orientation="horizontal" aria-disabled="${options.disabled ?? "false"}"><span>${locks.map((lock, index) =>
           `<span data-selected="${index <= value}"${lock === null ? "" : ` data-locked="${lock}"`}></span>`).join("")}
         </span></span></div>`);
@@ -386,6 +386,12 @@ test("capabilities exclude the observed locked Plus upsell and reject unknown lo
     await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "3", locks }).page as never))
       .rejects.toThrow("availability");
   }
+});
+
+test("the complete Pro range accepts unlocked leaf ticks without redundant lock metadata", async () => {
+  const fixture = reasoningPicker({ max: "4", locks: [null, null, null, null, null], menuOwned: true });
+  await expect(detectChatGptAccountCapabilities(fixture.page as never))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
 });
 
 test("power picker omission of lock attributes requires its enabled structural owner and complete ticks", async () => {

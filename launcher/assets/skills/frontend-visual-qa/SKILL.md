@@ -15,7 +15,7 @@ Make the interface feel deliberately designed without imposing a generic visual 
 4. Run fast source-level checks before opening a visual surface.
 5. Use one focused rendered check after meaningful code changes, then fix only defects supported by that evidence.
 
-Do not use Windows window management for this workflow. If visual evidence is necessary, use the existing browser page or its DevTools only to confirm concrete risks such as clipping, overflow, broken sizing, or responsive layout. Do not reopen, resize, or refocus the same surface without a concrete reason.
+Choose visual tools in this order: source and automated checks; the existing browser page or DevTools; window management or desktop screenshots only as a last resort when no cheaper method can expose the necessary screen state. Use visual evidence only for concrete risks such as clipping, overflow, broken sizing, or responsive layout. Avoid repeated captures, reopening, resizing, or refocusing unless each action answers a distinct unresolved question.
 
 ## Inspect efficiently
 
@@ -42,7 +42,8 @@ Do not use Windows window management for this workflow. If visual evidence is ne
 ## Verify quickly without looping
 
 - Use the cheapest reliable validation for the change. A focused component check is enough when the edit does not require a full application tour.
-- Use the browser or DevTools primarily to check that the changed element is visible, not clipped, not overflowing, and behaves at the relevant breakpoint. Do not tour unrelated pages or states.
+- Prefer DOM inspection, computed styles, element bounds, and the existing browser viewport to full-screen capture. Use the browser or DevTools primarily to check that the changed element is visible, not clipped, not overflowing, and behaves at the relevant breakpoint. Do not tour unrelated pages or states.
+- Use window management or a desktop screenshot only when browser/DevTools access is unavailable or cannot reveal the required visual state. Capture the smallest useful scope once rather than collecting a sequence of broad screenshots.
 - Perform one visual pass by default. Allow a second pass only when the first reveals a concrete defect that was then changed in source. Stop after that unless the user explicitly requested a visual audit.
 - Never repeat identical inspection or UI actions hoping for a different result. If the visual surface is unavailable or unstable, rely on source/build checks and state the remaining uncertainty.
 - Run the relevant build, type checks, tests, or lint checks in proportion to the change.

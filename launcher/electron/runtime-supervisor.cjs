@@ -261,6 +261,10 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
     && typeof config.experimentalBiggerContext !== "boolean") {
     throw new Error("Runtime configuration has an invalid experimentalBiggerContext");
   }
+  if (config.experimentalContextAttachments !== undefined
+    && typeof config.experimentalContextAttachments !== "boolean") {
+    throw new Error("Runtime configuration has an invalid experimentalContextAttachments");
+  }
   if (config.experimentalFreshConversationPerTurn !== undefined
     && typeof config.experimentalFreshConversationPerTurn !== "boolean") {
     throw new Error("Runtime configuration has an invalid experimentalFreshConversationPerTurn");

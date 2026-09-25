@@ -5,6 +5,8 @@ import { estimateTokens } from "../../lib/token-estimate";
 export interface ChatGptSkillFile {
   name: string;
   text: string;
+  /** Context uploaded as a document, not text pasted into the visible composer message. */
+  contextTransport?: true;
 }
 
 /** Only callers holding Codex's selected-skill metadata may use this transport. */
@@ -37,6 +39,7 @@ export function validateSkillFiles(value: unknown): asserts value is ChatGptSkil
   const names = new Set<string>();
   for (const file of value) {
     if (!file || typeof file.name !== "string" || typeof file.text !== "string"
+      || (file.contextTransport !== undefined && file.contextTransport !== true)
       || !/^[\p{L}\p{N}_-]{1,64}--[a-f0-9]{16}\.txt$/u.test(file.name)
       || file.text.length === 0 || Buffer.byteLength(file.text, "utf8") > 20_000_000
       || names.has(file.name)) throw new Error("Invalid or duplicate skill attachment");

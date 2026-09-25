@@ -30,14 +30,12 @@ test("manual prompt handoff keeps ordinary turns at one minute and compaction at
   assert.equal(MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS, 120_000);
 });
 
-test("Electron and Bun agree on the exact launcher idle surface", () => {
+test("Electron and Bun share the launcher idle surface", () => {
   const clientSource = fs.readFileSync(
     resolve(__dirname, "../../src/launcher-browser-host.ts"),
     "utf8",
   );
-  assert.ok(clientSource.includes(
-    `export const LAUNCHER_BROWSER_IDLE_URL = ${JSON.stringify(IDLE_BROWSER_URL)};`,
-  ));
+  assert.ok(clientSource.includes(JSON.stringify(IDLE_BROWSER_URL)));
 });
 
 test("descriptor publishes native surface identities without inspecting renderers or Zero Risk tabs", () => {
@@ -972,6 +970,30 @@ test("concurrent embedded login requests share one authentication operation", as
   assert.equal(inspections, 1);
 });
 
+test("a failed post-login inspection does not keep the browser smoke test locked", async () => {
+  const warnings = [];
+  const fixture = {
+    state: { authenticated: false },
+    authNavigationError: null,
+    loginOperation: null,
+    show() {},
+    snapshot() { return { authenticated: false }; },
+    logger: { info() {}, warn: (_event, detail) => warnings.push(detail.message) },
+    view: { webContents: {
+      getURL: () => "https://chatgpt.com/?temporary-chat=true",
+      loadURL: async () => {},
+    } },
+    probeAuthentication: async () => {},
+    waitForAuthenticated: async () => ({ authenticated: true }),
+    runSessionInspection: async () => { throw new Error("new chat surface is settling"); },
+    activateHomeSurface() {},
+    withManualOperation: async (_name, action) => await action(),
+  };
+
+  assert.deepEqual(await BrowserHost.prototype.openLogin.call(fixture), { authenticated: true });
+  assert.deepEqual(warnings, ["new chat surface is settling"]);
+});
+
 test("explicit login waits for an in-flight saved-session refresh before taking browser ownership", async () => {
   const calls = [];
   let finishRefresh;
@@ -1475,6 +1497,7 @@ test("launcher delegates every ChatGPT model and turn operation to the shared br
     getConnectorName: () => "Codex Native2",
     logger: { info: (...args) => calls.push(["log", ...args]) },
     show: () => calls.push(["show"]),
+    hide: () => calls.push(["hide"]),
     waitForSurfaceReady: async () => calls.push(["ready"]),
     setState: patch => calls.push(["state", patch]),
     runBrowserHelperOperation: async options => {
@@ -2078,6 +2101,39 @@ test("selected home surface remains represented while task tabs are retained", (
   assert.equal(snapshot.tabs[0].active, true);
 });
 
+test("selected home surface still reports a background browser turn as active", () => {
+  const { webContents } = createContents();
+  const taskTab = {
+    id: "tab-running",
+    traceId: "trace_running",
+    status: "running",
+    message: "ChatGPT is working",
+  };
+  const fixture = {
+    selectedTabId: "home",
+    turnTabs: new Map([[taskTab.id, taskTab]]),
+    state: {
+      title: "ChatGPT",
+      status: "ready",
+      message: "No active task",
+      loading: false,
+      visible: false,
+      surfaceActive: true,
+    },
+    visible: false,
+    surfaceActive: true,
+    activeView: () => ({ webContents }),
+    selectedTurnTab: () => null,
+    tabSnapshot: (tab) => ({ id: tab.id, traceId: tab.traceId, status: tab.status, active: false }),
+  };
+
+  const snapshot = BrowserHost.prototype.snapshot.call(fixture);
+
+  assert.equal(snapshot.status, "running");
+  assert.equal(snapshot.message, "ChatGPT is working in the background");
+  assert.equal(snapshot.tabs.find(tab => tab.id === taskTab.id)?.status, "running");
+});
+
 test("selecting a task tab shows and focuses its owned Playwright surface", () => {
   const visibility = [];
   const focused = [];
@@ -2335,6 +2391,54 @@ test("a retained conversation is not reused for a different connector identity",
   assert.equal(retained.status, "ready");
 });
 
+test("a retained conversation is restored from durable state after launcher restart", async () => {
+  const conversationKey = "9".repeat(64);
+  const restoredUrl = "https://chatgpt.com/c/restored-after-restart";
+  const calls = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
+    manualOperation: null,
+    selectedTabId: "home",
+    retainedConversationStore: {
+      get: (key, connectorIdentity) => {
+        calls.push(["get", key, connectorIdentity]);
+        return { url: restoredUrl, connectorIdentity, updatedAt: new Date().toISOString() };
+      },
+    },
+    async createTurnTab(traceId, helperPid, key, connectorIdentity, signal, initialUrl) {
+      calls.push(["create", traceId, helperPid, key, connectorIdentity, initialUrl]);
+      const tab = { id: "restored", surfaceId: "surface", traceId, helperPid, conversationKey: key,
+        connectorIdentity, connectorBound: false, status: "running", view: { webContents: { isDestroyed: () => false } } };
+      this.turnTabs.set(tab.id, tab);
+      return tab;
+    },
+    show() {},
+    syncViewVisibility() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    writeDescriptor() {},
+    logger: { info: (event) => calls.push([event]) },
+  });
+
+  const lease = await BrowserHost.prototype.beginTurn.call(
+    fixture,
+    "trace_restored",
+    false,
+    321,
+    conversationKey,
+    "Codex Native2",
+    true,
+  );
+
+  assert.deepEqual(lease, { surfaceId: "surface", tabId: "restored", reused: true, connectorBound: true });
+  assert.equal(fixture.turnTabs.get("restored").connectorBound, true);
+  assert.deepEqual(calls[0], ["get", conversationKey, "Codex Native2"]);
+  assert.equal(calls[1].at(-1), restoredUrl);
+  assert.deepEqual(calls.at(-1), ["browser.tab_restored"]);
+});
+
 test("an Automatic turn never reuses a retained Zero Risk conversation", async () => {
   const conversationKey = "m".repeat(64);
   const retained = {
@@ -2549,6 +2653,74 @@ test("ending one browser turn does not stop another running tab", async () => {
   assert.equal(fixture.activeTraceId, active.traceId);
 });
 
+test("retaining a completed selected tab reveals the other running turn", async () => {
+  const completed = {
+    id: "tab-completed",
+    traceId: "trace_completed",
+    conversationKey: "a".repeat(64),
+    connectorIdentity: "Codex Native2",
+    helperPid: 901,
+    status: "running",
+    loading: true,
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  const running = {
+    id: "tab-still-running",
+    traceId: "trace_still_running",
+    helperPid: 902,
+    status: "running",
+    loading: true,
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  let synchronized = 0;
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[completed.id, completed], [running.id, running]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
+    selectedTabId: completed.id,
+    visible: false,
+    surfaceActive: false,
+    syncViewVisibility() { synchronized += 1; },
+    writeDescriptor() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    hide: () => assert.fail("a retained completion must not hide a concurrent running turn"),
+    logger: { info() {} },
+  });
+
+  await BrowserHost.prototype.endTurn.call(
+    fixture,
+    completed.traceId,
+    completed.helperPid,
+    "completed",
+    true,
+    undefined,
+    true,
+    true,
+  );
+
+  assert.equal(completed.status, "ready");
+  assert.equal(running.status, "running");
+  assert.equal(fixture.selectedTabId, running.id);
+  assert.equal(fixture.activeTraceId, running.traceId);
+  assert.equal(synchronized > 0, true);
+});
+
+test("image generation refuses to submit from Temporary Chat", () => {
+  const source = fs.readFileSync(resolve(__dirname, "../electron/browser-host.cjs"), "utf8");
+  const generation = source.slice(
+    source.indexOf("async generateImageAsset"),
+    source.indexOf("createManualTurnTab", source.indexOf("async generateImageAsset")),
+  );
+  assert.match(generation, /turn off temporary chat/);
+  assert.match(generation, /temporary-chat/);
+  assert.match(generation, /could not leave Temporary Chat/);
+  assert.ok(
+    generation.indexOf("could not leave Temporary Chat") < generation.indexOf("contents.insertText"),
+    "saved-chat validation must finish before the image prompt is inserted",
+  );
+});
+
 test("a completed keyed turn is retained for thirty minutes and preserves its acknowledgement", async () => {
   const throttling = [];
   const tab = {
@@ -2595,6 +2767,8 @@ test("a completed keyed turn is retained for thirty minutes and preserves its ac
   assert.equal(tab.status, "ready");
   assert.equal(tab.connectorBound, true);
   assert.equal(Number.isFinite(tab.lastHeartbeatAt), true);
+  assert.equal(Number.isFinite(tab.finalizingUntil), true);
+  assert.ok(tab.finalizingUntil > tab.lastHeartbeatAt);
   assert.deepEqual(throttling, [true]);
 
   const retainedAt = tab.lastHeartbeatAt;

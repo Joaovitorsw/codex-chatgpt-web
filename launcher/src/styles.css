@@ -278,11 +278,11 @@ code {
 .sidebar-brand-row {
   display: flex;
   width: 100%;
-  min-height: 44px;
+  min-height: 38px;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 6px 8px;
+  gap: 10px;
+  padding: 4px 7px;
   color: var(--color-text-primary);
 }
 
@@ -302,7 +302,7 @@ code {
 .sidebar-brand-identity strong {
   overflow: hidden;
   color: var(--color-text-primary);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -366,13 +366,13 @@ code {
   width: 100%;
   height: var(--height-row);
   align-items: center;
-  gap: 9px;
-  padding: 0 9px;
+  gap: 8px;
+  padding: 0 8px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   text-align: left;
   transition:
     color var(--duration-micro) ease,
@@ -842,29 +842,29 @@ code {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 36px;
+  padding: 28px;
   background: rgb(24 24 24 / 86%);
   color: var(--color-text-primary);
   text-align: center;
 }
 
 .browser-empty .brand-mark {
-  margin-bottom: 22px;
+  margin-bottom: 16px;
   color: var(--color-icon-tertiary);
 }
 
 .browser-empty h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 500;
   letter-spacing: -0.012em;
 }
 
 .browser-empty p {
-  max-width: 430px;
-  margin: 10px 0 22px;
+  max-width: 390px;
+  margin: 8px 0 18px;
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -886,7 +886,7 @@ code {
 }
 
 .content-scroll {
-  width: min(var(--content-width), calc(100% - 64px));
+  width: min(var(--content-width), calc(100% - 48px));
   height: 100%;
   margin: 0 auto;
   overflow-x: hidden;
@@ -921,7 +921,7 @@ code {
 }
 
 .content-scroll.is-narrow {
-  width: min(var(--settings-width), calc(100% - 64px));
+  width: min(var(--settings-width), calc(100% - 48px));
 }
 
 .content-scroll.is-fit {
@@ -966,7 +966,7 @@ code {
 }
 
 .surface-header {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .surface-header > span {
@@ -990,7 +990,7 @@ code {
   max-width: 580px;
   margin: 10px 0 0;
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -1913,6 +1913,33 @@ code {
 
 .setting-row > div {
   padding: 12px 0;
+}
+
+.pending-setting-control {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pending-setting-cancel {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.pending-setting-cancel:hover {
+  color: var(--color-text-primary);
+  text-decoration: underline;
+}
+
+.pending-setting-cancel:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .language-menu {

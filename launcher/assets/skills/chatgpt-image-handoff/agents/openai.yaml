@@ -1,0 +1,7 @@
+interface:
+  display_name: "Gerar imagem em conversa auxiliar"
+  short_description: "Gera assets e devolve arquivos à tarefa original"
+  brand_color: "#D94841"
+  default_prompt: "Use $chatgpt-image-handoff para gerar o asset em uma conversa auxiliar e continuar a tarefa com o arquivo salvo."
+policy:
+  allow_implicit_invocation: true

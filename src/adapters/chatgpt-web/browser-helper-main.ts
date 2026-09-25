@@ -7,7 +7,7 @@ import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adap
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
-import { isChatGptWebMultipartPartCount, type CompiledChatGptWebPrompt } from "./prompt";
+import { isChatGptWebMultipartPartCount, validateChatGptInputFiles, type CompiledChatGptWebPrompt } from "./prompt";
 import { ChatGptMirroredTurnProgress } from "./turn-progress";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
 
@@ -160,7 +160,15 @@ async function run(message: RunMessage): Promise<void> {
   if (!/^[A-Za-z0-9_-]{6,128}$/.test(message.id) || message.id !== message.turn.traceId) {
     throw new Error("Browser helper turn identity is invalid");
   }
-  if (abortControllers.has(message.id)) throw new Error(`Browser helper turn already exists: ${message.id}`);
+  if (abortControllers.has(message.id)) {
+    // A reconnect can replay the same logical run after the daemon has lost its local pending
+    // promise while the helper is still finishing that run. The trace id is the idempotency key:
+    // keep the authoritative in-flight execution and let its existing event/result frames satisfy
+    // the replacement waiter. Starting a second browser run would duplicate tools and rejecting the
+    // replay used to strand an otherwise healthy turn with "turn already exists".
+    diagnostic(`[chatgpt-web] browser helper adopted replayed turn ${message.id}`);
+    return;
+  }
   if (message.turn.resumeAvailable !== undefined && typeof message.turn.resumeAvailable !== "boolean") {
     throw new Error("Browser helper resume availability is invalid");
   }
@@ -411,7 +419,10 @@ input.on("line", line => {
       abortControllers.get(message.id)?.abort();
       return;
     }
-    try { validateSkillFiles(prepared.skillFiles); }
+    try {
+      validateSkillFiles(prepared.skillFiles);
+      validateChatGptInputFiles(prepared.inputFiles);
+    }
     catch (error) {
       writeProtocol({ type: "error", id: message.id, message: error instanceof Error ? error.message : String(error) });
       abortControllers.get(message.id)?.abort();

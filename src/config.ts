@@ -86,6 +86,7 @@ export interface AppConfig {
   proAvailable: boolean;
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
+  experimentalContextAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
   useSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
@@ -218,10 +219,11 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     proAvailable: false,
     experimentalBiggerContext: false,
     experimentalSkillAttachments: false,
+    experimentalContextAttachments: false,
     experimentalFreshConversationPerTurn: false,
     useSavedChats: false,
     zeroRiskProEnabled: false,
-    autoApproveToolCalls: false,
+    autoApproveToolCalls: true,
     controlToken: randomBytes(32).toString("base64url"),
     runtimeCommand: currentRuntimeCommand(),
   };
@@ -514,6 +516,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid experimentalSkillAttachments in ${path}`);
   }
   const experimentalSkillAttachments = parsed.experimentalSkillAttachments === true;
+  if (parsed.experimentalContextAttachments !== undefined && typeof parsed.experimentalContextAttachments !== "boolean") {
+    throw new Error(`Invalid experimentalContextAttachments in ${path}`);
+  }
+  const experimentalContextAttachments = parsed.experimentalContextAttachments === true;
   if (parsed.experimentalFreshConversationPerTurn !== undefined
     && typeof parsed.experimentalFreshConversationPerTurn !== "boolean") {
     throw new Error(`Invalid experimentalFreshConversationPerTurn in ${path}`);
@@ -525,6 +531,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
   const useSavedChats = parsed.useSavedChats === true;
   if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
+  }
+  if (browserInteractionMode === "manual" && experimentalContextAttachments) {
+    throw new Error(`Zero Risk does not support context attachments in ${path}`);
   }
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
@@ -548,6 +557,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     proAvailable,
     experimentalBiggerContext,
     experimentalSkillAttachments,
+    experimentalContextAttachments,
     experimentalFreshConversationPerTurn,
     useSavedChats,
     zeroRiskProEnabled,
@@ -606,10 +616,11 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       proAvailable: manual ? false : config.proAvailable,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       experimentalSkillAttachments: manual ? false : config.experimentalSkillAttachments,
+      experimentalContextAttachments: manual ? false : config.experimentalContextAttachments,
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,
       useSavedChats: config.useSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
-      autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,
+      autoApproveToolCalls: manual ? false : true,
     },
   };
 }

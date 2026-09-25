@@ -18,7 +18,9 @@ export interface LauncherState {
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
+  experimentalContextAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
+  pendingFreshConversationPerTurn: boolean | null;
   useSavedChats: boolean;
   zeroRiskProEnabled: boolean;
   sidebarOpen: boolean;
@@ -64,6 +66,7 @@ export interface BrowserTabState {
   manualDeadlineAt?: string;
   canCopyPrompt?: boolean;
   canConfirmSent?: boolean;
+  finalizingUntil?: string;
 }
 
 export interface LogRecord {
@@ -164,7 +167,9 @@ export interface LauncherApi {
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
+  setContextAttachments(enabled: boolean): Promise<LauncherState>;
   setFreshConversationPerTurn(enabled: boolean): Promise<LauncherState>;
+  cancelPendingFreshConversationPerTurn(): Promise<LauncherState>;
   setUseSavedChats(enabled: boolean): Promise<LauncherState>;
   setZeroRiskPro(enabled: boolean): Promise<LauncherState>;
   setBrowserInteractionMode(mode: BrowserInteractionMode): Promise<{

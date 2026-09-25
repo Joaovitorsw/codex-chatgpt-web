@@ -11,6 +11,7 @@ function releaseRetainedConversation(host, conversationKey) {
       reason: "retained_conversation_superseded",
     });
   }
+  host.retainedConversationStore?.delete(conversationKey);
   return retained.length;
 }
 

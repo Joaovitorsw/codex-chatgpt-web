@@ -400,6 +400,7 @@ export function createLauncherDevAdapter(
       lunaCheckpointStatePath: join(runtimeStateRoot, "luna-checkpoints.json"),
       turnTimeoutMs: 60 * 60_000,
       experimentalSkillAttachments: config.experimentalSkillAttachments,
+      experimentalContextAttachments: config.experimentalContextAttachments,
       experimentalFreshConversationPerTurn: config.experimentalFreshConversationPerTurn,
       useSavedChats: config.useSavedChats,
       ...(config.experimentalBiggerContext

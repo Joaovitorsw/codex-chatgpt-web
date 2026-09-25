@@ -17,7 +17,9 @@ const DEFAULT_STATE = Object.freeze({
   browserInteractionMode: "automatic",
   experimentalBiggerContext: false,
   experimentalSkillAttachments: false,
+  experimentalContextAttachments: false,
   experimentalFreshConversationPerTurn: false,
+  pendingFreshConversationPerTurn: null,
   useSavedChats: false,
   zeroRiskProEnabled: false,
   browserSmokePassed: false,
@@ -51,6 +53,7 @@ function readState(filePath) {
       "showBrowserDuringTurns",
       "experimentalBiggerContext",
       "experimentalSkillAttachments",
+      "experimentalContextAttachments",
       "experimentalFreshConversationPerTurn",
       "useSavedChats",
       "zeroRiskProEnabled",
@@ -61,6 +64,10 @@ function readState(filePath) {
     }
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
+    }
+    if (state.pendingFreshConversationPerTurn !== null
+      && typeof state.pendingFreshConversationPerTurn !== "boolean") {
+      state.pendingFreshConversationPerTurn = DEFAULT_STATE.pendingFreshConversationPerTurn;
     }
     if (state.coreSetupComplete !== true) {
       if (state.onboardingComplete !== true) state.browserInteractionMode = "automatic";

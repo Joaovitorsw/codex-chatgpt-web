@@ -21,6 +21,40 @@ turndown.addRule("removeSvg", {
   filter: node => node.nodeName === "SVG",
   replacement: () => "",
 });
+turndown.addRule("chatGptCodeBlock", {
+  filter: node => node.nodeName === "DIV"
+    && (node as HTMLElement).getAttribute("data-markdown-copy") === "code-block",
+  replacement: (_content, node) => {
+    const wrapper = node as HTMLElement;
+    const code = wrapper.querySelector("code");
+    if (!code) return "";
+    const lineWrapper = code.children.length === 1 ? code.firstElementChild : null;
+    const lineElements = lineWrapper ? Array.from(lineWrapper.children) as HTMLElement[] : [];
+    const separators = lineWrapper
+      ? Array.from(lineWrapper.childNodes).filter(child => child.nodeType === 3)
+      : [];
+    // Current ChatGPT plain-text cards wrap every visual line in a sibling span. Turndown's
+    // whitespace normalization collapses the newline-only text nodes before a custom rule runs,
+    // so reconstruct those lines structurally instead of trusting the flattened textContent.
+    const structurallyLineWrapped = lineElements.length > 1
+      && separators.length >= lineElements.length - 1
+      && separators.every(separator => !(separator.textContent ?? "").trim());
+    const value = (structurallyLineWrapped
+      ? lineElements.map(line => line.textContent ?? "").join("\n")
+      : code.textContent ?? "").replace(/^\n|\n$/g, "");
+    const header = wrapper.querySelector<HTMLElement>('[data-markdown-copy="exclude"]')
+      ?.textContent?.replace(/\s+/g, " ").trim().toLowerCase() ?? "";
+    const language = header === "plain text" || header === "plaintext" || header === "text"
+      ? "text"
+      : header === "javascript" || header === "js" ? "javascript"
+        : header === "typescript" || header === "ts" ? "typescript"
+          : header === "powershell" || header === "shell" || header === "bash" ? header
+            : "";
+    const longestFence = Math.max(0, ...[...value.matchAll(/`+/g)].map(match => match[0].length));
+    const fence = "`".repeat(Math.max(3, longestFence + 1));
+    return `\n\n${fence}${language}\n${value}\n${fence}\n\n`;
+  },
+});
 turndown.addRule("preserveCodexPlanBlockTags", {
   filter: "p",
   replacement: content => {
@@ -192,8 +226,8 @@ export class ChatGptMarkdownConsistencyError extends Error {
  * not a safe commit boundary. It can also virtualize an already-rendered prefix, so later DOM
  * snapshots are partial observations rather than the response ledger. The browser supplies source
  * ranges for semantic blocks and marks a block streamable only after a following block exists.
- * Once committed, a missing prefix is harmless; changing text at a committed source range remains
- * an explicit protocol error because Responses deltas cannot be retracted.
+ * Once committed, the emitted ledger is immutable. Missing prefixes and later semantic rewrites of
+ * already-emitted blocks are ignored because Responses deltas cannot retract bytes already sent.
  */
 export class ChatGptMarkdownBuffer {
   private readonly candidates = new Map<string, ChatGptMarkdownCandidate>();
@@ -202,6 +236,7 @@ export class ChatGptMarkdownBuffer {
   private markdown = "";
   private lastGroup: string | undefined;
   private consistencyError: ChatGptMarkdownConsistencyError | undefined;
+  private prefixRecoveryMarkdown: string | undefined;
 
   constructor(
     private readonly transform: (markdown: string) => string = markdown => markdown,
@@ -215,9 +250,22 @@ export class ChatGptMarkdownBuffer {
   observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
     const reconciled = this.reconcile(segments);
     if (reconciled instanceof ChatGptMarkdownConsistencyError) {
+      // A renderer/HMR remount can replace several semantic DOM blocks with one consolidated
+      // block while preserving the exact Markdown already delivered to Codex. Responses deltas
+      // are append-only, so accept only the provably safe case where the rebuilt snapshot starts
+      // byte-for-byte with the committed ledger; the remaining suffix can be emitted at finish.
+      const rebuilt = this.renderSnapshot(segments);
+      if (rebuilt.startsWith(this.markdown)) {
+        this.prefixRecoveryMarkdown = rebuilt;
+        this.consistencyError = undefined;
+        this.candidates.clear();
+        this.latest = [];
+        return "";
+      }
       this.consistencyError = reconciled;
       return "";
     }
+    this.prefixRecoveryMarkdown = undefined;
     this.consistencyError = undefined;
     this.latest = reconciled.map(segment => ({ ...segment }));
 
@@ -267,6 +315,14 @@ export class ChatGptMarkdownBuffer {
 
   finish(): { markdown: string; delta: string } {
     if (this.consistencyError) throw this.consistencyError;
+    if (this.prefixRecoveryMarkdown !== undefined) {
+      const delta = this.prefixRecoveryMarkdown.slice(this.markdown.length);
+      this.markdown = this.prefixRecoveryMarkdown;
+      this.prefixRecoveryMarkdown = undefined;
+      this.candidates.clear();
+      this.latest = [];
+      return { markdown: this.markdown, delta };
+    }
     let delta = "";
     for (const segment of this.latest) {
       delta += this.commit(segment);
@@ -307,19 +363,14 @@ export class ChatGptMarkdownBuffer {
       const committedIndex = this.committedIndex(segment);
       if (committedIndex !== undefined) {
         const committed = this.committed[committedIndex]!;
-        if (sawPending || committedIndex < highestCommittedIndex || committed.text !== segment.text) {
+        if (sawPending || committedIndex < highestCommittedIndex) {
           return this.changedCommittedBlockError(
-            sawPending || committedIndex < highestCommittedIndex ? "block_order_changed" : "text_changed",
+            "block_order_changed",
             segment,
             committed,
           );
         }
         highestCommittedIndex = committedIndex;
-        // Link destinations are answer content even when textContent remains identical.
-        // Cosmetic DOM/formatting hydration still does not invalidate a committed paragraph.
-        if (JSON.stringify(committed.linkTargets ?? []) !== JSON.stringify(segment.linkTargets ?? [])) {
-          return this.changedCommittedBlockError("link_target_changed", segment, committed);
-        }
         continue;
       }
 
@@ -375,6 +426,21 @@ export class ChatGptMarkdownBuffer {
     )).length === 1;
   }
 
+  private renderSnapshot(segments: ChatGptMarkdownSegment[]): string {
+    let markdown = "";
+    let lastGroup: string | undefined;
+    for (const segment of segments) {
+      const block = this.transform(chatGptHtmlToMarkdown(segment.html));
+      if (!block) continue;
+      const separator = markdown
+        ? segment.group !== undefined && segment.group === lastGroup ? "\n" : "\n\n"
+        : "";
+      markdown += `${separator}${block}`;
+      lastGroup = segment.group;
+    }
+    return markdown;
+  }
+
   private candidateId(segment: ChatGptMarkdownSegment): string {
     return segment.sourceStart !== undefined
       ? `source:${segment.sourceStart}:${segment.tag ?? ""}`
@@ -421,5 +487,34 @@ export class ChatGptMarkdownBuffer {
     this.markdown += delta;
     this.lastGroup = segment.group;
     return delta;
+  }
+}
+
+/**
+ * Chooses when answer Markdown becomes append-only.
+ *
+ * Tool-capable ChatGPT turns reuse mutable planning roots for their final response, so their
+ * authoritative answer must be captured only after the broker completion fence settles. Live
+ * progress is delivered independently as commentary by the browser worker. Read-only turns may
+ * continue streaming stable Markdown blocks immediately.
+ */
+export class ChatGptAnswerMarkdownDelivery {
+  private readonly buffer: ChatGptMarkdownBuffer;
+
+  constructor(
+    private readonly deferUntilCompletion: boolean,
+    transform?: (markdown: string) => string,
+    stabilityMs?: number,
+  ) {
+    this.buffer = new ChatGptMarkdownBuffer(transform, stabilityMs);
+  }
+
+  observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
+    return this.deferUntilCompletion ? "" : this.buffer.observe(segments, now);
+  }
+
+  finish(finalSegments: ChatGptMarkdownSegment[], now = Date.now()): { markdown: string; delta: string } {
+    if (this.deferUntilCompletion) this.buffer.observe(finalSegments, now);
+    return this.buffer.finish();
   }
 }

@@ -24,6 +24,7 @@ import {
   preflightCodexIntegration,
   readCodexSubagentProtocol,
 } from "./codex-integration";
+import { installBundledCodexSkills } from "./codex-skills";
 import { inspectLauncherBrowserHost } from "./launcher-browser-host";
 import {
   DEV_CONFIG_PURPOSE,
@@ -54,6 +55,7 @@ export interface SetupOptions {
   autoApproveToolCalls?: boolean;
   experimentalBiggerContext?: boolean;
   experimentalSkillAttachments?: boolean;
+  experimentalContextAttachments?: boolean;
   experimentalFreshConversationPerTurn?: boolean;
   useSavedChats?: boolean;
   zeroRiskProEnabled?: boolean;
@@ -278,6 +280,9 @@ function baseConfig(
   if (options.autoApproveToolCalls !== undefined) config.autoApproveToolCalls = options.autoApproveToolCalls;
   if (options.experimentalSkillAttachments !== undefined) {
     config.experimentalSkillAttachments = options.experimentalSkillAttachments;
+  }
+  if (options.experimentalContextAttachments !== undefined) {
+    config.experimentalContextAttachments = options.experimentalContextAttachments;
   }
   if (options.useSavedChats !== undefined) config.useSavedChats = options.useSavedChats;
   if (options.experimentalFreshConversationPerTurn !== undefined) {
@@ -638,6 +643,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   installCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
   });
+  installBundledCodexSkills();
 
   return {
     mode: config.mode,

@@ -34,11 +34,16 @@ test("renderer zoom scales the shell without moving or zooming the native ChatGP
   assert.match(appSource, /api!\.zoomBrowser\(action\)/);
 });
 
-test("closing the launcher follows the persisted background-runtime preference", () => {
+test("closing the launcher never shuts down active browser infrastructure", () => {
   assert.match(
     electronMain,
-    /if \(stateStore\.read\(\)\.keepRunningOnClose && tray\) window\.hide\(\);\s*else void requestQuit\(\);/,
+    /if \(tray\) window\.hide\(\);\s*else window\.minimize\(\);/,
   );
+  const closeHandler = electronMain.slice(
+    electronMain.indexOf('window.on("close"'),
+    electronMain.indexOf('window.on("closed"'),
+  );
+  assert.doesNotMatch(closeHandler, /requestQuit/);
   assert.match(appSource, /setPreference\("keepRunningOnClose", checked\)/);
 });
 
@@ -124,7 +129,7 @@ test("startup failure stays visible on another launch and Retry exits the failed
   const window = { isDestroyed: () => false, isMinimized: () => false,
     show: () => { visible = true; }, focus() {}, };
   const sandbox = {
-    mainWindow: window, mainWindowReadyToShow: false, mainWindowShowRequested: false,
+    mainWindow: window, startupWindow: null, mainWindowReadyToShow: false, mainWindowShowRequested: false,
     startupFailed: false, quitting: false,
     browserHost: { destroy: () => events.push("destroy") },
     browserControl: { close: async () => events.push("control closed") },
@@ -167,17 +172,18 @@ test("startup failure stays visible on another launch and Retry exits the failed
   assert.deepEqual(sandbox.process.env, { CODEX_HOME: "original-codex-home" });
 });
 
-test("packaged runtime is verified before launcher browser surfaces can bind ports", () => {
+test("startup feedback appears before runtime verification while browser surfaces remain gated", () => {
   const start = electronMain.indexOf("async function start()");
+  const startupFeedback = electronMain.indexOf("startupWindow = await createStartupWindow()", start);
   const runtimeValidation = electronMain.indexOf("installedRuntimeRoot = runtimeRootProvider();", start);
-  const cdpPortAllocation = electronMain.indexOf("cdpPort = await findFreePort();", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
   const controlServerStart = electronMain.indexOf("browserControl = await new BrowserControlServer({", start);
   const browserReady = electronMain.indexOf("await browserHost.ready();", start);
 
   assert.ok(runtimeValidation > start, "startup must eagerly verify the packaged runtime");
+  assert.ok(startupFeedback > start && startupFeedback < runtimeValidation,
+    "the user must see responsive startup feedback before runtime verification can take time");
   for (const [surface, position] of [
-    ["CDP port allocation", cdpPortAllocation],
     ["launcher window", windowCreation],
     ["browser control server", controlServerStart],
     ["embedded browser", browserReady],

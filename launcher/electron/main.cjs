@@ -22,6 +22,7 @@ const { BrowserControlServer } = require("./control-server.cjs");
 const { LimitsController } = require("./limits-controller.cjs");
 const { SOURCE_URL: LIMITS_SOURCE_URL } = require("./limits-store.cjs");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
+const { createRetainedConversationStore } = require("./retained-conversation-store.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
@@ -63,6 +64,7 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL, LIMITS_SOURCE_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
+const BUNDLED_SKILLS_PATH = path.join(__dirname, "..", "assets", "skills");
 
 const launchEnvironment = {
   CODEX_CHATGPT_WEB_HOME: process.env.CODEX_CHATGPT_WEB_HOME,
@@ -84,6 +86,7 @@ installProcessDiagnosticGuards({
 });
 
 let mainWindow = null;
+let startupWindow = null;
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let startupFailed = false;
@@ -102,6 +105,25 @@ let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
 let limitsController = null;
+let pendingPreferenceTimer = null;
+let applyingPendingFreshConversation = false;
+
+function installBundledSkills() {
+  if (!fs.existsSync(BUNDLED_SKILLS_PATH)) return [];
+  const installed = [];
+  const skillsRoot = path.join(LAUNCHER_PROFILE.codexHome, "skills");
+  fs.mkdirSync(skillsRoot, { recursive: true });
+  for (const entry of fs.readdirSync(BUNDLED_SKILLS_PATH, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^[a-z0-9-]{1,63}$/.test(entry.name)) continue;
+    const source = path.join(BUNDLED_SKILLS_PATH, entry.name);
+    const destination = path.join(skillsRoot, entry.name);
+    const marker = path.join(destination, ".managed-by-codex-web-gpt");
+    if (fs.existsSync(destination) && !fs.existsSync(marker)) continue;
+    fs.cpSync(source, destination, { recursive: true, force: true, errorOnExist: false });
+    installed.push(entry.name);
+  }
+  return installed;
+}
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -333,11 +355,52 @@ function showMainWindow() {
   // has produced anything to show. Preserve that foreground request until the real window reaches
   // `ready-to-show`; otherwise the already-running `--hidden` instance silently consumes it.
   mainWindowShowRequested = true;
+  if (startupWindow && !startupWindow.isDestroyed()) {
+    if (startupWindow.isMinimized()) startupWindow.restore();
+    startupWindow.show();
+    startupWindow.focus();
+    return;
+  }
   if ((!mainWindowReadyToShow && !startupFailed) || !mainWindow || mainWindow.isDestroyed()) return;
   mainWindowShowRequested = false;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+async function createStartupWindow() {
+  const portuguese = /^pt(?:-|$)/i.test(app.getLocale());
+  const title = portuguese ? "Abrindo Codex Web GPT" : "Opening Codex Web GPT";
+  const detail = portuguese
+    ? "Preparando o ambiente local. A interface principal abrirá automaticamente."
+    : "Preparing the local environment. The main interface will open automatically.";
+  const window = new BrowserWindow({
+    width: 560,
+    height: 330,
+    minWidth: 560,
+    minHeight: 330,
+    show: false,
+    frame: false,
+    resizable: false,
+    center: true,
+    backgroundColor: "#101010",
+    icon: APP_ICON_PATH,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  const html = `<!doctype html><html lang="${portuguese ? "pt-BR" : "en"}"><meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+    <title>${title}</title><style>
+    *{box-sizing:border-box}html,body{height:100%;margin:0;background:#101010;color:#f4f4f4;font:14px system-ui,-apple-system,'Segoe UI',sans-serif}
+    body{display:grid;place-items:center}.card{width:420px}.mark{width:34px;height:34px;border:1px solid #4b4b4b;border-radius:10px;display:grid;place-items:center;margin-bottom:24px;color:#ddd;font-weight:650}
+    h1{margin:0 0 9px;font-size:20px;letter-spacing:-.02em}p{margin:0;color:#9c9c9c;line-height:1.55}.track{height:2px;margin-top:28px;overflow:hidden;background:#2a2a2a;border-radius:2px}.track:after{display:block;width:36%;height:100%;background:#ededed;content:'';animation:move 1.15s ease-in-out infinite alternate}@keyframes move{to{transform:translateX(178%)}}
+    </style><body><main class="card"><div class="mark">C</div><h1>${title}</h1><p>${detail}</p><div class="track"></div></main></body></html>`;
+  await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  window.show();
+  return window;
 }
 
 async function openWebUrl(url) {
@@ -433,8 +496,11 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   window.on("close", (event) => {
     if (quitting) return;
     event.preventDefault();
-    if (stateStore.read().keepRunningOnClose && tray) window.hide();
-    else void requestQuit();
+    // The title-bar X is a presentation action, never a runtime shutdown. Stopping the
+    // Electron browser host disconnects every active Codex Web stream, even when the daemon
+    // itself is healthy. Explicit Quit in the tray remains the only destructive exit path.
+    if (tray) window.hide();
+    else window.minimize();
   });
   window.on("closed", () => {
     if (mainWindow === window) {
@@ -450,6 +516,8 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     if (windowState.maximized) window.maximize();
     if (windowState.fullscreen) window.setFullScreen(true);
     if (mainWindow === window) mainWindowReadyToShow = true;
+    if (startupWindow && !startupWindow.isDestroyed()) startupWindow.destroy();
+    startupWindow = null;
     if (mainWindowShowRequested) showMainWindow();
     else if (!startHidden) window.show();
   });
@@ -512,6 +580,62 @@ function syncFreshConversationPreference(stateStore, config) {
   const state = stateStore.update({ experimentalFreshConversationPerTurn: enabled, useSavedChats });
   send("launcher:state-changed", state);
   return state;
+}
+
+function queueablePreferenceError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /atomic idleness could not be proven|active HTTP turn|active browser turn|another launcher operation is active/i.test(message);
+}
+
+function queueFreshConversationPreference(stateStore, enabled) {
+  const state = stateStore.update({ pendingFreshConversationPerTurn: enabled === true });
+  send("launcher:state-changed", state);
+  return state;
+}
+
+async function applyPendingFreshConversationPreference({ logger, stateStore }) {
+  if (applyingPendingFreshConversation || !runtimeHost || !browserHost) return;
+  const desired = stateStore.read().pendingFreshConversationPerTurn;
+  if (typeof desired !== "boolean") return;
+  if (runtimeHost.currentOperation() || browserHost.activeTraceId || browserHost.currentOperation()) return;
+  applyingPendingFreshConversation = true;
+  try {
+    await runtimeHost.setFreshConversationPerTurn(desired);
+    const synced = syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config);
+    const state = stateStore.update({
+      ...synced,
+      pendingFreshConversationPerTurn: null,
+    });
+    logger.info("launcher.pending_preference_applied", {
+      preference: "fresh-conversation-per-turn",
+      enabled: desired,
+    });
+    send("launcher:state-changed", state);
+  } catch (error) {
+    if (queueablePreferenceError(error)) {
+      logger.debug("launcher.pending_preference_waiting", {
+        preference: "fresh-conversation-per-turn",
+      });
+      return;
+    }
+    const state = stateStore.update({ pendingFreshConversationPerTurn: null });
+    send("launcher:state-changed", state);
+    publishOperation({
+      name: "pending-preference",
+      status: "failed",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    applyingPendingFreshConversation = false;
+  }
+}
+
+function startPendingPreferenceMonitor({ logger, stateStore }) {
+  if (pendingPreferenceTimer) clearInterval(pendingPreferenceTimer);
+  const check = () => { void applyPendingFreshConversationPreference({ logger, stateStore }); };
+  pendingPreferenceTimer = setInterval(check, 1_000);
+  pendingPreferenceTimer.unref?.();
+  check();
 }
 
 function registerIpc({ logger, stateStore }) {
@@ -755,6 +879,7 @@ function registerIpc({ logger, stateStore }) {
       browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
+      experimentalContextAttachments: false,
       experimentalFreshConversationPerTurn: false,
       useSavedChats: false,
       zeroRiskProEnabled: false,
@@ -765,7 +890,8 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:setup-core", async () => {
     const setupState = stateStore.read();
-    if (setupState.browserInteractionMode === "automatic") {
+    const smokeProved = smokePassedThisSession || smokePassedForCurrentVersion(setupState);
+    if (setupState.browserInteractionMode === "automatic" && !smokeProved) {
       const browser = await browserHost.probeAuthentication();
       if (!browser.authenticated) {
         if (browser.status === "error") throw new Error(browser.message);
@@ -778,7 +904,7 @@ function registerIpc({ logger, stateStore }) {
     }
     if (setupState.browserInteractionMode === "automatic"
       && !setupState.coreSetupComplete
-      && !(smokePassedThisSession || smokePassedForCurrentVersion(setupState))) {
+      && !smokeProved) {
       throw new Error(
         IS_DEV_PROFILE
           ? "Run the browser smoke test before configuring the DEV harness"
@@ -791,6 +917,9 @@ function registerIpc({ logger, stateStore }) {
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
+      experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
+      experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
+      experimentalContextAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalContextAttachments === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
       ...(result.mode === "full" ? {
@@ -812,6 +941,10 @@ function registerIpc({ logger, stateStore }) {
     return { ok: true, stdout: result.stdout, restartRequired: !IS_DEV_PROFILE };
   });
   handle("launcher:setup-mcp", async (_event, input) => {
+    // The Setup surface may be opened while a slow smoke test is still waiting for
+    // ChatGPT's complete answer. Queue MCP setup behind that owned browser operation
+    // instead of racing session inspection against it and returning "already busy".
+    await browserHost.waitForManualOperationIdle();
     const currentMode = stateStore.read().browserInteractionMode;
     const interactionMode = input?.interactionMode === undefined
       ? currentMode
@@ -832,7 +965,7 @@ function registerIpc({ logger, stateStore }) {
       : await runSetup();
     const state = stateStore.update({
       browserInteractionMode: interactionMode,
-      ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
+      ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false, experimentalContextAttachments: false } : {}),
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
@@ -883,11 +1016,37 @@ function registerIpc({ logger, stateStore }) {
     return state;
   });
   handle("launcher:fresh-conversation-per-turn", async (_event, enabled) => {
+    const desired = enabled === true;
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
-      throw new Error("Finish or cancel active ChatGPT turns before changing browser conversation retention");
+      return queueFreshConversationPreference(stateStore, desired);
     }
-    await runtimeHost.setFreshConversationPerTurn(enabled);
-    return syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config);
+    try {
+      await runtimeHost.setFreshConversationPerTurn(desired);
+    } catch (error) {
+      if (queueablePreferenceError(error)) return queueFreshConversationPreference(stateStore, desired);
+      throw error;
+    }
+    const synced = syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config);
+    const state = stateStore.update({ ...synced, pendingFreshConversationPerTurn: null });
+    send("launcher:state-changed", state);
+    return state;
+  });
+  handle("launcher:context-attachments", async (_event, enabled) => {
+    if (browserHost.activeTraceId || browserHost.currentOperation()) {
+      throw new Error("Finish or cancel active ChatGPT turns before changing large context attachments");
+    }
+    const result = await runtimeHost.setContextAttachments(enabled === true);
+    const state = stateStore.update({ experimentalContextAttachments: result.enabled });
+    send("launcher:state-changed", state);
+    return state;
+  });
+  handle("launcher:fresh-conversation-per-turn-cancel", () => {
+    if (applyingPendingFreshConversation) {
+      throw new Error("The queued preference is already being applied");
+    }
+    const state = stateStore.update({ pendingFreshConversationPerTurn: null });
+    send("launcher:state-changed", state);
+    return state;
   });
   handle("launcher:use-saved-chats", async (_event, enabled) => {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
@@ -940,7 +1099,7 @@ function registerIpc({ logger, stateStore }) {
       browserInteractionMode: mode,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
-      ...(mode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
+      ...(mode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false, experimentalContextAttachments: false } : {}),
       ...(result.configured ? {
         codexCatalogVerified: IS_DEV_PROFILE,
         codexRestartRequired: !IS_DEV_PROFILE,
@@ -1008,6 +1167,8 @@ async function requestQuit() {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    if (pendingPreferenceTimer) clearInterval(pendingPreferenceTimer);
+    pendingPreferenceTimer = null;
     stopCatalogVerificationMonitor();
     quitting = true;
     await browserHost?.persistSession();
@@ -1036,6 +1197,27 @@ async function start() {
   app.on("second-instance", () => showMainWindow());
   app.on("activate", () => showMainWindow());
 
+  cdpPort = await findFreePort();
+  if (process.platform === "linux") {
+    app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
+  }
+  // Automatic ChatGPT turns must continue rendering while the launcher is minimized or covered.
+  // Chromium otherwise pauses background timers and occluded renderers on Windows, which makes a
+  // healthy web response look stalled to the bridge and can close the Codex stream prematurely.
+  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+  app.commandLine.appendSwitch("disable-renderer-backgrounding");
+  app.commandLine.appendSwitch("disable-background-timer-throttling");
+  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
+  app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
+
+  await app.whenReady();
+
+  const bundledSkills = installBundledSkills();
+
+  const startupStartedAt = Date.now();
+  const preflightHidden = process.argv.includes("--hidden");
+  if (!preflightHidden) startupWindow = await createStartupWindow();
+  const runtimeValidationStartedAt = Date.now();
   await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
@@ -1053,17 +1235,12 @@ async function start() {
     return installedRuntimeRoot;
   };
   installedRuntimeRoot = runtimeRootProvider();
-
-  cdpPort = await findFreePort();
-  if (process.platform === "linux") {
-    app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
-  }
-  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
-  app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
-
-  await app.whenReady();
+  const runtimeValidationMs = Date.now() - runtimeValidationStartedAt;
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const retainedConversationStore = createRetainedConversationStore(
+    path.join(app.getPath("userData"), "retained-conversations.json"),
+  );
   limitsController = new LimitsController(path.join(app.getPath("userData"), "limits.json"), {
     getInteractionMode: () => stateStore.read().browserInteractionMode,
   });
@@ -1096,8 +1273,17 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  logger.info("launcher.startup_preflight_completed", {
+    runtimeValidationMs,
+    elapsedMs: Date.now() - startupStartedAt,
+    packaged: app.isPackaged,
+    bundledSkills,
+  });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
-  nativeTheme.themeSource = "system";
+  // The launcher UI is intentionally dark.  Keep Chromium on the same scheme from
+  // process start so an OS-light preference cannot flash a white document before the
+  // renderer and ChatGPT styles hydrate.
+  nativeTheme.themeSource = "dark";
   mainWindow = createWindow({
     logger,
     stateStore,
@@ -1153,7 +1339,11 @@ async function start() {
     control: browserControl.descriptor(),
     cancelTurn: IS_DEV_PROFILE ? undefined : (traceId, reason) => runtimeSupervisor.cancelBrowserTurn(traceId, reason),
     getConnectorName: () => runtimeHost.browserConnectorName(),
-    getUseSavedChats: () => runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+    // A fresh launcher has no runtime config until the first setup completes.  Prefer the
+    // user-approved saved-chat fallback during that bootstrap; once a config exists, honor
+    // its explicit saved/temporary choice normally.
+    getUseSavedChats: () => runtimeHost.runtimeConfigSnapshot().config?.useSavedChats !== false,
+    retainedConversationStore,
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
@@ -1164,6 +1354,7 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   await browserHost.ready();
+  startPendingPreferenceMonitor({ logger, stateStore });
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),
@@ -1248,6 +1439,7 @@ async function start() {
       autoStart: false,
       experimentalBiggerContext: config?.experimentalBiggerContext === true,
       experimentalSkillAttachments: config?.experimentalSkillAttachments === true,
+      experimentalContextAttachments: config?.experimentalContextAttachments === true,
       experimentalFreshConversationPerTurn: config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: config?.useSavedChats === true,
       zeroRiskProEnabled: config?.zeroRiskProEnabled === true,
@@ -1277,6 +1469,7 @@ async function start() {
         codexRestartRequired: true,
         experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
         experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
+        experimentalContextAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalContextAttachments === true,
         experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
         useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
         zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
@@ -1302,16 +1495,18 @@ async function start() {
     if (configuredRuntime.configured) {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
       const experimentalSkillAttachments = configuredRuntime.config?.experimentalSkillAttachments === true;
+      const experimentalContextAttachments = configuredRuntime.config?.experimentalContextAttachments === true;
       const experimentalFreshConversationPerTurn = configuredRuntime.config?.experimentalFreshConversationPerTurn === true;
       const useSavedChats = configuredRuntime.config?.useSavedChats === true;
       const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
       if (saved.experimentalSkillAttachments !== experimentalSkillAttachments
+        || saved.experimentalContextAttachments !== experimentalContextAttachments
         || saved.experimentalFreshConversationPerTurn !== experimentalFreshConversationPerTurn
         || saved.useSavedChats !== useSavedChats
         || saved.experimentalBiggerContext !== enabled
         || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments, experimentalFreshConversationPerTurn, useSavedChats, zeroRiskProEnabled });
+        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments, experimentalContextAttachments, experimentalFreshConversationPerTurn, useSavedChats, zeroRiskProEnabled });
         send("launcher:state-changed", state);
       }
     }
@@ -1328,6 +1523,7 @@ async function start() {
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
         experimentalSkillAttachments: config.experimentalSkillAttachments === true,
+        experimentalContextAttachments: config.experimentalContextAttachments === true,
         experimentalFreshConversationPerTurn: config.experimentalFreshConversationPerTurn === true,
         useSavedChats: config.useSavedChats === true,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,

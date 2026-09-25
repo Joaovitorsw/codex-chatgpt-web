@@ -235,6 +235,19 @@ describe("fixed ChatGPT Web model routes", () => {
     });
   });
 
+  test("file-backed context advertises enough outer room for old Codex threads", () => {
+    expect(resolveChatGptWebContextLimits("gpt-5.6-sol", "low", {
+      solAvailable: true,
+      proAvailable: false,
+      experimentalBiggerContext: true,
+      experimentalContextAttachments: true,
+    })).toEqual({
+      contextWindow: 1_050_000,
+      effectiveContextWindowPercent: 90,
+      autoCompactTokenLimit: 950_000,
+    });
+  });
+
   test("binds the selected model authoritatively and ignores a conflicting request effort", () => {
     const request = parsed("chatgpt-web/high", "low");
     const rawSnapshot = structuredClone(request._rawBody);
@@ -320,7 +333,7 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(proRequest.options.reasoning).toBe("low");
   });
 
-  test("new families honor effort, gate availability, and separate pinned retained conversations", () => {
+  test("new families honor effort, gate availability, and reuse the task's retained conversation", () => {
     const config = { ...defaultConfig("full"), extraHighAvailable: true, proAvailable: true };
     for (const effort of ["medium", "high", "xhigh"] as const) {
       const request = parsed("chatgpt-web/gpt-5.6-sol", effort);
@@ -349,6 +362,21 @@ describe("fixed ChatGPT Web model routes", () => {
       expect(chatGptConversationKey({ ...request, _compactionRequest: true }, "provider")).toBe(key);
       expect(() => routeChatGptWebRequest(parsed(model, "max"), { ...config, proAvailable: false })).toThrow("not available");
     }
-    expect(new Set(keys).size).toBe(3);
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  test("changing effort does not allocate another retained conversation for the same task", () => {
+    const config = { ...defaultConfig("full"), extraHighAvailable: true, proAvailable: true };
+    const keys = (["medium", "high", "xhigh"] as const).map(effort => {
+      const request = parsed("chatgpt-web/gpt-5.6-sol", effort);
+      request._rawBody = {
+        client_metadata: {
+          "x-codex-turn-metadata": JSON.stringify({ thread_id: "stable-saved-task" }),
+        },
+      };
+      routeChatGptWebRequest(request, config);
+      return chatGptConversationKey(request, "provider");
+    });
+    expect(new Set(keys).size).toBe(1);
   });
 });

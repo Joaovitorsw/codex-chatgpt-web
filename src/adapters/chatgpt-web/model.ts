@@ -11,6 +11,7 @@ export interface ChatGptWebCapabilities {
   solAvailable: boolean;
   extraHighAvailable: boolean;
   proAvailable: boolean;
+  experimentalContextAttachments?: boolean;
 }
 
 export interface ChatGptWebModelMode {

@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import {
+  CHATGPT_APP_MENU_CONTROL_SELECTOR,
+  CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
+  CHATGPT_COMPLETION_ACTION_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
+  CHATGPT_EFFORT_SLIDER_SELECTOR,
+  CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   assertNewChatPage,
   chatGptNewChatUrl,
@@ -48,6 +53,25 @@ test("composer and effort selectors exclude unrelated editable fields and menu b
   const matches = (selector: string) => Array.from(document.querySelectorAll(selector)).map(element => element.id);
   expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-testid", "prompt-textarea", "composer-lexical"]);
   expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model"]);
+});
+
+test("browser controls and turn ownership remain locale agnostic on the pt-BR surface", () => {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const document = createDocument(`<body><form>
+    <button id="effort-pt" aria-haspopup="menu" aria-label="Selecionar modelo do ChatGPT"></button>
+    <button id="apps-pt" aria-label="Adicionar arquivos e mais"></button>
+    <button id="complete-pt" aria-label="Copiar mensagem"></button>
+    <button id="feedback-pt" data-testid="good-response-turn-action-button"></button>
+    <section data-chatgpt-search-unit-key="assistant"><div data-conversation-role="assistant"></div></section>
+    <section data-chatgpt-search-unit-key="user"><div data-user-message-bubble></div></section>
+  </form></body>`);
+  expect(document.querySelector(CHATGPT_EFFORT_CONTROL_SELECTOR)?.id).toBe("effort-pt");
+  expect(document.querySelector(CHATGPT_APP_MENU_CONTROL_SELECTOR)?.id).toBe("apps-pt");
+  expect(document.querySelector(CHATGPT_COMPLETION_ACTION_SELECTOR)?.id).toBe("complete-pt");
+  expect(Array.from(document.querySelectorAll(CHATGPT_COMPLETION_ACTION_SELECTOR)).map(element => element.id))
+    .toContain("feedback-pt");
+  expect(CHATGPT_ASSISTANT_TURN_SELECTOR).toContain('[data-conversation-role="assistant"]');
+  expect(CHATGPT_USER_TURN_SELECTOR).toContain("[data-user-message-bubble]");
 });
 
 test("effort activation binds the owned menu after the control opens", async () => {
@@ -235,10 +259,10 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; loseSelectionOnClose?: boolean } = {}) {
+function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; loseSelectionOnClose?: boolean; compactLabel?: boolean } = {}) {
   let value = 0;
   let opened = true;
-  const keys: string[] = [];
+  const clicks: number[] = [];
   const hidden = {
     filter() { return this; }, last() { return this; }, getByText() { return this; },
     isVisible: async () => false,
@@ -246,17 +270,23 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
       signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
     }),
   };
-  const sliderControl = { press: async (key: string) => { keys.push(key); value += key === "ArrowRight" ? 1 : -1; } };
   const slider = {
     isVisible: async () => false, // Live DOM: aria-hidden=true, zero-width semantic span.
     filter: () => { throw new Error("Semantic input must not be visibility-filtered"); },
     waitFor: async ({ state }: { state: string }) => { expect(state).toBe("attached"); },
     getAttribute: async (name: string) => ({ "aria-valuemin": "0", "aria-valuemax": options.max ?? "4", "aria-valuenow": String(value), "aria-hidden": "true" })[name] ?? null,
-    locator: () => sliderControl,
+    locator: () => { throw new Error("Effort selection must not use the semantic slider as a keyboard control"); },
+  };
+  const ticks = {
+    count: async () => Number(options.max ?? "4") + 1,
+    nth: (index: number) => ({
+      getAttribute: async (name: string) => name === "data-locked" ? (options.locks?.[index] ?? "false") : null,
+      click: async () => { clicks.push(index); value = index; },
+    }),
   };
   const container = {
     filter() { return this; }, last() { return this; },
-    locator: () => slider,
+    locator: (selector: string) => selector === "[role=\"slider\"]" ? slider : ticks,
     evaluate: async (read: (element: Element) => unknown) => {
       const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
       // Captured Plus DOM: the slider root and each tick have data-locked, but only
@@ -280,7 +310,8 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
     count: async () => 1, waitFor: async () => {}, isVisible: async () => true,
     click: async () => { opened = true; },
     innerText: async () => opened ? "Thinking effort" : ["Instant", "Medium", "High", "Extra High", "Pro"][value]!,
-    getAttribute: async (name: string) => name === "aria-expanded" ? String(opened) : null,
+    getAttribute: async (name: string) => name === "aria-expanded" ? String(opened)
+      : name === "aria-label" && options.compactLabel ? "Select ChatGPT model" : null,
   };
   const composer = { filter() { return this; }, last() { return this; }, isEditable: async () => true, locator: () => ({ locator: () => control }) };
   const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
@@ -298,12 +329,23 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
       if (options.loseSelectionOnClose) value = 0;
     } },
   };
-  return { page, composer, keys, value: () => value };
+  return { page, composer, clicks, value: () => value };
 }
 
 test.each([0, 50])("capabilities wait for the visible container and read its hidden semantic input (delay=%s)", async delay => {
   const fixture = reasoningPicker({ delay });
   await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+});
+
+test("compact model trigger still discovers the complete Pro effort slider", async () => {
+  const fixture = reasoningPicker({ compactLabel: true });
+  await expect(detectChatGptAccountCapabilities(fixture.page as never))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+});
+
+test("effort discovery accepts the locale-neutral menu-owned ARIA slider variant", () => {
+  expect(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR).toContain('[role="menu"]:has([role="slider"])');
+  expect(CHATGPT_EFFORT_SLIDER_SELECTOR).toContain('[role="menu"] [role="slider"]');
 });
 
 test("an absent effort slider cannot turn three model rows into a saved non-Pro capability", async () => {
@@ -345,10 +387,10 @@ test("stale saved capabilities cannot activate a locked effort; High remains sel
     });
     if (effort === "xhigh") {
       await expect(selection).rejects.toMatchObject({ code: "chatgpt_effort_locked", retryable: false });
-      expect(fixture.keys).toEqual([]);
+      expect(fixture.clicks).toEqual([]);
     } else {
       expect((await selection).selection.label).toBe("High");
-      expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight"]);
+      expect(fixture.clicks).toEqual([2]);
     }
   }
 });
@@ -364,7 +406,7 @@ test("Pro selection verifies the persisted hidden slider through its visible own
     });
     if (loseSelectionOnClose) await expect(selection).rejects.toMatchObject({ retryable: false });
     else expect((await selection).selection.label).toBe("Pro");
-    expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]);
+    expect(fixture.clicks).toEqual([4]);
     expect(fixture.value()).toBe(loseSelectionOnClose ? 0 : 4);
   }
 });

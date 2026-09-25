@@ -25,7 +25,7 @@ type InputBlock =
   | { type: "input_text"; text: string }
   | { type: "text"; text: string }
   | { type: "input_image"; image_url?: string; file_id?: string; detail?: string }
-  | { type: "input_file"; file_id?: string; filename?: string };
+  | { type: "input_file"; file_id?: string; filename?: string; file_data?: string };
 
 function inputContentParts(blocks: unknown[] | string | undefined): string | CodexContentPart[] {
   if (typeof blocks === "string") return blocks;
@@ -45,8 +45,13 @@ function inputContentParts(blocks: unknown[] | string | undefined): string | Cod
         parts.push({ type: "text", text: `[image: ${b.file_id ?? "?"}]` }); // file_id ref → no inline data
       }
     } else if (block.type === "input_file") {
-      const ref = (block as { file_id?: string; filename?: string }).file_id ?? (block as { filename?: string }).filename ?? "?";
-      parts.push({ type: "text", text: `[file: ${ref}]` });
+      const file = block as { file_id?: string; filename?: string; file_data?: string };
+      if (typeof file.file_data === "string" && file.file_data.length > 0) {
+        parts.push({ type: "file", filename: file.filename ?? "attachment.bin", fileData: file.file_data });
+      } else {
+        const ref = file.file_id ?? file.filename ?? "?";
+        parts.push({ type: "text", text: `[file unavailable: ${ref}]` });
+      }
     }
   }
   // Collapse to a plain string only for a single TEXT part; images must stay structured.

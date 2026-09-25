@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code task presentation"
+  short_description: "Formats code progress and delivery in Markdown."
+  default_prompt: "Present this code task with concise progress, portable Markdown, and a verifiable conclusion."

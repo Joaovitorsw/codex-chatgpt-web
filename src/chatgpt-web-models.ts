@@ -137,6 +137,13 @@ export function resolveChatGptWebContextLimits(
     return contextLimits(CHATGPT_WEB_LUNA_CONTEXT_WINDOW, CHATGPT_WEB_LUNA_CONTEXT_WINDOW);
   }
 
+  // File-backed context keeps the canonical history outside the composer. Give Codex enough outer
+  // room to reach the adapter on large, old threads; the adapter then uploads that history and its
+  // own compaction policy remains the authoritative boundary.
+  if (capabilities.experimentalContextAttachments) {
+    return contextLimits(1_050_000, 950_000);
+  }
+
   let limits: ChatGptWebContextLimits;
   if (capabilities.proAvailable) {
     const contextWindow = effort === "low"
@@ -257,6 +264,7 @@ export interface ChatGptWebAccountCapabilities {
   extraHighAvailable?: boolean;
   proAvailable: boolean;
   experimentalBiggerContext?: boolean;
+  experimentalContextAttachments?: boolean;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
 }

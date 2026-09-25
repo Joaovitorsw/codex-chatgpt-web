@@ -22,9 +22,17 @@ export interface ChatGptWebPromptImage {
   detail?: string;
 }
 
+export interface ChatGptWebPromptFile {
+  name: string;
+  mimeType: string;
+  base64: string;
+  sha256: string;
+}
+
 export interface CompiledChatGptWebPrompt {
   text: string;
   images: ChatGptWebPromptImage[];
+  inputFiles?: ChatGptWebPromptFile[];
   skillFiles?: ChatGptSkillFile[];
   /** Transactional transport when Bigger Context is explicitly enabled. */
   multipart?: ChatGptWebMultipartPrompt;
@@ -42,6 +50,136 @@ export interface CompileChatGptWebPromptOptions {
    * reads or mutates ChatGPT's DOM. Completion is accepted only through the bound Zero Risk MCP tools.
    */
   manualControl?: true;
+}
+
+export const CHATGPT_CONTEXT_ATTACHMENT_THRESHOLD_CHARS = 24_000;
+export const CHATGPT_CONTEXT_ATTACHMENT_MAX_BYTES = 19_000_000;
+
+function splitUtf8Text(text: string, maxBytes: number): string[] {
+  const chunks: string[] = [];
+  let start = 0;
+  let end = 0;
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes > 0 && bytes + characterBytes > maxBytes) {
+      chunks.push(text.slice(start, end));
+      start = end;
+      bytes = 0;
+    }
+    end += character.length;
+    bytes += characterBytes;
+  }
+  if (end > start) chunks.push(text.slice(start, end));
+  return chunks;
+}
+
+function compileInputFile(part: Extract<CodexContentPart, { type: "file" }>): ChatGptWebPromptFile {
+  const dataUrl = /^data:([^;,]+)?;base64,([A-Za-z0-9+/]*={0,2})$/s.exec(part.fileData);
+  const base64 = dataUrl?.[2] ?? part.fileData.replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(base64) || base64.length % 4 !== 0) {
+    throw new Error(`Codex input file ${JSON.stringify(part.filename)} does not contain valid base64 data`);
+  }
+  const buffer = Buffer.from(base64, "base64");
+  if (buffer.length === 0 || buffer.length > 20_000_000) {
+    throw new Error(`Codex input file ${JSON.stringify(part.filename)} must be between 1 byte and 20 MB`);
+  }
+  const leaf = part.filename.replace(/\\/g, "/").split("/").at(-1)?.normalize("NFKC") ?? "attachment.bin";
+  const name = leaf.replace(/[\u0000-\u001f<>:"/\\|?*]+/g, "-").slice(0, 180) || "attachment.bin";
+  return {
+    name,
+    mimeType: dataUrl?.[1]?.toLowerCase() || "application/octet-stream",
+    base64,
+    sha256: createHash("sha256").update(buffer).digest("hex"),
+  };
+}
+
+export function validateChatGptInputFiles(value: unknown): asserts value is ChatGptWebPromptFile[] | undefined {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 10) throw new Error("Invalid Codex input file list");
+  const names = new Set<string>();
+  for (const file of value) {
+    if (!file || typeof file.name !== "string" || file.name.length < 1 || file.name.length > 180
+      || typeof file.mimeType !== "string" || file.mimeType.length > 200
+      || typeof file.base64 !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.base64)
+      || file.base64.length % 4 !== 0 || typeof file.sha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(file.sha256) || names.has(file.name)) {
+      throw new Error("Invalid or duplicate Codex input file");
+    }
+    const buffer = Buffer.from(file.base64, "base64");
+    if (buffer.length === 0 || buffer.length > 20_000_000
+      || createHash("sha256").update(buffer).digest("hex") !== file.sha256) {
+      throw new Error("Codex input file content does not match its integrity hash");
+    }
+    names.add(file.name);
+  }
+}
+
+/** Replace a large inline envelope with integrity-checked UTF-8 text attachments. */
+export function largeContextAsAttachment(
+  prompt: CompiledChatGptWebPrompt,
+  enabled: boolean,
+): CompiledChatGptWebPrompt {
+  if (!enabled || prompt.multipart || prompt.text.length < CHATGPT_CONTEXT_ATTACHMENT_THRESHOLD_CHARS) return prompt;
+  let transportPrompt = prompt;
+  let chunks = splitUtf8Text(transportPrompt.text, CHATGPT_CONTEXT_ATTACHMENT_MAX_BYTES);
+  const occupiedSlots = () => transportPrompt.images.length
+    + (transportPrompt.skillFiles?.length ?? 0)
+    + (transportPrompt.inputFiles?.length ?? 0);
+  let slotsNeeded = Math.max(0, chunks.length - (CHATGPT_MAX_INPUT_IMAGES - occupiedSlots()));
+
+  if (slotsNeeded > 0) {
+    let text = transportPrompt.text;
+    const inputFiles = [...(transportPrompt.inputFiles ?? [])];
+    const images = [...transportPrompt.images];
+    // Arrays are collected in chronological order. Remove the oldest user attachments first so
+    // the newest requests retain as much evidence as possible; selected skill files are protected.
+    while (slotsNeeded > 0 && inputFiles.length > 0) {
+      const removed = inputFiles.shift()!;
+      text = text.replaceAll(
+        JSON.stringify({ type: "file_attachment", filename: removed.name }),
+        JSON.stringify({ type: "text", text: `[older file not attached: ${removed.name}]` }),
+      );
+      slotsNeeded -= 1;
+    }
+    while (slotsNeeded > 0 && images.length > 0) {
+      const removed = images.shift()!;
+      const escapedRef = removed.ref.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      text = text.replace(
+        new RegExp(`\\{"type":"image_attachment","attachment_ref":"${escapedRef}"(?:,"detail":"[^"]*")?\\}`, "g"),
+        JSON.stringify({ type: "text", text: "[older image not attached: newer attachments were prioritized]" }),
+      );
+      slotsNeeded -= 1;
+    }
+    transportPrompt = {
+      ...transportPrompt,
+      text,
+      images,
+      ...(inputFiles.length ? { inputFiles } : { inputFiles: undefined }),
+    };
+    chunks = splitUtf8Text(transportPrompt.text, CHATGPT_CONTEXT_ATTACHMENT_MAX_BYTES);
+  }
+
+  const availableSlots = CHATGPT_MAX_INPUT_IMAGES - occupiedSlots();
+  if (chunks.length > availableSlots) return transportPrompt;
+  const files = chunks.map((text, index) => {
+    const digest = createHash("sha256").update(text).digest("hex").slice(0, 16);
+    const part = chunks.length === 1 ? "" : `-part-${String(index + 1).padStart(2, "0")}-of-${String(chunks.length).padStart(2, "0")}`;
+    return { name: `codex-task-context${part}--${digest}.txt`, text, contextTransport: true as const };
+  });
+  if (files.every(file => (prompt.skillFiles ?? []).some(existing => existing.name === file.name))) return prompt;
+  const names = files.map(file => `\`${file.name}\``);
+  return {
+    ...transportPrompt,
+    text: [
+      chunks.length === 1
+        ? `Read the complete attached file ${names[0]} before acting.`
+        : `Read these ${chunks.length} attached context files completely and in order before acting: ${names.join(", ")}.`,
+      "Together they contain the full Codex transport contract and task context; preserve its instruction priority and execute the latest active request.",
+      "Do not summarize or discuss the transport file unless the request explicitly asks you to do so.",
+    ].join("\n"),
+    skillFiles: [...(transportPrompt.skillFiles ?? []), ...files],
+  };
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 6 as const;
@@ -183,6 +321,8 @@ export function chatGptPromptJsonBytes(text: string): number {
 
 const DROPPED_IMAGE_NOTE =
   `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} per message]`;
+const UNREFERENCED_IMAGE_NOTE =
+  "[historical image not reattached: the latest request did not reference it]";
 
 /**
  * A fresh compaction epoch receives the complete canonical context, so every still-relevant image
@@ -196,20 +336,64 @@ interface ImageBudget {
   dropped: number;
 }
 
+function messageImageCount(message: CodexMessage): number {
+  if (message.role === "assistant" || typeof message.content === "string") return 0;
+  return message.content.filter(part => part.type === "image" && !isOnePixelPngDataUrl(part.imageUrl)).length;
+}
+
+function messageText(message: CodexMessage): string {
+  if (message.role !== "user") return "";
+  if (typeof message.content === "string") return message.content;
+  return message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+}
+
+const PRIOR_IMAGE_REFERENCE = /\b(?:image|images|photo|photos|picture|pictures|screenshot|screenshots|attachment|attachments|attached|visual|imagem|imagens|foto|fotos|print|prints|captura|capturas|anexo|anexos|anexada|anexadas)\b|\.(?:png|jpe?g|webp|gif|bmp|avif)\b/i;
+
+/**
+ * Rebuilding a fresh browser conversation must not turn every historical image into a new
+ * attachment. Attach the current human request's images. A text-only follow-up may recover only
+ * the nearest prior image batch, and only when it explicitly refers to visual/attached material.
+ */
+export function relevantImageMessageIndexes(messages: readonly CodexMessage[]): Set<number> {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role === "user" && message.origin !== "codex_skill") {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (latestUserIndex < 0) return new Set();
+  if (messageImageCount(messages[latestUserIndex]!) > 0) return new Set([latestUserIndex]);
+  if (!PRIOR_IMAGE_REFERENCE.test(messageText(messages[latestUserIndex]!))) return new Set();
+  for (let index = latestUserIndex - 1; index >= 0; index -= 1) {
+    if (messageImageCount(messages[index]!) > 0) return new Set([index]);
+  }
+  return new Set();
+}
+
 function inputContent(
   content: string | CodexContentPart[],
   images: ChatGptWebPromptImage[],
+  files: ChatGptWebPromptFile[],
   budget: ImageBudget,
+  attachImages: boolean,
 ): unknown {
   if (typeof content === "string") return content;
   const semantic = content.filter(part =>
     part.type !== "image" || !isOnePixelPngDataUrl(part.imageUrl)
   );
-  if (!semantic.some(part => part.type === "image")) {
+  if (!semantic.some(part => part.type === "image" || part.type === "file")) {
     return semantic.filter(part => part.type === "text").map(part => part.text).join("\n");
   }
   return semantic.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "file") {
+      const file = compileInputFile(part);
+      if (!files.some(candidate => candidate.name === file.name && candidate.sha256 === file.sha256)) files.push(file);
+      return { type: "file_attachment", filename: file.name };
+    }
+    if (!attachImages) return { type: "text", text: UNREFERENCED_IMAGE_NOTE };
     budget.seen += 1;
     if (budget.seen <= budget.dropped) return { type: "text", text: DROPPED_IMAGE_NOTE };
     const ref = `codex-input-image-${images.length + 1}`;
@@ -250,6 +434,20 @@ function plainMessageText(message: CodexMessage): string | undefined {
   return message.content.map(part => part.type === "text" ? part.text : "").join("\n");
 }
 
+/** After native compaction, retain priority-bearing developer records but replace old operational
+ * conversation history with the newest readable checkpoint and its continuation. */
+export function contextAfterLatestCompactionSummary(messages: readonly CodexMessage[]): CodexMessage[] {
+  const checkpointIndex = messages.findLastIndex(message => {
+    const text = plainMessageText(message);
+    return message.role === "user" && typeof text === "string" && isReadableCompactionSummaryText(text);
+  });
+  if (checkpointIndex < 0) return [...messages];
+  return [
+    ...messages.slice(0, checkpointIndex).filter(message => message.role === "developer"),
+    ...messages.slice(checkpointIndex),
+  ];
+}
+
 function startsWithControlBlock(message: CodexMessage, tag: string): boolean {
   return message.role === "developer" && plainMessageText(message)?.trimStart().startsWith(tag) === true;
 }
@@ -288,7 +486,9 @@ export function withoutSupersededModelSwitchContracts(messages: readonly CodexMe
 function messageEnvelope(
   message: CodexMessage,
   images: ChatGptWebPromptImage[],
+  files: ChatGptWebPromptFile[],
   budget: ImageBudget,
+  attachImages: boolean,
 ): Record<string, unknown> {
   if (message.role === "toolResult") {
     return {
@@ -297,7 +497,7 @@ function messageEnvelope(
       tool_name: message.toolName,
       ...(message.toolNamespace ? { tool_namespace: message.toolNamespace } : {}),
       is_error: message.isError,
-      content: inputContent(message.content, images, budget),
+      content: inputContent(message.content, images, files, budget, attachImages),
     };
   }
   if (message.role === "agentMessage") {
@@ -305,7 +505,7 @@ function messageEnvelope(
       role: "agent_message",
       ...(message.author !== undefined ? { author: message.author } : {}),
       ...(message.recipient !== undefined ? { recipient: message.recipient } : {}),
-      content: inputContent(message.content, images, budget),
+      content: inputContent(message.content, images, files, budget, attachImages),
     };
   }
   if (message.role === "assistant") {
@@ -315,7 +515,7 @@ function messageEnvelope(
       content: assistantContent(message.content),
     };
   }
-  return { role: message.role, content: inputContent(message.content, images, budget) };
+  return { role: message.role, content: inputContent(message.content, images, files, budget, attachImages) };
 }
 
 type MultipartContextRecord =
@@ -473,6 +673,9 @@ export function compileChatGptWebPrompt(
     throw new Error("A read-only ChatGPT Web effort must not receive a local-tool capability token");
   }
   const system = parsed.context.systemPrompt ?? [];
+  const advertisedTools = new Set((parsed.context.tools ?? []).map(tool => `${tool.namespace}__${tool.name}`));
+  const canDiscoverTools = [...advertisedTools].some(name => /(?:^|__)tool_search$/i.test(name));
+  const hasImageGenerationTool = [...advertisedTools].some(name => /image.?gen/i.test(name));
   const sharedContract = [
     "Act as the model backend for the Codex task encoded below.",
     multipartEnabled
@@ -512,8 +715,24 @@ export function compileChatGptWebPrompt(
       "Use actual Codex Native results as evidence for local observations and effects.",
       "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
+      "Treat the latest user request as the terminal objective, not as a request for a plan. Preserve that objective across tool calls and intermediate failures, and do not declare completion while required deliverables remain pending.",
+      "Before claiming that a capability is unavailable or asking the user to provide something already likely present in the workspace, inspect the supplied skill catalog and use the best matching installed skill automatically. The user does not need to name a skill explicitly. Follow that skill's bundled scripts and references when applicable, and use workspace search plus the appropriate file/image inspection tools to retrieve project-local inputs yourself.",
+      "For a substantial repository diagnosis or code change, prefer the installed code-work-orchestrator skill when present. Let it select only the relevant niche guidance instead of loading every coding reference; keep tiny obvious edits direct. Apply repository-specific instructions before generic workflow guidance.",
+      "Prefer an applicable installed skill over inventing an ad-hoc substitute such as replacing requested image content with HTML/CSS text. Do not ask the user to reattach a local project file merely because a ChatGPT-native surface cannot see it directly when Codex tools or a selected skill can locate, inspect, transform, or regenerate it.",
+      "If no applicable skill or capability can complete a required deliverable after skill inspection, tool discovery, and one concrete supported attempt, do not silently improvise a materially different result. Ask one concise user-facing question about the available fallback choices, naming the exact blocker and what was already attempted.",
+      ...(canDiscoverTools
+        ? ["If a required capability is not visible as a direct tool, use the advertised tool-discovery capability before saying it is unavailable. A selected skill supplies instructions but does not by itself prove that its execution tool is missing."]
+        : []),
+      ...(hasImageGenerationTool || canDiscoverTools
+        ? ["For a requested batch of generated images or product assets, use the available or discoverable image-generation tool as a sequential integration pipeline. Complete one asset before requesting the next: generate and save one image, verify the local file, immediately update the consuming JS/TS/JSON/CSS/HTML or asset manifest, validate that reference, and send a concise progress update. Never queue several successful image generations for a later bulk code edit; an asset is not complete merely because its PNG exists. Repeat this generate -> integrate -> validate cycle until the requested set is incorporated rather than stopping after a plan or one sample."]
+        : []),
+      "For implementation or file-editing work, begin with one concise user-visible commentary update that states the immediate outcome and first phase before calling a tool. Prefer frequent short, concrete progress updates after every completed vertical slice, meaningful edit batch, or small group of tool calls, so Codex receives continuous evidence of real progress instead of a silent stretch followed by a status dump. Group updates only when correctness genuinely requires an atomic operation.",
+      "Apply substantial code changes through the Codex Native editing tools in small coherent batches when practical—for example one component, module, behavior, or roughly 50 to 200 changed lines at a time—and validate each meaningful batch before continuing. This lets Codex surface file-change and line-count progress incrementally. Do not accumulate a large rewrite in shell-generated content and apply it only at the end when the same result can be safely staged in coherent edits.",
+      "Keep progress commentary outcome-oriented and specific about what is being inspected, changed, or validated. Do not expose private chain-of-thought, repeat generic status words, manufacture filler updates, or split an atomic edit merely to create activity; simple tasks may still use a single edit.",
+      "Format code-task output as portable Markdown rather than imitating ChatGPT UI chrome. Put directory trees, multiline commands, logs, and code in fenced blocks with an appropriate language such as text, powershell, bash, json, or ts; never emit visual toolbar labels such as Plain text or Copy as answer content. Present changed files and validations as concise Markdown lists, preserving meaningful line breaks.",
       "Continue using the available tools until the requested work is complete and verified.",
       "Write the user-facing final answer only after the last required tool result has settled. Do not call another tool after beginning that final answer.",
+      "Always finish with a natural, outcome-first user-facing summary written in completed-action language; never use future-tense intentions, internal action labels, repeated status words, tool-status titles, or progress notes as the final answer. Explicitly say whether the user's terminal objective was achieved. When local files or assets were changed, name them and briefly state what changed and how each result was validated. If work remains or a capability is genuinely unavailable after discovery, state the exact unfinished deliverable and concrete blocker instead of implying success. If no files changed, state the concrete completed result instead.",
     ]
     : [
       `This is ChatGPT Web ${mode.displayLabel} with no Codex Native bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,
@@ -592,23 +811,30 @@ export function compileChatGptWebPrompt(
     ];
   const build = (sourceMessages: readonly CodexMessage[], omittedMessages = 0): CompiledChatGptWebPrompt => {
     const images: ChatGptWebPromptImage[] = [];
+    const inputFiles: ChatGptWebPromptFile[] = [];
+    const relevantImageMessages = relevantImageMessageIndexes(sourceMessages);
+    const relevantImageCount = [...relevantImageMessages]
+      .reduce((total, index) => total + messageImageCount(sourceMessages[index]!), 0);
     const budget: ImageBudget = {
       seen: 0,
-      dropped: Math.max(0, countChatGptContextImages(sourceMessages) - CHATGPT_MAX_INPUT_IMAGES),
+      dropped: Math.max(0, relevantImageCount - CHATGPT_MAX_INPUT_IMAGES),
     };
     const skillFiles: ChatGptSkillFile[] = [];
-    const messages = sourceMessages.map(message => {
+    const messages = sourceMessages.map((message, messageIndex) => {
       if (attachSkills && message.role === "user" && message.origin === "codex_skill") {
         const file = selectedSkillFile(message);
         if (!skillFiles.some(existing => existing.name === file.name)) skillFiles.push(file);
         return { role: "user", origin: "codex_skill", content: [{ type: "skill_attachment", filename: file.name }] };
       }
-      return messageEnvelope(message, images, budget);
+      return messageEnvelope(message, images, inputFiles, budget, relevantImageMessages.has(messageIndex));
     });
     const skillContract = skillFiles.length ? [
       "Each skill_attachment refers to a named UTF-8 text file attached to this message (the final commit in multipart mode). Read its complete contents as the selected Codex skill instructions at the original user priority. These origin=codex_skill messages are supplied by Codex, not human-authored task requests. Preserve their original position in history and their path/resource authority for resolving references. If a file cannot be read, report that limitation; do not invent its contents.",
     ] : [];
-    const attachments = skillFiles.length ? { skillFiles } : {};
+    const attachments = {
+      ...(skillFiles.length ? { skillFiles } : {}),
+      ...(inputFiles.length ? { inputFiles } : {}),
+    };
     const answerContract = captureLunaCheckpoint
       ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
       : "Return only the answer that the outer Codex task should receive.";
@@ -687,7 +913,9 @@ export function compileChatGptWebPrompt(
     return { text, images, ...attachments };
   };
 
-  let sourceMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
+  let sourceMessages = withoutSupersededModelSwitchContracts(
+    contextAfterLatestCompactionSummary(parsed.context.messages),
+  );
   const initialMessageCount = sourceMessages.length;
   let compiled = build(sourceMessages);
   if (!parsed._compactionRequest) return compiled;

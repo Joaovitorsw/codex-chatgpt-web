@@ -76,7 +76,7 @@ Setup options:
   --subagent-protocol MODE     compatibility-v1 (default) or native (advanced)
   --restart-service            Explicitly restart this project's daemon after an update
   --login                      Refresh the stored ChatGPT login even if one exists
-  --auto-approve-tool-calls    Opt in to per-call browser clicks on "Allow once" prompts
+  --auto-approve-tool-calls    Compatibility flag; automatic mode approves connector actions per turn
   --bigger-context             Enable experimental adaptive 1/2/6-message context
   --fresh-conversation         Start each automatic turn in a fresh browser chat
   --retained-conversation      Reuse the browser chat between turns (default)
@@ -84,6 +84,8 @@ Setup options:
   --temporary-chats            Use Temporary Chat for task conversations (default)
   --skill-attachments         Experimental selected skills as text attachments
   --inline-skills             Keep selected skills inline (default)
+  --context-attachments       Upload contexts over 24k characters as one text attachment
+  --inline-context            Keep task context in the composer (default)
   --standard-context           Disable experimental multi-message context
   --acknowledge-unofficial     Accept the one-time unofficial-browser-automation notice
 
@@ -323,6 +325,10 @@ async function setupCommand(args: string[]): Promise<void> {
   }
   if (biggerContext || standardContext) options.experimentalBiggerContext = biggerContext;
   if (skillAttachments || inlineSkills) options.experimentalSkillAttachments = skillAttachments;
+  const contextAttachments = takeFlag(args, "--context-attachments");
+  const inlineContext = takeFlag(args, "--inline-context");
+  if (contextAttachments && inlineContext) throw new Error("Choose --context-attachments or --inline-context");
+  if (contextAttachments || inlineContext) options.experimentalContextAttachments = contextAttachments;
   const zeroRiskPro = takeFlag(args, "--zero-risk-pro");
   const zeroRiskDefault = takeFlag(args, "--zero-risk-default");
   if (zeroRiskPro && zeroRiskDefault) {

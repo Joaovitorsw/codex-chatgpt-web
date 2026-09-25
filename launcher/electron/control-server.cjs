@@ -101,6 +101,7 @@ class BrowserControlServer {
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
+    const isImageGeneration = request.url === "/v1/image/generate";
     const isProxyResolution = request.url === "/v1/network/resolve-proxy";
     const manualAction = new Map([
       ["/v1/manual/start", "start"],
@@ -110,7 +111,7 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isImageGeneration && !isProxyResolution && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -135,6 +136,41 @@ class BrowserControlServer {
       const preferences = this.getPreferences();
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
+      if (isImageGeneration) {
+        if (!body || typeof body !== "object" || !/^[A-Za-z0-9_-]{6,128}$/.test(body.traceId || "")) {
+          throw new Error("image generation traceId is invalid");
+        }
+        if (typeof body.prompt !== "string" || !body.prompt.trim() || body.prompt.length > 20_000) {
+          throw new Error("image generation prompt is invalid");
+        }
+        if (typeof body.outputPath !== "string" || !body.outputPath.trim() || body.outputPath.length > 4_096) {
+          throw new Error("image generation output path is invalid");
+        }
+        const generation = new AbortController();
+        const onClose = () => {
+          if (!response.writableFinished) generation.abort(new Error("Image generation caller disconnected"));
+        };
+        response.once("close", onClose);
+        let generated;
+        try {
+          generated = await host.generateImageAsset({
+            traceId: body.traceId,
+            prompt: body.prompt,
+            outputPath: body.outputPath,
+            signal: generation.signal,
+          });
+        } finally {
+          response.off("close", onClose);
+        }
+        this.logger.info("browser.image_generated", {
+          traceId: body.traceId,
+          width: generated.width,
+          height: generated.height,
+          bytes: generated.bytes,
+        });
+        writeJson(response, 200, { ok: true, ...generated });
+        return;
+      }
       if (isSessionInspect) {
         if (host.browserInteractionMode() === "manual") {
           const error = new Error(

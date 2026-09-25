@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
@@ -23,6 +25,7 @@ const BRIDGE_TOOL_NAMES = new Set([
   "codex_write_stdin",
   "codex_apply_patch",
   "codex_view_image",
+  "codex_generate_image_asset",
   "codex_tool_inventory",
   "codex_tool_call",
   "codex_turn_complete",
@@ -43,6 +46,7 @@ const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly 
 // must settle first so an abandoned native tool call is returned as an MCP error instead of
 // letting the tunnel tear down and poison its long-lived stdio transport.
 export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 90_000;
+const CHATGPT_WEB_IMAGE_GENERATION_TIMEOUT_MS = 330_000;
 
 const ZERO_RISK_MCP_INSTRUCTIONS = [
   "For each pasted Codex Web GPT request, begin with codex_turn_start using the request_id in its request block.",
@@ -103,6 +107,64 @@ function result(value: Record<string, unknown>, isError = false) {
     structuredContent: value,
     ...(isError ? { isError: true } : {}),
   };
+}
+
+function pathWithin(root: string, candidate: string): boolean {
+  const nested = relative(resolve(root), resolve(candidate));
+  return nested === "" || (!nested.startsWith("..") && !isAbsolute(nested));
+}
+
+function assertImageOutputPath(environment: ChatGptTurnEnvironment, outputPath: string): string {
+  if (!isAbsolute(outputPath) || !/\.png$/i.test(outputPath)) {
+    throw new Error("Image output_path must be an absolute .png path");
+  }
+  if (environment.sandboxPolicy.type === "readOnly") {
+    throw new Error("The current Codex environment is read-only and cannot save generated images");
+  }
+  if (environment.sandboxPolicy.type === "workspaceWrite") {
+    const allowed = [...environment.roots, ...environment.writableRoots];
+    if (!allowed.some(root => pathWithin(root, outputPath))) {
+      throw new Error("Image output_path is outside the current Codex workspace and writable roots");
+    }
+  }
+  return resolve(outputPath);
+}
+
+async function generateImageThroughLauncher(
+  traceId: string,
+  prompt: string,
+  outputPath: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
+  if (!descriptorPath) throw new Error("The launcher browser descriptor is unavailable for image generation");
+  const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8")) as {
+    control?: { endpoint?: string; token?: string };
+  };
+  const endpoint = descriptor.control?.endpoint;
+  const token = descriptor.control?.token;
+  if (!endpoint || !token) throw new Error("The launcher browser descriptor has no authenticated control channel");
+  const timeout = AbortSignal.timeout(CHATGPT_WEB_IMAGE_GENERATION_TIMEOUT_MS);
+  const response = await fetch(`${endpoint}/v1/image/generate`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ traceId, prompt, outputPath }),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(typeof body.error === "string"
+      ? body.error
+      : `Launcher image generation failed with HTTP ${response.status}`);
+  }
+  if (body.ok !== true || body.path !== outputPath || body.mimeType !== "image/png"
+    || !Number.isSafeInteger(body.bytes) || Number(body.bytes) < 1) {
+    throw new Error("Launcher returned invalid image generation evidence");
+  }
+  return body;
 }
 
 function afterSafeStart(contract: ChatGptMcpContract, description: string): string {
@@ -762,6 +824,44 @@ export async function runChatGptMcpServer(options: {
         return tool
           ? invoke(claimed.bindingId, bound, tool, payload, extra.signal)
           : invokeNestedNative(claimed.bindingId, bound, "view_image", false, payload, extra.signal);
+      },
+    ),
+  );
+
+  server.registerTool(
+    "codex_generate_image_asset",
+    {
+      title: "Generate an image in an auxiliary ChatGPT conversation",
+      description: afterSafeStart(contract, "Open an isolated ChatGPT Web image conversation, generate one raster asset, save it as PNG, and return its verified local path. Use one call per distinct asset, then continue the parent task with the returned file."),
+      inputSchema: {
+        ...turnReferenceInput(contract),
+        prompt: z.string().min(1).max(20_000),
+        output_path: z.string().min(1).max(4_096)
+          .describe("Absolute, new .png path inside the active Codex workspace or writable roots."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async (input, extra) => withClaimedTurn(
+      "codex_generate_image_asset",
+      turnReference(contract, input),
+      extra,
+      async claimed => {
+        const outputPath = assertImageOutputPath(claimed.environment, input.output_path);
+        const generated = await generateImageThroughLauncher(
+          `asset_${randomBytes(18).toString("base64url")}`,
+          input.prompt,
+          outputPath,
+          extra.signal,
+        );
+        return result({
+          generated: true,
+          path: generated.path,
+          mime_type: generated.mimeType,
+          width: generated.width,
+          height: generated.height,
+          bytes: generated.bytes,
+          parent_turn_active: true,
+        });
       },
     ),
   );

@@ -44,6 +44,23 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function isAppCreatedTaskBootstrap(parsed: CodexParsedRequest, turnId?: string): boolean {
+  if (!turnId) return false;
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  return input.some(value => {
+    const item = record(value);
+    const provenance = record(item?.internal_chat_message_metadata_passthrough);
+    return item?.type === "function_call_output"
+      && item.name === "create_thread"
+      && item.namespace === "codex_app"
+      && provenance?.turn_id === turnId
+      && typeof item.output === "string"
+      && /^<codex_delegation>[\s\S]*<source_thread_id>[0-9a-f-]+<\/source_thread_id>[\s\S]*<\/codex_delegation>$/i
+        .test(item.output.trim());
+  });
+}
+
 function pathIdentity(value: string): string {
   const normalized = resolve(value);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -164,9 +181,21 @@ export class ChatGptThreadEnvironmentStore {
       const steeringClaim = hasCurrentContext && !currentCompaction
         ? extractChatGptSteeringEnvironmentClaim(parsed) : undefined;
       const calendarDelta = hasCurrentContext && !currentCompaction && hasChatGptCalendarEnvironmentDelta(parsed);
-      if (hasCurrentContext && !currentCompaction && !historicalMessages && !steeringClaim && !calendarDelta) throw error;
+      const appCreatedBootstrap = isAppCreatedTaskBootstrap(parsed, identity.turnId);
+      if (hasCurrentContext && !currentCompaction && !historicalMessages && !steeringClaim
+        && !calendarDelta && !appCreatedBootstrap) throw error;
       const currentClaim = currentCompaction ? extractChatGptContinuationEnvironmentClaim(parsed) : steeringClaim;
-      const rolloutIdentity = lineage ?? extractChatGptRootThreadMetadata(parsed);
+      const rolloutIdentity = lineage
+        ?? extractChatGptRootThreadMetadata(parsed)
+        // App-created tasks can omit every diagnostic classification field while retaining the
+        // native thread/turn IDs. These IDs grant no filesystem authority by themselves: the
+        // resolver still requires the exact current canonical rollout, whose session_meta must
+        // independently prove that the task is a root (a subagent rollout fails that check).
+        ?? (identity.threadId && identity.turnId ? {
+          threadId: identity.threadId,
+          sandboxType: "canonical-rollout" as const,
+          workspaceRoots: [],
+        } : undefined);
       // Automatic compaction has a current turn_context; standalone compaction has only its
       // source turn_context. Either must be the latest native record, never an arbitrary ancestor.
       const compactionSourceTurnId = parsed._compactionRequest

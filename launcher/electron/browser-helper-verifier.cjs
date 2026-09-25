@@ -2,7 +2,15 @@ const { spawn } = require("node:child_process");
 const { randomBytes } = require("node:crypto");
 const { createInterface } = require("node:readline");
 
-const BROWSER_HELPER_OPERATION_TIMEOUT_MS = 90_000;
+const BROWSER_HELPER_OPERATION_TIMEOUT_MS = Object.freeze({
+  inspect: 180_000,
+  limits: 180_000,
+  verify: 300_000,
+  // Smoke includes page hydration, model/effort selection, submission and a complete
+  // streamed answer. A single 90-second wall-clock deadline was shorter than the
+  // browser worker's own legitimate stage budgets on slower Windows machines.
+  smoke: 600_000,
+});
 
 function waitForExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
@@ -47,7 +55,7 @@ async function stopChild(child) {
   }
 }
 
-async function runBrowserHelperOperation({ helper, descriptorPath, appName, operation, payload = {}, logger }) {
+async function runBrowserHelperOperation({ helper, descriptorPath, appName, operation, payload = {}, logger, useSavedChats = false }) {
   if (!helper || typeof helper.executable !== "string" || typeof helper.script !== "string") {
     throw new Error("Browser helper verification command is invalid");
   }
@@ -111,7 +119,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
           ...payload,
           type: operation,
           id,
-          config: { appName, browserHostDescriptorPath: descriptorPath },
+          config: { appName, browserHostDescriptorPath: descriptorPath, useSavedChats: useSavedChats === true },
         }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
         return;
       }
@@ -139,7 +147,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
     )));
     timer = setTimeout(
       () => finish(new Error(`Browser helper ${operation} timed out`)),
-      BROWSER_HELPER_OPERATION_TIMEOUT_MS,
+      BROWSER_HELPER_OPERATION_TIMEOUT_MS[operation],
     );
   });
 

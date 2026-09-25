@@ -392,35 +392,20 @@ function splitPolicyMatchesProfile(
     && split.glob_scan_max_depth === profileFileSystem.glob_scan_max_depth;
 }
 
-function exactManagedWorkspaceWriteProfile(
-  profile: Record<string, unknown>,
+function managedWorkspaceWriteAuthority(
+  value: unknown,
   roots: string[],
-  cwd: string,
-  sandbox: Record<string, unknown>,
-): { networkAccess: boolean; writableRoots: string[] } | undefined {
-  const fileSystem = record(profile.file_system);
+): { projectRoots: boolean; directWrites: string[] } | undefined {
+  const fileSystem = record(value);
+  const entries = fileSystem?.entries;
   if (fileSystem?.type !== "restricted"
     || !validGlobScanMaxDepth(fileSystem.glob_scan_max_depth)
-    || !Array.isArray(fileSystem.entries)
-    || (profile.network !== "restricted" && profile.network !== "enabled")) return undefined;
-
-  const rawWritableRoots = sandbox.writable_roots ?? [];
-  if (!Array.isArray(rawWritableRoots)
-    || rawWritableRoots.some(path => typeof path !== "string" || !isAbsolute(path))
-    || (sandbox.exclude_tmpdir_env_var !== undefined && typeof sandbox.exclude_tmpdir_env_var !== "boolean")
-    || (sandbox.exclude_slash_tmp !== undefined && typeof sandbox.exclude_slash_tmp !== "boolean")) return undefined;
-  const expectedWritableRoots = [cwd, ...rawWritableRoots.map(path => resolve(path as string))];
-  const uniqueExpectedWritableRoots = [...new Map(expectedWritableRoots.map(path => (
-    [pathIdentity(path), path] as const
-  ))).values()];
-  if (uniqueExpectedWritableRoots.length !== expectedWritableRoots.length
-    || uniqueExpectedWritableRoots.some(path => !roots.some(root => contains(root, path)))) return undefined;
+    || !Array.isArray(entries)) return undefined;
 
   let rootRead = 0;
-  let projectRootsWrite = 0;
+  let projectRoots = false;
   const directWrites: string[] = [];
-  const specialWrites = new Set<string>();
-  for (const value of fileSystem.entries) {
+  for (const value of entries) {
     const entry = record(value);
     const path = record(entry?.path);
     if (!entry || !path
@@ -429,71 +414,81 @@ function exactManagedWorkspaceWriteProfile(
 
     if (path.type === "special") {
       const special = record(path.value)?.kind;
+      if (typeof special !== "string" || !special) return undefined;
       if (special === "root" && entry.access === "read" && entry.missing_path_behavior === undefined) {
         rootRead += 1;
-        continue;
-      }
-      if (entry.access !== "write") {
-        if (typeof special !== "string" || !special) return undefined;
-        continue;
       }
       if (special === "project_roots" && entry.access === "write" && entry.missing_path_behavior === undefined) {
-        projectRootsWrite += 1;
-        continue;
-      }
-      if ((special === "slash_tmp" || special === "tmpdir")
-        && entry.access === "write"
-        && entry.missing_path_behavior === undefined
-        && !specialWrites.has(special)) {
-        specialWrites.add(special);
-        continue;
-      }
-      return undefined;
-    }
-
-    // Read/deny entries only narrow the profile. Codex legitimately adds external worktree gitdirs
-    // and protected metadata paths here, so they do not affect the writable authority recovered
-    // by this bridge. Every write entry, in contrast, must be one of the exact legacy roots below.
-    if (entry.access !== "write") {
-      if (path.type === "path") {
-        if (typeof path.path !== "string" || !isAbsolute(path.path)) return undefined;
-      } else if (path.type === "glob_pattern") {
-        if (typeof path.pattern !== "string" || !path.pattern) return undefined;
-      } else {
-        return undefined;
+        projectRoots = true;
       }
       continue;
     }
-    if (path.type !== "path"
-      || typeof path.path !== "string"
-      || !isAbsolute(path.path)
-      || entry.missing_path_behavior !== undefined) return undefined;
-    directWrites.push(resolve(path.path));
+
+    if (path.type === "path") {
+      if (typeof path.path !== "string" || !isAbsolute(path.path)) return undefined;
+      if (entry.access === "write" && entry.missing_path_behavior === undefined) {
+        directWrites.push(resolve(path.path));
+      }
+      continue;
+    }
+
+    if (path.type === "glob_pattern") {
+      if (typeof path.pattern !== "string" || !path.pattern) return undefined;
+      if (entry.access === "write") return undefined;
+      continue;
+    }
+    return undefined;
   }
+  if (rootRead !== 1) return undefined;
+  if (projectRoots && roots.length === 0) return undefined;
+  return { projectRoots, directWrites };
+}
 
-  if (rootRead !== 1 || projectRootsWrite > 1) return undefined;
-  const uniqueDirectWrites = [...new Map(directWrites.map(path => (
-    [pathIdentity(path), path] as const
-  ))).values()];
-  if (uniqueDirectWrites.length !== directWrites.length) return undefined;
-  const expectedIdentities = new Set(uniqueExpectedWritableRoots.map(pathIdentity));
-  if (uniqueDirectWrites.some(path => !expectedIdentities.has(pathIdentity(path)))) return undefined;
-  if (projectRootsWrite === 0 && uniqueDirectWrites.length !== uniqueExpectedWritableRoots.length) return undefined;
-  if (projectRootsWrite === 1) {
-    const rootIdentities = new Set(roots.map(pathIdentity));
-    if (rootIdentities.size !== expectedIdentities.size
-      || [...rootIdentities].some(path => !expectedIdentities.has(path))) return undefined;
-  }
+function workspaceRootCovered(
+  path: string,
+  roots: string[],
+  authority: { projectRoots: boolean; directWrites: string[] },
+): boolean {
+  if (authority.projectRoots && roots.some(root => contains(root, path))) return true;
+  return authority.directWrites.some(writeRoot => contains(writeRoot, path));
+}
 
-  const expectsSlashTmp = sandbox.exclude_slash_tmp !== true;
-  const expectsTmpdir = sandbox.exclude_tmpdir_env_var !== true;
-  if (specialWrites.has("slash_tmp") !== expectsSlashTmp
-    || specialWrites.has("tmpdir") !== expectsTmpdir) return undefined;
+function managedWorkspaceWriteProfile(
+  profile: Record<string, unknown>,
+  roots: string[],
+  cwd: string,
+  sandbox: Record<string, unknown>,
+): { networkAccess: boolean; writableRoots: string[] } | undefined {
+  if (profile.network !== "restricted" && profile.network !== "enabled") return undefined;
+  const rawWritableRoots = sandbox.writable_roots ?? [];
+  if (!Array.isArray(rawWritableRoots)
+    || rawWritableRoots.some(path => typeof path !== "string" || !isAbsolute(path))
+    || (sandbox.exclude_tmpdir_env_var !== undefined && typeof sandbox.exclude_tmpdir_env_var !== "boolean")
+    || (sandbox.exclude_slash_tmp !== undefined && typeof sandbox.exclude_slash_tmp !== "boolean")) return undefined;
 
-  return {
-    networkAccess: profile.network === "enabled",
-    writableRoots: uniqueExpectedWritableRoots,
-  };
+  const requestedWritableRoots = [cwd, ...rawWritableRoots.map(path => resolve(path as string))];
+  const writableRoots = [...new Map(requestedWritableRoots.map(path => [pathIdentity(path), path] as const)).values()];
+  if (writableRoots.some(path => !roots.some(root => contains(root, path)))) return undefined;
+
+  const authority = managedWorkspaceWriteAuthority(profile.file_system, roots);
+  if (!authority || writableRoots.some(path => !workspaceRootCovered(path, roots, authority))) return undefined;
+  return { networkAccess: profile.network === "enabled", writableRoots };
+}
+
+function splitPolicyAllowsWorkspaceRoots(
+  splitValue: unknown,
+  roots: string[],
+  writableRoots: string[],
+): boolean {
+  if (splitValue === undefined || splitValue === null) return true;
+  const split = record(splitValue);
+  if (!split || split.kind !== "restricted") return false;
+  const authority = managedWorkspaceWriteAuthority({
+    type: "restricted",
+    entries: split.entries,
+    glob_scan_max_depth: split.glob_scan_max_depth,
+  }, roots);
+  return !!authority && writableRoots.every(path => workspaceRootCovered(path, roots, authority));
 }
 
 function environmentFromTurnContext(
@@ -558,13 +553,14 @@ function environmentFromTurnContext(
   }
   if (permissionProfile.type === "managed" && sandbox.type === "workspace-write") {
     const fileSystem = record(permissionProfile.file_system);
-    const workspace = exactManagedWorkspaceWriteProfile(permissionProfile, roots, cwd, sandbox);
+    const workspace = managedWorkspaceWriteProfile(permissionProfile, roots, cwd, sandbox);
+    const requestedNetworkAccess = networkAccess(sandbox, "workspace-write");
     if (!fileSystem
       || !workspace
-      || networkAccess(sandbox, "workspace-write") !== workspace.networkAccess
-      || !splitPolicyMatchesProfile(payload.file_system_sandbox_policy, fileSystem)) {
+      || !splitPolicyAllowsWorkspaceRoots(payload.file_system_sandbox_policy, roots, workspace.writableRoots)) {
       throw new Error("Codex rollout workspace-write permission profile is inconsistent");
     }
+    const effectiveNetworkAccess = requestedNetworkAccess && workspace.networkAccess;
     return {
       cwd,
       roots,
@@ -572,7 +568,7 @@ function environmentFromTurnContext(
       sandboxPolicy: {
         type: "workspaceWrite",
         writableRoots: workspace.writableRoots,
-        networkAccess: workspace.networkAccess,
+        networkAccess: effectiveNetworkAccess,
       },
       tools: [...(tools ?? [])],
     };
@@ -587,9 +583,9 @@ function validateMetadataConsistency(
   // Request sandbox/workspace fields are diagnostic only. They narrow a rollout-derived authority
   // here and never create or expand it.
   const owner = "parentThreadId" in lineage ? "subagent" : "thread";
-  if (lineage.sandboxType === "platform"
+  if (lineage.sandboxType !== "canonical-rollout" && (lineage.sandboxType === "platform"
     ? environment.sandboxPolicy.type === "dangerFullAccess"
-    : environment.sandboxPolicy.type !== lineage.sandboxType) {
+    : environment.sandboxPolicy.type !== lineage.sandboxType)) {
     throw new Error(`ChatGPT Web ${owner} sandbox metadata conflicts with its Codex rollout`);
   }
   if (lineage.workspaceRoots.length > 0

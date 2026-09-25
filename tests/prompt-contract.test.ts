@@ -47,6 +47,11 @@ test("history handle cleanup works on decoded text and preserves native call ide
 test("Full-mode Pro prompts pass one stable turn token directly to native actions", () => {
   const token = "turn_12345678901234567890123456789012";
   const parsed = request("max");
+  parsed.context.tools = [{
+    name: "imagegen",
+    description: "Generate an image",
+    parameters: { type: "object" },
+  }];
   parsed.context.messages[1]!.content = `Diagnose an invalid binding_id safety failure without replaying ${token}`;
   const compiled = compileChatGptWebPrompt(
     parsed,
@@ -71,7 +76,23 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(transportOnly).toContain("A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.");
   expect(transportOnly).toContain("After a deterministic tool failure, update the working hypothesis from that result");
   expect(transportOnly).toContain("do not repeat the same call unless its inputs or observable state changed.");
+  expect(transportOnly).toContain("use the best matching installed skill automatically");
+  expect(transportOnly).toContain("The user does not need to name a skill explicitly.");
+  expect(transportOnly).toContain("Complete one asset before requesting the next");
+  expect(transportOnly).toContain("immediately update the consuming JS/TS/JSON/CSS/HTML or asset manifest");
+  expect(transportOnly).toContain("Never queue several successful image generations for a later bulk code edit");
+  expect(transportOnly).toContain("prefer the installed code-work-orchestrator skill when present");
+  expect(transportOnly).toContain("keep tiny obvious edits direct");
+  expect(transportOnly).toContain("Do not ask the user to reattach a local project file");
+  expect(transportOnly).toContain("Ask one concise user-facing question about the available fallback choices");
   expect(transportOnly).toContain("Continue using the available tools until the requested work is complete and verified.");
+  expect(transportOnly).toContain("begin with one concise user-visible commentary update");
+  expect(transportOnly).toContain("Prefer frequent short, concrete progress updates");
+  expect(transportOnly).toContain("Group updates only when correctness genuinely requires an atomic operation");
+  expect(transportOnly).toContain("small coherent batches when practical");
+  expect(transportOnly).toContain("roughly 50 to 200 changed lines at a time");
+  expect(transportOnly).toContain("Do not expose private chain-of-thought");
+  expect(transportOnly).toContain("never emit visual toolbar labels such as Plain text or Copy");
   expect(transportOnly).toContain("Write the user-facing final answer only after the last required tool result has settled.");
   expect(transportOnly).toContain(`The task context is complete. Pass turn_token ${token} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`);
   expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
@@ -463,7 +484,7 @@ test("assigns prior assistant output to the model and never attributes Codex con
   expect(compiled.text).toContain("do not attribute, quote, summarize, or otherwise mention them");
 });
 
-test("a long task keeps the newest images and drops the overflow instead of failing", () => {
+test("a new text-only request does not reattach unrelated images from older prompts", () => {
   const image = (marker: string) => ({
     type: "image" as const,
     imageUrl: `data:image/png;base64,${marker}`,
@@ -473,11 +494,14 @@ test("a long task keeps the newest images and drops the overflow instead of fail
     modelId: CHATGPT_WEB_MODEL_ID,
     context: {
       systemPrompt: ["preserve-system"],
-      messages: markers.map((marker, index) => ({
-        role: "user" as const,
-        content: [{ type: "text" as const, text: `step ${index + 1}` }, image(marker)],
-        timestamp: index + 1,
-      })),
+      messages: [
+        ...markers.map((marker, index) => ({
+          role: "user" as const,
+          content: [{ type: "text" as const, text: `step ${index + 1}` }, image(marker)],
+          timestamp: index + 1,
+        })),
+        { role: "user" as const, content: "Adjust the page spacing and typography", timestamp: 20 },
+      ],
     },
     stream: true,
     options: { reasoning: "high" },
@@ -489,29 +513,30 @@ test("a long task keeps the newest images and drops the overflow instead of fail
     "turn_12345678901234567890123456789012",
   );
 
-  expect(compiled.images.map(entry => entry.imageUrl)).toEqual(
-    markers.slice(-10).map(marker => `data:image/png;base64,${marker}`),
-  );
-  expect(compiled.text).toContain("older image not attached");
+  expect(compiled.images).toEqual([]);
+  expect(compiled.text.match(/historical image not reattached/g)).toHaveLength(13);
   expect(compiled.text).toContain("step 1");
   expect(compiled.text).toContain("step 13");
 });
 
-test("Web compaction attaches the newest ten images as files and never embeds their base64 in prompt text", () => {
+test("Web compaction does not revive historical images when its latest request does not reference them", () => {
   const imagePayloads = Array.from({ length: 13 }, (_unused, index) =>
     Buffer.from(`compaction-image-${index + 1}`).toString("base64"));
   const parsed: CodexParsedRequest = {
     modelId: CHATGPT_WEB_MODEL_ID,
     context: {
       systemPrompt: ["preserve-system"],
-      messages: imagePayloads.map((payload, index) => ({
-        role: "user" as const,
-        content: [
-          { type: "text" as const, text: `checkpoint ${index + 1}` },
-          { type: "image" as const, imageUrl: `data:image/png;base64,${payload}` },
-        ],
-        timestamp: index + 1,
-      })),
+      messages: [
+        ...imagePayloads.map((payload, index) => ({
+          role: "user" as const,
+          content: [
+            { type: "text" as const, text: `checkpoint ${index + 1}` },
+            { type: "image" as const, imageUrl: `data:image/png;base64,${payload}` },
+          ],
+          timestamp: index + 1,
+        })),
+        { role: "user" as const, content: "Summarize the completed code changes", timestamp: 20 },
+      ],
     },
     stream: true,
     options: { reasoning: "high" },
@@ -523,13 +548,41 @@ test("Web compaction attaches the newest ten images as files and never embeds th
     { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
   );
 
-  expect(compiled.images.map(image => image.imageUrl)).toEqual(
-    imagePayloads.slice(-10).map(payload => `data:image/png;base64,${payload}`),
-  );
+  expect(compiled.images).toEqual([]);
   expect(compiled.text).not.toContain("data:image");
   for (const payload of imagePayloads) expect(compiled.text).not.toContain(payload);
-  expect(compiled.text.match(/"type":"image_attachment"/g)).toHaveLength(10);
-  expect(compiled.text.match(/older image not attached/g)).toHaveLength(3);
+  expect(compiled.text).not.toContain('"type":"image_attachment"');
+  expect(compiled.text.match(/historical image not reattached/g)).toHaveLength(13);
+});
+
+test("an explicit visual follow-up reattaches only the nearest prior image batch", () => {
+  const parsed = request("high");
+  parsed.context.messages = [
+    { role: "user", content: [
+      { type: "text", text: "first references" },
+      { type: "image", imageUrl: "data:image/png;base64,OLD" },
+    ], timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "reviewed" }], timestamp: 2 },
+    { role: "user", content: [
+      { type: "text", text: "current references" },
+      { type: "image", imageUrl: "data:image/png;base64,NEW1" },
+      { type: "image", imageUrl: "data:image/png;base64,NEW2" },
+    ], timestamp: 3 },
+    { role: "assistant", content: [{ type: "text", text: "ready" }], timestamp: 4 },
+    { role: "user", content: "Use as imagens anexadas para ajustar os detalhes da página", timestamp: 5 },
+  ];
+
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+  );
+
+  expect(compiled.images.map(image => image.imageUrl)).toEqual([
+    "data:image/png;base64,NEW1",
+    "data:image/png;base64,NEW2",
+  ]);
+  expect(compiled.text.match(/historical image not reattached/g)).toHaveLength(1);
 });
 
 test("persisted one-pixel image sentinels are not attached to ChatGPT", () => {

@@ -1051,7 +1051,8 @@ describe("ChatGPT outer-native harness v4", () => {
       await Bun.sleep(0);
       disconnect.abort();
       await expect(first).rejects.toThrow("ChatGPT web turn aborted");
-      expect(firstEvents.some(event => event.type === "text_delta" && event.text === "Recovered ")).toBeTrue();
+      expect(firstEvents.some(event => event.type === "text_delta" && event.phase === "final_answer")).toBeFalse();
+      expect(firstEvents.some(event => event.type === "thinking_delta" && event.thinking === "Recovered ")).toBeTrue();
 
       const events: AdapterEvent[] = [];
       const reconnect = createChatGptWebAdapter(provider).runTurn!(
@@ -1075,7 +1076,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("an observer failure in the middle of a drained text batch loses no reconnect data", async () => {
+  test("a disconnect while browser text is buffered loses no final reconnect data", async () => {
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
       baseUrl: `browser://chatgpt-batched-reconnect-${Date.now()}`,
@@ -1098,20 +1099,14 @@ describe("ChatGPT outer-native harness v4", () => {
     };
     const request = rawWireRequest(environmentXml);
     const disconnect = new AbortController();
-    let textEvents = 0;
     try {
       const first = createChatGptWebAdapter(provider).runTurn!(
         request,
         { headers: new Headers(), abortSignal: disconnect.signal },
-        event => {
-          if (event.type !== "text_delta" || event.phase !== "final_answer") return;
-          textEvents += 1;
-          if (textEvents === 1) {
-            disconnect.abort();
-            throw new DOMException("observer disconnected", "AbortError");
-          }
-        },
+        () => {},
       );
+      await Bun.sleep(0);
+      disconnect.abort();
       await expect(first).rejects.toMatchObject({ name: "AbortError" });
 
       const replayed: AdapterEvent[] = [];
@@ -1759,7 +1754,7 @@ describe("ChatGPT outer-native harness v4", () => {
       .toBe("Ordinary \\[brackets\\] stay escaped");
   });
 
-  test("buffers citation hydration, tolerates later markup-only rewrites, and rejects text rewrites", () => {
+  test("buffers citation hydration and tolerates later rewrites after delivery", () => {
     const plain = "<p>Source</p>";
     const linked = '<p><a href="https://example.com">Source</a></p>';
     const hydrated = new ChatGptMarkdownBuffer(markdown => markdown, 100);
@@ -1784,8 +1779,8 @@ describe("ChatGPT outer-native harness v4", () => {
       { key: "source", html: "<p>Different</p>", text: "Different", streamable: true },
     ];
     expect(rewritten.observe(different, 200)).toBe("");
-    expect(rewritten.currentSnapshotIsConsistent()).toBe(false);
-    expect(() => rewritten.finish()).toThrow("completed text block");
+    expect(rewritten.currentSnapshotIsConsistent()).toBe(true);
+    expect(rewritten.finish()).toEqual({ markdown: "Source", delta: "" });
     expect(rewritten.observe(different, 700)).toBe("");
   });
 
@@ -1838,7 +1833,7 @@ describe("ChatGPT outer-native harness v4", () => {
     });
   });
 
-  test("uses source ranges across DOM remount keys but still rejects a committed semantic rewrite", () => {
+  test("uses source ranges across DOM remount keys and preserves committed text across semantic rewrites", () => {
     const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
     const original = {
       key: "old-root:0",
@@ -1871,18 +1866,8 @@ describe("ChatGPT outer-native harness v4", () => {
       text: "Changed",
     };
     expect(buffer.observe([rewritten, tail], 200)).toBe("");
-    expect(buffer.currentSnapshotIsConsistent()).toBe(false);
-    expect(() => buffer.finish()).toThrow("changed a completed text block");
-    try {
-      buffer.finish();
-    } catch (error) {
-      const diagnostic = (error as { diagnostic: unknown }).diagnostic;
-      expect(diagnostic).toEqual({
-        reason: "text_changed", observedStart: 0, observedEnd: 6,
-        committedStart: 0, committedEnd: 6, observedTextChars: 7, committedTextChars: 6,
-      });
-      expect(JSON.stringify(diagnostic)).not.toMatch(/Stable|Changed|<p/);
-    }
+    expect(buffer.currentSnapshotIsConsistent()).toBe(true);
+    expect(buffer.finish()).toEqual({ markdown: "Stable\n\nTail", delta: "\n\nTail" });
   });
 
   test("distinguishes repeated paragraphs by source range after the first copy is virtualized", () => {
@@ -2475,6 +2460,9 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(secondEvents.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta")
         .map(event => event.text).join(""))
         .toBe(`ordinary browser final with ${tempRoot}`);
+      const finalTextIndex = secondEvents.findIndex(event => event.type === "text_delta" && event.phase === "final_answer");
+      expect(finalTextIndex).toBeGreaterThan(0);
+      expect(secondEvents[finalTextIndex - 1]).toEqual({ type: "assistant_boundary" });
       const finalDone = secondEvents.at(-1) as Extract<AdapterEvent, { type: "done" }>;
       expect(finalDone).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
       expect(finalDone.usage?.estimated).toBe(true);

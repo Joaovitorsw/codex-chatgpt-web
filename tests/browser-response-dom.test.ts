@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import type { Locator } from "playwright-core";
 import { ChatGptBrowserWorker, ChatGptCompletionTracker, CHATGPT_COMPLETION_SETTLE_MS } from "../src/adapters/chatgpt-web/browser-worker";
-import { ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "../src/adapters/chatgpt-web/markdown";
+import { ChatGptAnswerMarkdownDelivery, ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "../src/adapters/chatgpt-web/markdown";
 
 const smokeHtml = readFileSync(new URL("./fixtures/chatgpt-dil-smoke.html", import.meta.url), "utf8");
 type Snapshot = {
@@ -67,7 +67,7 @@ async function snapshot(html: string): Promise<Snapshot> {
   }
 }
 
-test("keeps an unfinished hyperlink buffered and detects changed destinations after delivery", async () => {
+test("keeps an unfinished hyperlink buffered and preserves delivered destinations after later rewrites", async () => {
   const page = (href: string) => `<section id="turn"><div class="markdown"><p data-start="0" data-end="99"><strong><a${href}>Open report</a></strong>.</p><p data-start="100" data-end="115">Next paragraph.</p></div></section>`;
   const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
   const pending = await snapshot(page(""));
@@ -77,8 +77,8 @@ test("keeps an unfinished hyperlink buffered and detects changed destinations af
   expect(buffer.finish().markdown).toBe("**[Open report](https://example.com/report#details)**.\n\nNext paragraph.");
   const changed = await snapshot(page(' href="https://example.com/different"'));
   buffer.observe(changed.markdownSegments, 2000);
-  expect(buffer.currentSnapshotIsConsistent()).toBeFalse();
-  expect(() => buffer.finish()).toThrow("completed text block");
+  expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
+  expect(buffer.finish().markdown).toBe("**[Open report](https://example.com/report#details)**.\n\nNext paragraph.");
 });
 
 test("captured DIL smoke response reaches Markdown delivery and stable completion", async () => {
@@ -106,6 +106,41 @@ test("captured DIL smoke response reaches Markdown delivery and stable completio
   }
 });
 
+test("converts a native weather widget into a stable Markdown card", async () => {
+  const response = await snapshot(`
+    <section id="turn">
+      <div class="markdown"><p>Veja a previsão atual:</p></div>
+      <section role="region" aria-label="Clima em Belo Horizonte">
+        <div>20 °C</div><div>Predominantemente nublado</div>
+        <a href="https://example.com/weather">Ver previsão</a>
+      </section>
+      <button data-testid="copy-turn-action-button"></button>
+    </section>
+  `);
+  const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+  expect(buffer.observe(response.markdownSegments, 0)).toBe("Veja a previsão atual:");
+  expect(buffer.finish().markdown).toContain("> **Clima em Belo Horizonte**");
+  expect(buffer.finish().markdown).toContain("> 20 °C");
+  expect(buffer.finish().markdown).toContain("[Ver previsão](https://example.com/weather)");
+});
+
+test("summarizes a closed DIL result card from the answer highlights", async () => {
+  const response = await snapshot(`
+    <section id="turn">
+      <div data-markdown-text-style="assistant-message">
+        <p>Agora em Belo Horizonte está <strong>20 °C</strong>, com tempo
+          <strong>predominantemente nublado</strong>.</p>
+      </div>
+      <div data-testid="chatgpt-dil-widget" data-widget-name="Basic"><dil-renderer></dil-renderer></div>
+      <button data-testid="copy-turn-action-button"></button>
+    </section>
+  `);
+  const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+  buffer.observe(response.markdownSegments, 0);
+  expect(buffer.finish().markdown).toContain("> **Resultado**");
+  expect(buffer.finish().markdown).toContain("> 20 °C · predominantemente nublado");
+});
+
 test("DIL response extraction preserves ownership, commentary and completion boundaries", async () => {
   for (const html of [
     smokeHtml.replace('data-message-author-role="assistant"', 'data-message-author-role="user"'),
@@ -121,4 +156,47 @@ test("DIL response extraction preserves ownership, commentary and completion bou
   const noCopy = await snapshot(smokeHtml.replace('data-testid="copy-turn-action-button"', 'data-testid="other-action"'));
   expect(noCopy.visibleText).toBe("CODEX WEB GPT READY");
   expect(noCopy.completionActionVisible).toBeFalse();
+});
+
+test("a renderer remount may consolidate the final DOM when it preserves the streamed Markdown prefix", () => {
+  const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+  const first = { key: "first", tag: "p", html: "<p>First</p>", text: "First", streamable: true };
+  const tail = { key: "tail", tag: "p", html: "<p>Tail</p>", text: "Tail", streamable: false };
+  expect(buffer.observe([first, tail], 0)).toBe("First");
+
+  const consolidated = {
+    key: "remounted-final",
+    tag: "article",
+    html: "<article><p>First</p><p>Tail</p></article>",
+    text: "FirstTail",
+    streamable: false,
+  };
+  expect(buffer.observe([consolidated], 1)).toBe("");
+  expect(buffer.currentSnapshotIsConsistent()).toBe(true);
+  expect(buffer.finish()).toEqual({ markdown: "First\n\nTail", delta: "\n\nTail" });
+});
+
+test("tool turns defer mutable roots and publish a rewritten human conclusion intact", () => {
+  const delivery = new ChatGptAnswerMarkdownDelivery(true, markdown => markdown, 0);
+  const progress = [
+    { key: "plan", tag: "p", html: "<p>Vou editar os arquivos.</p>", text: "Vou editar os arquivos.", streamable: true },
+    { key: "tool-tail", tag: "p", html: "<p>Editando.</p>", text: "Editando.", streamable: false },
+  ];
+  expect(delivery.observe(progress, 0)).toBe("");
+
+  // ChatGPT replaces planning roots after the tool result. Previously the already-streamed plan
+  // was not a prefix of this DOM and the useful conclusion failed with browser_stream_inconsistent.
+  const conclusion = [
+    {
+      key: "final",
+      tag: "article",
+      html: "<article><p>Concluído.</p><p>Arquivos ajustados: Header.css e Hero.css.</p></article>",
+      text: "Concluído.Arquivos ajustados: Header.css e Hero.css.",
+      streamable: false,
+    },
+  ];
+  expect(delivery.finish(conclusion, 1)).toEqual({
+    markdown: "Concluído.\n\nArquivos ajustados: Header.css e Hero.css.",
+    delta: "Concluído.\n\nArquivos ajustados: Header.css e Hero.css.",
+  });
 });

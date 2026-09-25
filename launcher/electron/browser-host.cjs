@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { clipboard, WebContentsView, nativeImage, nativeTheme, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   runBrowserHelperOperation,
@@ -26,10 +26,37 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+const DARK_IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Cmeta%20name%3D%22color-scheme%22%20content%3D%22dark%22%3E%3Cstyle%3Ehtml%2Cbody%7Bmargin%3A0%3Bbackground%3A%23181818%3Bcolor-scheme%3Adark%3B%7D%3C%2Fstyle%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+const LEGACY_IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+// New runtimes accept both historical identities, so the visible surface can stay dark in local
+// production simulation too. LEGACY_IDLE_BROWSER_URL remains accepted for an already-running older
+// descriptor, but new surfaces must never expose its white document while a turn is preparing.
+const IDLE_BROWSER_URL = DARK_IDLE_BROWSER_URL;
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
+
+if (nativeTheme) nativeTheme.themeSource = "dark";
+
+function enforceDarkChatGpt(contents) {
+  if (!contents || contents.isDestroyed()) return;
+  contents.setBackgroundColor?.("#181818");
+  const apply = () => {
+    if (contents.isDestroyed() || !contents.getURL().startsWith(CHATGPT_ORIGIN)) return;
+    void contents.insertCSS(
+      ":root{color-scheme:dark!important}html,body{background:#181818!important}",
+    ).catch(() => {});
+    void contents.executeJavaScript(`(() => {
+      try { localStorage.setItem("theme", "dark"); } catch {}
+      document.documentElement.classList.add("dark");
+      document.documentElement.style.colorScheme = "dark";
+      document.documentElement.style.backgroundColor = "#181818";
+      if (document.body) document.body.style.backgroundColor = "#181818";
+    })()`, true).catch(() => {});
+  };
+  contents.on("dom-ready", apply);
+  contents.on("did-navigate-in-page", apply);
+}
 const MAX_CANCELLED_TURN_TRACES = 256;
 const MANUAL_SUBMIT_TIMEOUT_MS = 60_000;
 const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
@@ -70,6 +97,26 @@ const COMPOSER_SELECTOR = [
   '[contenteditable="true"][role="textbox"]',
   "textarea",
 ].join(", ");
+const IMAGE_GENERATION_SEND_SELECTOR = [
+  '[data-testid="send-button"]',
+  '[data-testid="composer-submit-button"]',
+  'button[type="submit"]',
+  'button[aria-label="Send prompt"]',
+  'button[aria-label="Enviar prompt"]',
+  'button[aria-label="Send message"]',
+  'button[aria-label="Enviar mensagem"]',
+].join(", ");
+const IMAGE_GENERATION_RESULT_SELECTOR = [
+  '[data-message-author-role="assistant"] img',
+  '[data-turn="assistant"] img',
+  '[data-testid^="conversation-turn-"] img',
+  '[data-testid*="image" i] img',
+  'main img[src^="blob:"]',
+  'main img[src*="/backend-api/files/"]',
+  'main img[src*="oaidalleapiprodscus"]',
+].join(", ");
+const IMAGE_GENERATION_TIMEOUT_MS = 5 * 60 * 1000;
+const IMAGE_GENERATION_POLL_MS = 1_000;
 const CHATGPT_VIEWPORT_CSS = `
   html,
   body {
@@ -318,6 +365,7 @@ class BrowserHost {
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
     getUseSavedChats = () => false,
+    retainedConversationStore = null,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -348,6 +396,7 @@ class BrowserHost {
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.getUseSavedChats = getUseSavedChats;
+    this.retainedConversationStore = retainedConversationStore;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -413,6 +462,7 @@ class BrowserHost {
       this.window.on(event, this.windowVisibilityListener);
     }
     this.view.webContents.setZoomFactor(this.state.zoomFactor);
+    enforceDarkChatGpt(this.view.webContents);
     this.bindShellZoomShortcuts(this.window.webContents);
     this.bindShellZoomShortcuts(this.view.webContents);
     this.bindChatGptBackendRecovery();
@@ -445,6 +495,15 @@ class BrowserHost {
 
   currentOperation() {
     return this.manualOperation || (this.loginOperation ? "ChatGPT login" : null);
+  }
+
+  async waitForManualOperationIdle(timeoutMs = 10 * 60_000, pollMs = 100) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!this.currentOperation()) return;
+      await sleep(pollMs);
+    }
+    throw new Error(`ChatGPT browser did not finish ${this.currentOperation() || "its active operation"} before MCP setup timed out`);
   }
 
   assertTurnTabsCanResetForInteractionModeChange() {
@@ -512,6 +571,7 @@ class BrowserHost {
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
       closable: true,
+      ...(tab.finalizingUntil ? { finalizingUntil: new Date(tab.finalizingUntil).toISOString() } : {}),
     };
     if (tab.interactionMode === "manual") {
       Object.assign(snapshot, {
@@ -529,7 +589,7 @@ class BrowserHost {
     return this.turnTabs.get(this.selectedTabId) || null;
   }
 
-  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal) {
+  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal, initialUrl = IDLE_BROWSER_URL) {
     signal?.throwIfAborted();
     if (this.turnTabs.size >= MAX_BROWSER_TABS
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
@@ -565,7 +625,8 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: IDLE_BROWSER_URL,
+      url: initialUrl,
+      initialUrl,
       loading: true,
       message: "ChatGPT is working",
       interactionMode: "automatic",
@@ -582,6 +643,7 @@ class BrowserHost {
     this.window.contentView.addChildView(view);
     this.presentTurnView(tab, false);
     view.webContents.setZoomFactor(this.state.zoomFactor);
+    enforceDarkChatGpt(view.webContents);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
     await this.initializeTurnTab(tab, signal);
@@ -597,7 +659,7 @@ class BrowserHost {
     try {
       signal?.throwIfAborted();
       await Promise.race([(async () => {
-        await loadCommittedBrowserSurface(tab.view.webContents, IDLE_BROWSER_URL);
+        await loadCommittedBrowserSurface(tab.view.webContents, tab.initialUrl || IDLE_BROWSER_URL);
         signal?.throwIfAborted();
         await this.markTurnTabSurface(tab);
       })(), aborted]);
@@ -616,6 +678,235 @@ class BrowserHost {
       throw error;
     } finally {
       signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  async generateImageAsset({ traceId, prompt, outputPath, signal }) {
+    requireAutomaticBrowserInspection(this, "ChatGPT image generation");
+    if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 20_000) {
+      throw new Error("Image generation prompt is invalid");
+    }
+    if (typeof outputPath !== "string" || !path.isAbsolute(outputPath)) {
+      throw new Error("Image generation output path must be absolute");
+    }
+    if (!/^[A-Za-z0-9_-]{6,128}$/.test(traceId || "")) {
+      throw new Error("Image generation trace id is invalid");
+    }
+
+    await this.ready();
+    signal?.throwIfAborted();
+    const previousSelectedTabId = this.selectedTabId;
+    const childTraceId = `image_${traceId}`.slice(0, 128);
+    const tab = await this.createTurnTab(childTraceId, process.pid, undefined, undefined);
+    tab.label = "Image generation";
+    tab.message = "Generating image in ChatGPT";
+    this.publishState?.(this.snapshot());
+    const contents = tab.view.webContents;
+
+    try {
+      // Native image generation is account-scoped and is unavailable on anonymous/temporary
+      // surfaces for some plans. The auxiliary tab shares this launcher's authenticated persistent
+      // partition but deliberately starts a normal saved conversation.
+      await loadCommittedBrowserSurface(contents, `${CHATGPT_ORIGIN}/`);
+      const savedChatDeadline = Date.now() + 30_000;
+      for (;;) {
+        signal?.throwIfAborted();
+        tab.lastHeartbeatAt = Date.now();
+        const savedChat = await contents.executeJavaScript(`(() => {
+          const url = new URL(location.href);
+          const temporaryFromUrl = url.searchParams.get('temporary-chat') === 'true';
+          const temporaryToggle = Array.from(document.querySelectorAll('button')).find(button => {
+            if (!(button instanceof HTMLElement) || button.offsetParent === null) return false;
+            const label = [button.getAttribute('aria-label'), button.title, button.textContent]
+              .filter(Boolean).join(' ').toLowerCase();
+            return /turn off temporary chat|disable temporary chat|desativar (o )?chat tempor[aá]rio/.test(label);
+          });
+          if (temporaryToggle) {
+            temporaryToggle.click();
+            return { ready: false, disabledToggle: true, href: location.href };
+          }
+          const pageText = document.body?.innerText?.slice(0, 1200).toLowerCase() || '';
+          const temporaryHeading = /(^|\\n)(temporary chat|chat tempor[aá]rio)(\\n|$)/m.test(pageText);
+          return {
+            ready: !temporaryFromUrl && !temporaryHeading,
+            disabledToggle: false,
+            href: location.href,
+          };
+        })()`, true);
+        if (savedChat?.ready) break;
+        if (savedChat?.disabledToggle) {
+          await sleep(750);
+          await loadCommittedBrowserSurface(contents, `${CHATGPT_ORIGIN}/`);
+        }
+        if (Date.now() >= savedChatDeadline) {
+          throw new Error(`ChatGPT image generation could not leave Temporary Chat (${savedChat?.href || "unknown URL"})`);
+        }
+        await sleep(500);
+      }
+      const readyDeadline = Date.now() + 60_000;
+      for (;;) {
+        signal?.throwIfAborted();
+        tab.lastHeartbeatAt = Date.now();
+        const ready = await contents.executeJavaScript(`Boolean(${visibleElementScript(COMPOSER_SELECTOR)})`, true);
+        if (ready) break;
+        if (Date.now() >= readyDeadline) throw new Error("ChatGPT image conversation did not expose its composer");
+        await sleep(IMAGE_GENERATION_POLL_MS);
+      }
+
+      const baselineSources = await contents.executeJavaScript(`(() => Array.from(document.querySelectorAll(
+        ${javaScriptLiteral(IMAGE_GENERATION_RESULT_SELECTOR)}
+      )).map(image => image.currentSrc || image.src).filter(Boolean))()`, true);
+      const composerFocused = await contents.executeJavaScript(`(() => {
+        const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+        if (!composer) return false;
+        composer.focus();
+        if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {
+          const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(composer), 'value');
+          descriptor?.set?.call(composer, '');
+        } else {
+          const selection = getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(composer);
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+          document.execCommand('delete', false);
+        }
+        return document.activeElement === composer || composer.contains(document.activeElement);
+      })()`, true);
+      if (!composerFocused) throw new Error("ChatGPT image composer could not receive focus");
+      contents.insertText(prompt.trim());
+      await sleep(500);
+      const inserted = await contents.executeJavaScript(`(() => {
+        const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+        const value = ${javaScriptLiteral(prompt.trim())};
+        return Boolean(composer) && (composer.innerText || composer.value || composer.textContent || '').trim() === value;
+      })()`, true);
+      if (!inserted) throw new Error("ChatGPT image prompt was not preserved in the composer");
+
+      const userTurnsBeforeSend = await contents.executeJavaScript(`document.querySelectorAll(
+        '[data-message-author-role="user"], [data-turn="user"], [data-user-message-bubble]'
+      ).length`, true);
+      const sendDeadline = Date.now() + 15_000;
+      let sent = false;
+      while (Date.now() < sendDeadline) {
+        signal?.throwIfAborted();
+        tab.lastHeartbeatAt = Date.now();
+        sent = await contents.executeJavaScript(`(() => {
+          const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+          const form = composer?.closest('form');
+          const button = Array.from((form || document).querySelectorAll(${javaScriptLiteral(IMAGE_GENERATION_SEND_SELECTOR)}))
+            .find(candidate => candidate instanceof HTMLElement && candidate.offsetParent !== null);
+          if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+          button.focus();
+          button.click();
+          return true;
+        })()`, true);
+        if (sent) break;
+        await sleep(500);
+        if (Date.now() + 2_000 >= sendDeadline) {
+          await contents.executeJavaScript(`(() => {
+            const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+            composer?.focus();
+          })()`, true);
+          contents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+          contents.sendInputEvent({ type: "char", keyCode: "\r" });
+          contents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+          break;
+        }
+      }
+      const submitEvidenceDeadline = Date.now() + 10_000;
+      sent = false;
+      while (Date.now() < submitEvidenceDeadline) {
+        signal?.throwIfAborted();
+        tab.lastHeartbeatAt = Date.now();
+        const submitted = await contents.executeJavaScript(`(() => {
+          const turns = document.querySelectorAll(
+            '[data-message-author-role="user"], [data-turn="user"], [data-user-message-bubble]'
+          ).length;
+          const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+          const draft = (composer?.innerText || composer?.value || composer?.textContent || '').trim();
+          return turns > ${Number(userTurnsBeforeSend) || 0} || draft.length === 0;
+        })()`, true);
+        if (submitted) { sent = true; break; }
+        await sleep(250);
+      }
+      if (!sent) throw new Error("ChatGPT image prompt could not be submitted");
+
+      const baseline = new Set(Array.isArray(baselineSources) ? baselineSources : []);
+      const generationDeadline = Date.now() + IMAGE_GENERATION_TIMEOUT_MS;
+      let generated;
+      while (Date.now() < generationDeadline) {
+        signal?.throwIfAborted();
+        tab.lastHeartbeatAt = Date.now();
+        generated = await contents.executeJavaScript(`(() => {
+          const candidates = Array.from(document.querySelectorAll(
+            ${javaScriptLiteral(IMAGE_GENERATION_RESULT_SELECTOR)}
+          )).map(image => ({
+            src: image.currentSrc || image.src || '',
+            width: image.naturalWidth || 0,
+            height: image.naturalHeight || 0,
+            alt: image.alt || '',
+          })).filter(image => image.src && image.width >= 256 && image.height >= 256);
+          return candidates.at(-1) || null;
+        })()`, true);
+        if (generated?.src && !baseline.has(generated.src)) break;
+        generated = undefined;
+        await sleep(IMAGE_GENERATION_POLL_MS);
+      }
+      if (!generated?.src) {
+        const diagnostic = await contents.executeJavaScript(`(() => ({
+          url: location.href,
+          assistantText: Array.from(document.querySelectorAll(
+            '[data-message-author-role="assistant"], [data-turn="assistant"], [data-testid^="conversation-turn-"]'
+          )).map(element => element.innerText || element.textContent || '').filter(Boolean).at(-1)?.slice(-2000) || '',
+          visibleImages: Array.from(document.images).filter(image => image.offsetParent !== null).map(image => ({
+            src: (image.currentSrc || image.src || '').slice(0, 240),
+            width: image.naturalWidth || 0,
+            height: image.naturalHeight || 0,
+            alt: image.alt || '',
+          })).filter(image => image.width >= 128 && image.height >= 128).slice(-10),
+        }))()`, true).catch(() => null);
+        throw new Error(`ChatGPT did not produce a detectable new image before the generation timeout: ${JSON.stringify(diagnostic)}`);
+      }
+
+      let bytes;
+      if (/^https?:/i.test(generated.src)) {
+        const response = await contents.session.fetch(generated.src, { credentials: "include" });
+        if (!response.ok) throw new Error(`ChatGPT image download failed with HTTP ${response.status}`);
+        bytes = Buffer.from(await response.arrayBuffer());
+      } else {
+        const dataUrl = await contents.executeJavaScript(`(async () => {
+          const response = await fetch(${javaScriptLiteral(generated.src)});
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          let binary = '';
+          const chunk = 0x8000;
+          for (let index = 0; index < bytes.length; index += chunk) {
+            binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+          }
+          return 'data:' + (response.headers.get('content-type') || 'image/png') + ';base64,' + btoa(binary);
+        })()`, true);
+        const comma = typeof dataUrl === "string" ? dataUrl.indexOf(",") : -1;
+        if (comma < 0) throw new Error("ChatGPT returned an unreadable generated image");
+        bytes = Buffer.from(dataUrl.slice(comma + 1), "base64");
+      }
+      const decoded = nativeImage.createFromBuffer(bytes);
+      if (decoded.isEmpty()) throw new Error("ChatGPT generated image could not be decoded");
+      const png = decoded.toPNG();
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      fs.writeFileSync(outputPath, png, { flag: "wx" });
+      return {
+        path: outputPath,
+        mimeType: "image/png",
+        width: decoded.getSize().width,
+        height: decoded.getSize().height,
+        bytes: png.length,
+      };
+    } finally {
+      if (this.turnTabs.get(tab.id) === tab) this.removeTurnTab(tab, true);
+      this.selectedTabId = this.turnTabs.has(previousSelectedTabId) ? previousSelectedTabId : "home";
+      this.syncViewVisibility();
+      this.publishState?.(this.snapshot());
+      this.writeDescriptor();
     }
   }
 
@@ -676,6 +967,7 @@ class BrowserHost {
     this.window.contentView.addChildView(view);
     this.presentTurnView(tab, true);
     view.webContents.setZoomFactor(this.state.zoomFactor);
+    enforceDarkChatGpt(view.webContents);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindManualTurnContents(tab);
     void this.initializeManualTurnTab(tab);
@@ -1265,6 +1557,9 @@ class BrowserHost {
   snapshot() {
     const contents = this.activeView()?.webContents;
     const selected = this.selectedTurnTab();
+    const backgroundTurn = selected
+      ? null
+      : [...this.turnTabs.values()].find(tab => tab.status === "running") || null;
     const manualInteraction = browserInteractionModeFor(this) === "manual";
     const homeTab = {
       id: "home",
@@ -1286,7 +1581,13 @@ class BrowserHost {
         }
       : manualInteraction
         ? { ...this.state, title: "ChatGPT" }
-        : this.state;
+        : backgroundTurn
+          ? {
+              ...this.state,
+              status: "running",
+              message: "ChatGPT is working in the background",
+            }
+          : this.state;
     return {
       ...readBrowserNavigationState(contents, {
         ...state,
@@ -1567,6 +1868,18 @@ class BrowserHost {
     this.publishState?.(this.snapshot());
     this.writeDescriptor();
     return this.snapshot();
+  }
+
+  selectRunningTabAfterTerminal(tab) {
+    if (this.selectedTabId !== tab.id) return false;
+    const running = [...this.turnTabs.values()].find(candidate => (
+      candidate.id !== tab.id && candidate.status === "running"
+    ));
+    if (!running) return false;
+    this.selectedTabId = running.id;
+    this.syncViewVisibility();
+    if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
+    return true;
   }
 
   removeTurnTab(tab, abortRunning) {
@@ -2321,6 +2634,7 @@ class BrowserHost {
       existing.helperPid = helperPid;
       existing.traceId = traceId;
       existing.status = "running";
+      existing.finalizingUntil = null;
       existing.loading = true;
       existing.message = "ChatGPT is working";
       if (!reused) {
@@ -2343,6 +2657,27 @@ class BrowserHost {
         reused,
         connectorBound: existing.connectorBound === true,
       };
+    }
+    const durable = conversationKey && connectorIdentity
+      ? this.retainedConversationStore?.get(conversationKey, connectorIdentity)
+      : undefined;
+    if (durable) {
+      const tab = await this.createTurnTab(
+        traceId,
+        helperPid,
+        conversationKey,
+        connectorIdentity,
+        signal,
+        durable.url,
+      );
+      tab.connectorBound = true;
+      this.selectedTabId = tab.id;
+      if (reveal) this.show();
+      else this.syncViewVisibility();
+      this.publishState?.(this.snapshot());
+      this.logger.info("browser.tab_restored", { tabId: tab.id, traceId });
+      this.writeDescriptor();
+      return { surfaceId: tab.surfaceId, tabId: tab.id, reused: true, connectorBound: true };
     }
     if (requireRetainedConversation) {
       const error = new Error("The retained ChatGPT conversation is no longer available");
@@ -2385,10 +2720,16 @@ class BrowserHost {
     }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
     tab.status = status === "completed" ? "ready" : status === "aborted" ? "aborted" : "error";
+    tab.finalizingUntil = status === "completed" ? Date.now() + 15_000 : null;
     this.syncPowerSaveBlocker();
     tab.message = status === "completed" ? "Task completed" : message || `ChatGPT turn ${status}`;
     tab.loading = false;
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
+    // A terminal selected tab must never remain in front of another running turn. Besides making
+    // the live task look minimized, keeping the completed surface selected can make the renderer
+    // publish its terminal state while the other trace is still streaming. Move only the UI
+    // selection; the running tab keeps its own WebContents, ownership and trace-scoped observer.
+    this.selectRunningTabAfterTerminal(tab);
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
@@ -2398,9 +2739,23 @@ class BrowserHost {
       && (!tab.connectorIdentity || connectorBound)) {
       tab.connectorBound = connectorBound === true;
       tab.lastHeartbeatAt = Date.now();
+      const retainedUrl = !tab.view.webContents.isDestroyed()
+        && typeof tab.view.webContents.getURL === "function"
+        ? tab.view.webContents.getURL()
+        : tab.url;
+      this.retainedConversationStore?.set(tab.conversationKey, {
+        url: retainedUrl,
+        connectorIdentity: tab.connectorIdentity,
+      });
       if (hideAfterTurn && !this.activeTraceId) this.hide();
       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
       this.publishState?.(this.snapshot());
+      const finalizingUntil = tab.finalizingUntil;
+      setTimeout(() => {
+        if (tab.finalizingUntil !== finalizingUntil) return;
+        tab.finalizingUntil = null;
+        this.publishState?.(this.snapshot());
+      }, 15_050).unref?.();
       this.writeDescriptor();
       return { cancelledByUser };
     }
@@ -2455,7 +2810,17 @@ class BrowserHost {
         }
         await this.probeAuthentication();
         const authenticated = await this.waitForAuthenticated();
-        await this.runSessionInspection(false);
+        // waitForAuthenticated already proves the authenticated session, the temporary
+        // chat surface, and the visible composer.  A best-effort post-login inspection
+        // must not keep the login operation (and therefore the smoke test) locked when
+        // ChatGPT is still settling the new-chat document.
+        try {
+          await this.runSessionInspection(false);
+        } catch (error) {
+          this.logger.warn("browser.post_login_inspection_deferred", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
         return authenticated;
       });
     })();
@@ -2810,6 +3175,12 @@ class BrowserHost {
 
   async smokeTest() {
     requireAutomaticBrowserInspection(this, "ChatGPT browser smoke test");
+    // ChatGPT flips the authenticated state before the explicit sign-in task has fully
+    // released its browser lease.  The UI can therefore expose Smoke Test in a small
+    // window where invoking it used to fail with "already busy with ChatGPT login".
+    // Join that task rather than making the user retry; this also preserves the single
+    // browser-operation invariant for the helper.
+    if (this.loginOperation) await this.loginOperation;
     return await this.withManualOperation("browser smoke test", () => this.runSmokeTest());
   }
 
@@ -2832,6 +3203,7 @@ class BrowserHost {
       descriptorPath: this.descriptorPath,
       appName: connectorName,
       operation: "smoke",
+      useSavedChats: this.getUseSavedChats?.() === true,
       logger: this.logger,
     });
     const evidence = result?.value;
@@ -2843,6 +3215,7 @@ class BrowserHost {
     }
     this.logger.info("smoke.completed", { effort: evidence.effort, responseChars: evidence.response.length });
     this.setState({ status: "ready", message: "Smoke test passed", authenticated: true });
+    this.hide();
     return { ok: true, ...evidence };
   }
 
@@ -2861,6 +3234,7 @@ class BrowserHost {
         helper: this.helper,
         descriptorPath: this.descriptorPath,
         appName: connectorName,
+        ...(this.getUseSavedChats?.() === true ? { useSavedChats: true } : {}),
         logger: this.logger,
       });
       this.logger.info("connector.verified", { appName: connectorName });
@@ -2896,6 +3270,7 @@ class BrowserHost {
       descriptorPath: this.descriptorPath,
       appName: connectorName,
       operation: "inspect",
+      useSavedChats: this.getUseSavedChats?.() === true,
       payload: { detectCapabilities },
       logger: this.logger,
     });
@@ -2922,6 +3297,7 @@ class BrowserHost {
         descriptorPath: this.descriptorPath,
         appName: this.connectorName(),
         operation: "limits",
+        useSavedChats: this.getUseSavedChats?.() === true,
         logger: this.logger,
       });
       const plan = result?.value;

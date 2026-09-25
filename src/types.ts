@@ -94,8 +94,15 @@ export interface CodexImageContent {
   detail?: string;
 }
 
-/** A user/developer message content part: text or an image (vision). */
-export type CodexContentPart = CodexTextContent | CodexImageContent;
+export interface CodexFileContent {
+  type: "file";
+  filename: string;
+  /** Base64 payload, optionally wrapped in a data: URL. Never rendered into prompt text. */
+  fileData: string;
+}
+
+/** A user/developer message content part: text, image (vision), or native file attachment. */
+export type CodexContentPart = CodexTextContent | CodexImageContent | CodexFileContent;
 
 export interface CodexThinkingContent {
   type: "thinking";
@@ -308,7 +315,9 @@ export interface CodexProviderConfig {
     autoApproveToolCalls?: boolean;
     /** Experimental transport: adapt one context across one, two, or six ChatGPT messages. */
     experimentalBiggerContext?: boolean;
-    experimentalSkillAttachments?: boolean;
+      experimentalSkillAttachments?: boolean;
+      /** Experimental transport: upload large task context as one text attachment. */
+      experimentalContextAttachments?: boolean;
     /** Explicitly rebuild each automatic turn in a fresh browser conversation. */
     experimentalFreshConversationPerTurn?: boolean;
     /** Use ordinary ChatGPT history for task conversations. Default: Temporary Chat. */

@@ -226,13 +226,14 @@ function UsageWindow({ copy, number, unknownModel, window }: {
   const title = window.model === "gpt-6-pro" ? "GPT-6 Pro" : window.model === "gpt-5.6-pro" ? "GPT-5.6 Sol Pro" : copy.combined;
   const duration = window.durationMs === DAY_MS ? copy.rollingDay : window.durationMs === 7 * DAY_MS ? copy.rollingWeek
     : copy.rollingHours.replace("{hours}", number(window.durationMs / 3_600_000));
+  const percentage = window.limit > 0 ? Math.min(100, Math.max(0, window.used / window.limit * 100)) : 0;
+  const meterTone = percentage >= 90 ? " is-critical" : percentage >= 75 ? " is-warning" : "";
   return (
-    <article className="limits-window">
-      <h3>{title}</h3>
-      <p className="limits-window-duration">{duration}</p>
+    <article className={`limits-window${meterTone}`}>
+      <div className="limits-window-heading"><h3>{title}</h3><span>{duration}</span></div>
       <div className={`limits-window-value${unknownModel ? " is-lower-bound" : ""}`}>
-        <strong>{unknownModel ? copy.lowerBound.replace("{count}", number(window.used)) : number(window.used)}</strong>
-        <span>{copy.observed}</span>
+        <strong>{unknownModel ? number(window.used) : `${number(Math.round(percentage))}%`}</strong>
+        <span>{unknownModel ? copy.observed : `${number(window.used)} / ${number(window.limit)}`}</span>
         {limitNeedsAttention(window) ? (
           <span className="limits-warning" role="img" aria-label={copy.nearLimit} title={copy.nearLimit}>
             <i aria-hidden="true" className="action-dot is-optional" />
@@ -240,8 +241,9 @@ function UsageWindow({ copy, number, unknownModel, window }: {
         ) : null}
       </div>
       {unknownModel ? <p className="limits-window-uncertain">{copy.modelTotalUnknown}</p> : (
-        <div aria-hidden="true" className="limits-meter">
-          <span style={{ width: `${window.limit > 0 ? Math.min(100, Math.max(0, window.used / window.limit * 100)) : 0}%` }} />
+        <div aria-label={`${number(window.used)} / ${number(window.limit)}`} className="limits-meter" role="progressbar"
+          aria-valuemax={window.limit} aria-valuemin={0} aria-valuenow={window.used}>
+          <span style={{ width: `${percentage}%` }} />
         </div>
       )}
       <p className="limits-window-reference">{copy.referenceCap.replace("{count}", number(window.limit))}</p>

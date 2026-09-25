@@ -356,6 +356,18 @@ test("launcher session verification reports its own deadline instead of a generi
   }
 });
 
+test("launcher descriptor accepts both supported idle surfaces across a local-production restart", () => {
+  const path = descriptorFile();
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  value.idleUrl = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  expect(readLauncherBrowserHostDescriptor(path).idleUrl).toBe(value.idleUrl);
+
+  value.idleUrl = "data:text/html,unexpected";
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected idle surface");
+});
+
 test("launcher descriptor rejects non-loopback browser ownership", () => {
   const path = descriptorFile();
   const value = JSON.parse(readFileSync(path, "utf8"));

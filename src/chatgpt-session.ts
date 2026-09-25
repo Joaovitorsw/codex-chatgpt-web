@@ -11,10 +11,24 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
+  'form [contenteditable="true"][role="textbox"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
+  // Structural identity used by the current composer, independent of locale.
+  'button[data-codex-intelligence-trigger="true"][aria-haspopup="menu"]',
   'button[aria-haspopup="menu"][data-tone="neutral"]',
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
+  // Current ChatGPT exposes a compact picker with no test id or data-tone.  It owns
+  // the same menu/effort slider but identifies itself through its accessible label.
+  'button[aria-label="Select ChatGPT model"][aria-haspopup="menu"]',
+  'button[aria-label="Selecionar modelo do ChatGPT"][aria-haspopup="menu"]',
+].join(", ");
+
+export const CHATGPT_APP_MENU_CONTROL_SELECTOR = [
+  'button[data-testid="composer-plus-btn"]',
+  'button[data-testid="composer-attachment-button"]',
+  'button[aria-label="Add files and more"]',
+  'button[aria-label="Adicionar arquivos e mais"]',
 ].join(", ");
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
@@ -22,20 +36,62 @@ export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
 ].join(", ");
 export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
-export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider]';
-export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
+export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = [
+  '[data-model-reasoning-effort-slider]',
+  '[data-reasoning-slider="true"]',
+  // Current Pro picker variants keep the semantic ARIA slider but no longer mark
+  // its owner with either historical data attribute. Scope the fallback to an
+  // actual menu/group so unrelated page sliders cannot become account evidence.
+  '[data-testid="composer-intelligence-picker-content"]:has([role="slider"])',
+  '[role="menu"]:has([role="slider"])',
+  '[role="group"]:has([role="slider"])',
+].join(", ");
+export const CHATGPT_EFFORT_SLIDER_SELECTOR = [
+  '[data-model-reasoning-effort-slider] [role="slider"]',
+  '[data-reasoning-slider="true"] [role="slider"]',
+  '[data-testid="composer-intelligence-picker-content"] [role="slider"]',
+  '[role="menu"] [role="slider"]',
+  '[role="group"] [role="slider"]',
+].join(", ");
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
 export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
-export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
+export const CHATGPT_SEND_BUTTON_SELECTOR = [
+  '[data-testid="send-button"]',
+  '[data-testid="composer-submit-button"]',
+  'button[type="submit"]:not([data-testid="stop-button"])',
+  'button[aria-label="Send"]',
+  'button[aria-label="Send message"]',
+  'button[aria-label="Enviar"]',
+  'button[aria-label="Enviar mensagem"]',
+].join(", ");
+export const CHATGPT_COMPLETION_ACTION_SELECTOR = [
+  'button[data-testid="copy-turn-action-button"]',
+  'button[data-testid="good-response-turn-action-button"]',
+  'button[data-testid="bad-response-turn-action-button"]',
+  'button[data-testid="regenerate-turn-action-button"]',
+  'button[aria-label="Regenerate response"]',
+  'button[aria-label="Gerar resposta novamente"]',
+  'button[aria-label="Copy message"]',
+  'button[aria-label="Copiar mensagem"]',
+  'button[aria-label="Good response"]',
+  'button[aria-label="Bad response"]',
+  'button[aria-label="Boa resposta"]',
+  'button[aria-label="Resposta ruim"]',
+].join(", ");
 export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="assistant"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
+  '[data-turn-key]:has(button[aria-label="Regenerate response"])',
+  '[data-turn-key]:not(:has([data-user-message-bubble]))',
+  '[data-chatgpt-search-unit-key]:has(> [data-conversation-role="assistant"])',
 ].join(", ");
 export const CHATGPT_USER_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="user"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
+  '[data-turn-key]:has([data-user-message-bubble])',
+  '[data-chatgpt-search-unit-key]:has([data-user-message-bubble]):not([data-turn-key] [data-chatgpt-search-unit-key])',
 ].join(", ");
 
 export interface ChatGptEffortSliderState {
@@ -156,6 +212,30 @@ export function parseChatGptEffortSliderState(
   return { min, max, value };
 }
 
+export async function selectChatGptEffortTick(
+  sliderContainer: Locator,
+  state: ChatGptEffortSliderState,
+  targetValue: number,
+): Promise<void> {
+  const targetIndex = targetValue - state.min;
+  if (targetIndex < 0 || targetValue > state.max) {
+    throw new Error(`ChatGPT effort target ${targetValue} is outside its slider range`);
+  }
+  const ticks = sliderContainer.locator([
+    "[data-locked][data-selected]",
+    "[data-model-picker-power-slider] [data-selected]",
+  ].join(", "));
+  if (await ticks.count() !== state.max - state.min + 1) {
+    throw new Error("ChatGPT effort ticks do not match its semantic slider range");
+  }
+  const target = ticks.nth(targetIndex);
+  const locked = await target.getAttribute("data-locked");
+  if (locked !== null && locked !== "false") {
+    throw new Error(`ChatGPT effort target ${targetValue} is locked`);
+  }
+  await target.click({ force: true, timeout: 5_000 });
+}
+
 export async function readChatGptEffortAvailability(
   sliderContainer: Locator,
   state: ChatGptEffortSliderState,
@@ -163,8 +243,10 @@ export async function readChatGptEffortAvailability(
   // Plus exposes a fourth ARIA position for a locked Pro upsell. Only the ticks
   // carry both attributes; the slider root also has data-locked and is not a choice.
   const locks = await sliderContainer.evaluate(container => Array.from(
-    container.querySelectorAll("[data-locked][data-selected]"),
-    tick => tick.getAttribute("data-locked"),
+    container.querySelectorAll(
+      '[data-locked][data-selected], [data-model-picker-power-slider] [data-selected]',
+    ),
+    tick => tick.getAttribute("data-locked") ?? "false",
   ));
   if (locks.length !== state.max - state.min + 1
     || locks.some(lock => lock !== "true" && lock !== "false")) {
@@ -248,10 +330,24 @@ export async function detectChatGptAccountCapabilities(
   try {
     const { sliderContainer, slider } = chatGptEffortSlider(page);
     const timeout = options.selectorTimeoutMs ?? 70_000;
-    // Model radio rows can hydrate before the effort control. They carry no evidence
-    // of the account's reasoning range, so an absent slider must fail, not cache false.
-    await sliderContainer.waitFor({ state: "visible", timeout });
-    await slider.waitFor({ state: "attached", timeout });
+    try {
+      // Hydration can expose model rows before the authoritative effort slider. Wait for the
+      // slider first so a slow pt-BR/Pro surface is not cached as an Instant-only account.
+      await sliderContainer.waitFor({ state: "visible", timeout });
+      await slider.waitFor({ state: "attached", timeout });
+    } catch (error) {
+      const label = await effortButton.getAttribute("aria-label").catch(() => null);
+      const structuralPicker = await effortButton.getAttribute("data-codex-intelligence-trigger").catch(() => null);
+      if (structuralPicker !== "true"
+        && label !== "Select ChatGPT model"
+        && label !== "Selecionar modelo do ChatGPT") throw error;
+      const compactSolOption = page.getByRole("menuitemradio")
+        .filter({ hasText: "GPT-5.6 Sol" })
+        .filter({ visible: true })
+        .last();
+      if (!await compactSolOption.isVisible().catch(() => false)) throw error;
+      return { solAvailable: true, extraHighAvailable: false, proAvailable: false };
+    }
     const state = parseChatGptEffortSliderState(
       await slider.getAttribute("aria-valuemin"),
       await slider.getAttribute("aria-valuemax"),

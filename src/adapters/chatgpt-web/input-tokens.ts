@@ -16,6 +16,21 @@ export const CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET = 28_000;
 
 const TOKEN_ESTIMATE_TRANSACTION = `ctx_${"0".repeat(32)}`;
 
+function inputFileTokens(compiled: CompiledChatGptWebPrompt): number {
+  // Conservative binary-agnostic reserve. Text documents usually tokenize below this bound;
+  // compressed/binary files are accounted by byte size without decoding them into prompt text.
+  return (compiled.inputFiles ?? []).reduce(
+    (sum, file) => sum + Math.ceil(Buffer.from(file.base64, "base64").length / 3),
+    0,
+  );
+}
+
+function visibleSkillFileTokens(compiled: CompiledChatGptWebPrompt, modelId: string): number {
+  // Context transport documents are uploaded beside the composer message. Their contents still
+  // count toward the model's total input below, but not toward ChatGPT's one-visible-message cap.
+  return skillFileTokens(compiled.skillFiles?.filter(file => file.contextTransport !== true), modelId);
+}
+
 export function compiledChatGptWebMessages(compiled: CompiledChatGptWebPrompt): string[] {
   if (!compiled.multipart) return [compiled.text];
   return [
@@ -42,7 +57,9 @@ export function estimateCompiledChatGptWebMessageTokens(
 ): number {
   const messages = compiledChatGptWebMessages(compiled);
   return Math.max(...messages.map((message, index) => estimateTokens(message, modelId)
-    + (index === messages.length - 1 ? skillFileTokens(compiled.skillFiles, modelId) : 0)));
+    + (index === messages.length - 1
+      ? visibleSkillFileTokens(compiled, modelId) + inputFileTokens(compiled)
+      : 0)));
 }
 
 export function estimateCompiledChatGptWebInputTokens(
@@ -63,7 +80,8 @@ export function estimateCompiledChatGptWebInputTokens(
       modelId,
     ), 0)
     : 0;
-  return CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + messageTokens + acknowledgementTokens + imageTokens + skillFileTokens(compiled.skillFiles, modelId);
+  return CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + messageTokens + acknowledgementTokens + imageTokens
+    + skillFileTokens(compiled.skillFiles, modelId) + inputFileTokens(compiled);
 }
 
 export function estimateChatGptWebImageTokens(compiled: CompiledChatGptWebPrompt): number {

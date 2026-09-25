@@ -5,7 +5,10 @@ import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
-export const LAUNCHER_BROWSER_IDLE_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+const DARK_IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Cmeta%20name%3D%22color-scheme%22%20content%3D%22dark%22%3E%3Cstyle%3Ehtml%2Cbody%7Bmargin%3A0%3Bbackground%3A%23181818%3Bcolor-scheme%3Adark%3B%7D%3C%2Fstyle%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+const LEGACY_IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
+export const LAUNCHER_BROWSER_IDLE_URL = DARK_IDLE_BROWSER_URL;
+const LAUNCHER_BROWSER_IDLE_URLS = new Set([DARK_IDLE_BROWSER_URL, LEGACY_IDLE_BROWSER_URL]);
 export type LauncherBrowserHostProfile = "production" | "development";
 
 export class LauncherBrowserTurnCancelledError extends Error {
@@ -117,7 +120,7 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   if (descriptor.partition !== expectedPartition) {
     throw new Error("Launcher browser descriptor identifies an unexpected browser partition");
   }
-  if (descriptor.idleUrl !== LAUNCHER_BROWSER_IDLE_URL) {
+  if (typeof descriptor.idleUrl !== "string" || !LAUNCHER_BROWSER_IDLE_URLS.has(descriptor.idleUrl)) {
     throw new Error("Launcher browser descriptor identifies an unexpected idle surface");
   }
   if (typeof descriptor.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(descriptor.surfaceId)) {
@@ -251,6 +254,22 @@ export async function selectLauncherPage(
   throw new Error("Launcher browser host did not expose its owned browser surface");
 }
 
+function sameLauncherBrowserProcess(
+  left: LauncherBrowserHostDescriptor,
+  right: LauncherBrowserHostDescriptor,
+): boolean {
+  return left.pid === right.pid
+    && left.endpoint === right.endpoint
+    && left.profile === right.profile
+    && left.partition === right.partition;
+}
+
+function retryableLauncherSurfaceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("surface is no longer registered")
+    || message.includes("did not expose its owned browser surface");
+}
+
 export async function connectLauncherBrowserHost(
   descriptorPath: string,
   timeoutMs = 20_000,
@@ -260,34 +279,88 @@ export async function connectLauncherBrowserHost(
   if (abortSignal?.aborted) {
     throw new DOMException("Launcher browser connection aborted", "AbortError");
   }
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
-  await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
-  let browser: Browser;
-  try {
-    browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs });
-  } catch (error) {
-    throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const closeOnAbort = () => { void browser.close().catch(() => {}); };
-  abortSignal?.addEventListener("abort", closeOnAbort, { once: true });
-  try {
+  const deadline = Date.now() + timeoutMs;
+  let previousDescriptor: LauncherBrowserHostDescriptor | undefined;
+  let previousError: unknown;
+
+  for (let connectionAttempt = 0; connectionAttempt < 2; connectionAttempt += 1) {
     if (abortSignal?.aborted) {
       throw new DOMException("Launcher browser connection aborted", "AbortError");
     }
-    const { context, page } = await selectLauncherPage(
-      browser,
-      descriptor,
-      timeoutMs,
-      surfaceId,
-      abortSignal,
-    );
-    return { descriptor, browser, context, page };
-  } catch (error) {
-    await browser.close().catch(() => {});
-    throw error;
-  } finally {
-    abortSignal?.removeEventListener("abort", closeOnAbort);
+    const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+    const remainingForConnect = Math.max(1, deadline - Date.now());
+    if (previousDescriptor && sameLauncherBrowserProcess(previousDescriptor, descriptor)) {
+      if (previousError) throw previousError;
+      throw new Error("Launcher browser reconnect did not publish a new browser process");
+    }
+    previousDescriptor = descriptor;
+    await assertCdpReady(descriptor, Math.min(remainingForConnect, 5_000));
+
+    let browser: Browser;
+    try {
+      browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: remainingForConnect });
+    } catch (error) {
+      const wrapped = new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
+      previousError = wrapped;
+      if (connectionAttempt === 0 && Date.now() < deadline) {
+        const latest = readLauncherBrowserHostDescriptor(descriptorPath);
+        if (!sameLauncherBrowserProcess(descriptor, latest)) continue;
+      }
+      throw wrapped;
+    }
+
+    const closeOnAbort = () => { void browser.close().catch(() => {}); };
+    abortSignal?.addEventListener("abort", closeOnAbort, { once: true });
+    let retryWithNewProcess = false;
+    let handedOff = false;
+    try {
+      if (abortSignal?.aborted) {
+        throw new DOMException("Launcher browser connection aborted", "AbortError");
+      }
+      let activeDescriptor = descriptor;
+      const selectedSurfaceId = surfaceId ?? activeDescriptor.surfaceId;
+      const firstSelectionBudget = Math.max(1, Math.min(3_000, deadline - Date.now()));
+      try {
+        const { context, page } = await selectLauncherPage(
+          browser,
+          activeDescriptor,
+          firstSelectionBudget,
+          selectedSurfaceId,
+          abortSignal,
+        );
+        handedOff = true;
+        return { descriptor: activeDescriptor, browser, context, page };
+      } catch (error) {
+        if (!retryableLauncherSurfaceError(error) || Date.now() >= deadline) throw error;
+        const latest = readLauncherBrowserHostDescriptor(descriptorPath);
+        if (!sameLauncherBrowserProcess(activeDescriptor, latest)) {
+          previousError = error;
+          retryWithNewProcess = connectionAttempt === 0;
+          if (!retryWithNewProcess) throw error;
+        } else {
+          activeDescriptor = latest;
+          const remainingForSelection = Math.max(1, deadline - Date.now());
+          const { context, page } = await selectLauncherPage(
+            browser,
+            activeDescriptor,
+            remainingForSelection,
+            selectedSurfaceId,
+            abortSignal,
+          );
+          handedOff = true;
+          return { descriptor: activeDescriptor, browser, context, page };
+        }
+      }
+    } finally {
+      abortSignal?.removeEventListener("abort", closeOnAbort);
+      if (!handedOff) await browser.close().catch(() => {});
+    }
+    if (retryWithNewProcess) continue;
   }
+
+  throw previousError instanceof Error
+    ? previousError
+    : new Error("Launcher browser could not be reconnected after its ownership descriptor changed");
 }
 
 export async function inspectLauncherBrowserHost(
@@ -353,7 +426,10 @@ export async function inspectLauncherBrowserHost(
   }
 }
 
-export const LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS = 30_000;
+// First launch on slower machines can spend well over 30 seconds hydrating ChatGPT's
+// composer. Keep the outer inspection alive long enough for the browser helper to
+// either prove the session or return its own specific authentication/surface error.
+export const LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS = 120_000;
 export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =

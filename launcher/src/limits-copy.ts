@@ -64,6 +64,68 @@ const en = {
 
 export type LimitsCopy = typeof en;
 
+const ptBR: LimitsCopy = {
+  title: "Limites",
+  subtitle: "Limites públicos do ChatGPT e mensagens observadas por este launcher.",
+  notConfigured: "Não configurado",
+  setupTitle: "Acompanhe as mensagens enviadas por aqui",
+  setupBody: "Configure o acompanhamento para detectar seu plano no navegador do launcher. Disponível para Pro US$ 100 e Pro US$ 200.",
+  setup: "Configurar acompanhamento",
+  checking: "Verificando seu plano…",
+  recheck: "Verificar plano novamente",
+  browserBusy: "Aguarde a tarefa ou operação atual do navegador terminar antes de verificar o plano.",
+  loading: "Carregando histórico salvo…",
+  refresh: "Atualizar",
+  loadError: "Não foi possível carregar o acompanhamento.",
+  staleError: "Não foi possível atualizar. A última leitura aparece abaixo.",
+  actionError: "Não foi possível concluir esta ação.",
+  sourceError: "Não foi possível abrir a referência da OpenAI.",
+  zeroRisk: "Indisponível no Risco Zero",
+  zeroRiskBody: "A detecção do plano e o acompanhamento de uso ficam indisponíveis no Risco Zero. Os limites públicos de referência continuam visíveis.",
+  proOnly: "O acompanhamento está disponível apenas para planos Pro",
+  unsupportedBody: "Esta conta não foi identificada como Pro US$ 100 ou Pro US$ 200. Plus e outros planos não podem ser acompanhados aqui; seus limites numéricos são desconhecidos.",
+  paused: "Acompanhamento inativo",
+  active: "Acompanhamento do launcher ativo",
+  estimate: "Estimativa",
+  observedTitle: "Uso observado",
+  observedBody: "Mensagens registradas em janelas móveis locais, comparadas com a referência publicada.",
+  scopeTitle: "Somente a atividade por este launcher é contabilizada",
+  scopeBody: "O uso fora deste launcher não entra na conta. Estas estimativas não representam o saldo real da conta. Janelas móveis de 24 horas e 7 dias não determinam o horário de redefinição do ChatGPT.",
+  noWindows: "Ainda não há janelas de uso disponíveis.",
+  rollingDay: "Últimas 24 horas",
+  rollingWeek: "Últimos 7 dias",
+  rollingHours: "Últimas {hours} horas",
+  observed: "observadas",
+  nearLimit: "O uso observado atingiu pelo menos 75% de um limite de referência",
+  referenceCap: "Referência: {count} mensagens",
+  uncertain: "Mensagens Pro sem modelo identificado nesta janela: {count}",
+  sharedUnknown: "Inclui {count} mensagens com modelo Pro desconhecido",
+  lowerBound: "Pelo menos {count}",
+  modelTotalUnknown: "Total por modelo desconhecido",
+  attributionBody: "Algumas mensagens Pro não têm modelo identificado. As contagens por modelo são valores mínimos; os totais compartilhados incluem essas mensagens.",
+  combined: "Dois modelos Pro",
+  history: "Histórico salvo",
+  historyBody: "As mensagens dos últimos 7 dias ficam salvas neste dispositivo entre reinicializações. O registro começa quando o acompanhamento é ativado; atividades anteriores não são incluídas.",
+  totalMessages: "Mensagens · últimos 7 dias",
+  unknownPro: "Modelo Pro não identificado",
+  unknownProBody: "Estas mensagens não puderam ser atribuídas a um modelo Pro específico.",
+  since: "Acompanhando desde",
+  checked: "Plano verificado",
+  unknown: "Desconhecido",
+  referenceTitle: "Limites públicos de referência",
+  referenceBody: "Franquias do ChatGPT para GPT-6 Pro e GPT-5.6 Sol Pro. São valores de referência, não leituras da conta. Os limites do Work e Codex são separados.",
+  asOf: "Atualizado em {date}",
+  source: "Referência da OpenAI",
+  referenceOnly: "Somente referência",
+  shared: "Compartilhado entre os dois modelos Pro",
+  day: "{count} / dia",
+  week: "{count} / semana",
+  month: "{count} / mês",
+  otherPlans: "Plus e outros planos",
+  otherPlansBody: "Franquias numéricas desconhecidas. O acompanhamento do launcher está disponível somente para Pro US$ 100 e Pro US$ 200.",
+  businessBody: "As franquias Business aparecem apenas como referência. O acompanhamento do Business não é suportado.",
+};
+
 const zhCN: LimitsCopy = {
   title: "使用限额",
   subtitle: "ChatGPT 公开限额与此启动器观测到的消息用量。",
@@ -312,7 +374,7 @@ const ko: LimitsCopy = {
   businessBody: "Business 한도는 참고용입니다. Business 사용량 추적은 지원하지 않습니다.",
 };
 
-const copies: Record<Language, LimitsCopy> = { en, "zh-CN": zhCN, "zh-TW": zhTW, ja, ko };
+const copies: Record<Language, LimitsCopy> = { en, "pt-BR": ptBR, "zh-CN": zhCN, "zh-TW": zhTW, ja, ko };
 
 export function limitsCopyFor(language: Language): LimitsCopy {
   return copies[language];

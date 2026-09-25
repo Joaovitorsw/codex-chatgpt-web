@@ -1,0 +1,7 @@
+interface:
+  display_name: "Code work orchestrator"
+  short_description: "Routes code tasks to a focused workflow."
+  brand_color: "#2563EB"
+  default_prompt: "Use $code-work-orchestrator to route and complete this repository task with focused context and validation."
+policy:
+  allow_implicit_invocation: true

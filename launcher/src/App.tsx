@@ -14,6 +14,7 @@ import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { LimitsSurface } from "./LimitsSurface";
 import { limitsCopyFor } from "./limits-copy";
+import { friendlyErrorMessage } from "./friendly-errors";
 import { useLimits } from "./useLimits";
 import type {
   BrowserInteractionMode,
@@ -58,7 +59,7 @@ export function App() {
       setLogs(next.logs);
       setOperation(next.operation);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
-        setError(next.operation.message);
+        setError(messageOf(next.operation.message));
       }
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribeState = api.onStateChanged((state) => {
@@ -74,7 +75,7 @@ export function App() {
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
-      if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
+      if (next.status === "failed" && next.name !== "mcp-verification") setError(messageOf(next.message));
     });
     const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
     const unsubscribeUpdate = api.onUpdateState((update) => {
@@ -673,11 +674,13 @@ function LauncherShell({
                 copy={copy}
                 devProfile={devProfile}
                 operation={operation}
+                onSmokeComplete={() => setSurface("setup")}
                 setError={setError}
                 showMcp={() => {
                   setMcpTargetMode(null);
                   setSurface("mcp");
                 }}
+                showSettings={() => setSurface("settings")}
                 snapshot={snapshot}
                 updateState={updateState}
               />
@@ -846,11 +849,18 @@ function BrowserSurface({
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
   const visible = browser?.visible === true;
   const manualInteraction = interactionMode === "manual";
+  const activeBrowserTurn = browser?.tabs.some(tab => (
+    tab.status === "running"
+    || tab.status === "testing"
+    || (tab.finalizingUntil !== undefined && Date.parse(tab.finalizingUntil) > Date.now())
+  )) === true;
   const passkeyAvailable = !manualInteraction
     && platform === "darwin"
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
-  const navigationLocked = browser?.status === "running" || browser?.status === "testing";
+  const navigationLocked = activeBrowserTurn
+    || browser?.status === "running"
+    || browser?.status === "testing";
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
     && operation.status === "running"
@@ -1022,14 +1032,18 @@ function BrowserSurface({
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />
-            <h1>{manualInteraction
-              ? copy.browserReady
-              : browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
-            <p>{manualInteraction
-              ? copy.stepAccountBody
-              : browser?.authenticated
-              ? copy.noActiveTaskBody
-              : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
+            <h1>{activeBrowserTurn
+              ? copy.activeTaskHidden
+              : manualInteraction
+                ? copy.browserReady
+                : browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
+            <p>{activeBrowserTurn
+              ? copy.activeTaskHiddenBody
+              : manualInteraction
+                ? copy.stepAccountBody
+                : browser?.authenticated
+                  ? copy.noActiveTaskBody
+                  : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
               <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
                 {manualInteraction || browser?.authenticated ? copy.openChatgpt : copy.signIn}
@@ -1110,8 +1124,10 @@ function SetupSurface({
   copy,
   devProfile,
   operation,
+  onSmokeComplete,
   setError,
   showMcp,
+  showSettings,
   snapshot,
   updateState,
 }: {
@@ -1120,13 +1136,21 @@ function SetupSurface({
   copy: Copy;
   devProfile: boolean;
   operation: OperationState | null;
+  onSmokeComplete: () => void;
   setError: (error: string | null) => void;
   showMcp: () => void;
+  showSettings: () => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
   const [localBusy, setLocalBusy] = useState(false);
   const manualInteraction = snapshot.state.browserInteractionMode === "manual";
+  // A verified Codex catalog proves the browser smoke gate was completed when the
+  // integration was installed. A launcher update may intentionally invalidate the
+  // version-specific smoke cache, but it must not make an already completed setup
+  // look incomplete or disable reinstall/repair actions.
+  const browserSetupGateComplete = snapshot.smokePassed
+    || snapshot.state.codexCatalogVerified === true;
   const busy = localBusy
     || operation?.status === "running"
     || (!manualInteraction && (
@@ -1155,6 +1179,9 @@ function SetupSurface({
     await activateBrowser();
     await api!.smokeTest();
     updateState((await api!.snapshot()).state);
+    // Smoke uses the embedded browser, but its result belongs to the Setup checklist.
+    // Return there after a successful run instead of leaving the user on the browser home surface.
+    onSmokeComplete();
   });
   const install = () => run(async () => {
     await api!.setupCore();
@@ -1187,12 +1214,13 @@ function SetupSurface({
             title={copy.stepAccount}
           />
           <SetupRow
-            action={snapshot.smokePassed ? copy.smokePassed : copy.runSmoke}
-            complete={snapshot.smokePassed}
+            action={copy.runSmoke}
+            complete={browserSetupGateComplete}
             description={copy.stepSmokeBody}
             disabled={busy || !browser?.authenticated}
             index={2}
             onAction={smoke}
+            repeatable
             title={copy.stepSmoke}
           />
         </> : null}
@@ -1202,7 +1230,7 @@ function SetupSurface({
             : devProfile ? copy.devInstall : copy.install}
           complete={snapshot.state.codexCatalogVerified === true}
           description={devProfile ? copy.devStepInstallBody : copy.stepInstallBody}
-          disabled={busy || (!snapshot.smokePassed && snapshot.state.coreSetupComplete !== true)}
+          disabled={busy || (!browserSetupGateComplete && snapshot.state.coreSetupComplete !== true)}
           index={manualInteraction ? 1 : 3}
           onAction={install}
           repeatable
@@ -1237,6 +1265,19 @@ function SetupSurface({
           <small>{devProfile ? copy.devMcpBody : copy.mcpBody}</small>
         </span>
         <em>{snapshot.state.mcpSetupComplete ? copy.mcpReady : copy.configureMcp}</em>
+        <Icon name="chevron" />
+      </button>
+      <button
+        className="next-surface-row"
+        onClick={showSettings}
+        type="button"
+      >
+        <Icon name="settings" />
+        <span>
+          <strong>{copy.settingsTitle}</strong>
+          <small>{copy.general}</small>
+        </span>
+        <em>{copy.settings}</em>
         <Icon name="chevron" />
       </button>
     </ContentSurface>
@@ -1678,6 +1719,28 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setContextAttachments = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setContextAttachments(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancelPendingFreshConversationPerTurn = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.cancelPendingFreshConversationPerTurn());
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setUseSavedChats = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -1777,10 +1840,40 @@ function SettingsSurface({
         </SettingRow>
         <SettingRow body={snapshot.state.browserInteractionMode === "manual"
           ? copy.manualFreshConversationUnavailable : copy.freshConversationBody} label={copy.freshConversation}>
+          <div className="pending-setting-control">
+            <Switch
+              checked={snapshot.state.pendingFreshConversationPerTurn
+                ?? snapshot.state.experimentalFreshConversationPerTurn}
+              disabled={busy || snapshot.state.browserInteractionMode === "manual" || snapshot.state.coreSetupComplete !== true}
+              onChange={(checked) => {
+                if (typeof snapshot.state.pendingFreshConversationPerTurn === "boolean"
+                  && checked === snapshot.state.experimentalFreshConversationPerTurn) {
+                  void cancelPendingFreshConversationPerTurn();
+                } else {
+                  void setFreshConversationPerTurn(checked);
+                }
+              }}
+            />
+            {typeof snapshot.state.pendingFreshConversationPerTurn === "boolean" ? (
+              <button
+                className="pending-setting-cancel"
+                disabled={busy}
+                onClick={() => void cancelPendingFreshConversationPerTurn()}
+                type="button"
+              >
+                {pendingFreshConversationCopy(language, snapshot.state.pendingFreshConversationPerTurn)}
+              </button>
+            ) : null}
+          </div>
+        </SettingRow>
+        <SettingRow
+          body={contextAttachmentCopy(language).body}
+          label={contextAttachmentCopy(language).label}
+        >
           <Switch
-            checked={snapshot.state.experimentalFreshConversationPerTurn}
-            disabled={busy || snapshot.state.browserInteractionMode === "manual" || snapshot.state.coreSetupComplete !== true}
-            onChange={(checked) => void setFreshConversationPerTurn(checked)}
+            checked={snapshot.state.experimentalContextAttachments === true}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
+            onChange={(checked) => void setContextAttachments(checked)}
           />
         </SettingRow>
         <SettingRow body={copy.savedChatsBody} label={copy.savedChats}>
@@ -2605,7 +2698,23 @@ function formatBrowserAddress(url: string | undefined, copy: Copy): string {
 }
 
 function messageOf(value: unknown): string {
-  return value instanceof Error ? value.message : String(value);
+  return friendlyErrorMessage(value, document.documentElement.lang || "en");
+}
+
+function pendingFreshConversationCopy(language: Language, enabled: boolean): string {
+  if (language === "pt-BR") return `Agendado: ${enabled ? "ativar" : "desativar"} · Cancelar`;
+  return `Queued: turn ${enabled ? "on" : "off"} · Cancel`;
+}
+
+function contextAttachmentCopy(language: Language): { label: string; body: string } {
+  if (language === "pt-BR") return {
+    label: "Contexto grande como arquivo",
+    body: "Quando o contexto ultrapassa 24 mil caracteres, anexa um arquivo de texto e envia apenas uma instrução curta. Reduz o tempo de preenchimento do ChatGPT. Desativado por padrão.",
+  };
+  return {
+    label: "Large context as a file",
+    body: "When context exceeds 24,000 characters, attach one text file and send only a short instruction. This reduces ChatGPT composer time. Off by default.",
+  };
 }
 
 function platformLabel(value: string): string {

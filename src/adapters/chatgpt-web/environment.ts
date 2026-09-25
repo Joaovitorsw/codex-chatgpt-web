@@ -36,7 +36,7 @@ export interface ChatGptThreadSpawnLineage {
 
 export interface ChatGptRootThreadMetadata {
   threadId: string;
-  sandboxType: ChatGptSandboxPolicy["type"] | "platform";
+  sandboxType: ChatGptSandboxPolicy["type"] | "platform" | "canonical-rollout";
   workspaceRoots: string[];
 }
 
@@ -184,9 +184,10 @@ function compactionSummaryMessage(value: Record<string, unknown>): boolean {
   return isReadableCompactionSummaryText(text) || text === OPAQUE_COMPACTION_NOTE;
 }
 
-/** The desktop injects cross-task messages as synthetic tool outputs without a call_id. */
+/** The desktop injects cross-task and app-created-task instructions as synthetic tool outputs. */
 function isDelegatedInstruction(item: Record<string, unknown> | undefined): boolean {
-  if (item?.type !== "function_call_output" || item.name !== "send_message_to_thread"
+  if (item?.type !== "function_call_output"
+    || (item.name !== "send_message_to_thread" && item.name !== "create_thread")
     || item.namespace !== "codex_app" || item.call_id !== undefined
     || typeof item.id !== "string" || !item.id || !itemTurnId(item)?.trim()
     || typeof item.output !== "string") return false;
@@ -879,10 +880,20 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
 
 /** Read only Codex-owned lifecycle identity without interpreting or rewriting the provider body. */
 export function extractCodexTurnIdentityFromBody(value: unknown): ChatGptTurnIdentity {
+  const body = record(value);
   const metadata = clientTurnMetadataFromBody(value);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  // App-created tasks in Codex Desktop 0.155 may omit turn_id from the request-level metadata
+  // while retaining it on the current native response item. The item provenance is already used
+  // throughout environment parsing; recover only the most recent tagged item and let the exact
+  // canonical rollout prove that it belongs to this thread before granting any authority.
+  const itemOwnedTurnId = input.findLast(item => itemTurnId(item) !== undefined);
+  const fallbackTurnId = itemOwnedTurnId ? itemTurnId(itemOwnedTurnId) : undefined;
   return {
     ...(typeof metadata?.thread_id === "string" ? { threadId: metadata.thread_id } : {}),
-    ...(typeof metadata?.turn_id === "string" ? { turnId: metadata.turn_id } : {}),
+    ...(typeof metadata?.turn_id === "string"
+      ? { turnId: metadata.turn_id }
+      : fallbackTurnId ? { turnId: fallbackTurnId } : {}),
     ...(typeof metadata?.parent_thread_id === "string" ? { parentThreadId: metadata.parent_thread_id } : {}),
     ...(typeof metadata?.agent_name === "string" ? { agentName: metadata.agent_name } : {}),
     ...(typeof metadata?.subagent_kind === "string" ? { subagentKind: metadata.subagent_kind } : {}),
@@ -918,14 +929,20 @@ export function extractChatGptThreadSpawnLineage(
 /** Root tasks have no spawn edge; their canonical session and current turn must prove authority. */
 export function extractChatGptRootThreadMetadata(parsed: CodexParsedRequest): ChatGptRootThreadMetadata | undefined {
   const metadata = clientTurnMetadata(parsed);
-  if (!metadata || !isEnvironmentRequest(metadata, parsed)
-    || metadata.parent_thread_id != null || metadata.subagent_kind != null
+  // Codex Desktop 0.155 can start an app-created root task with only lifecycle identity in the
+  // provider request; cwd, roots and permissions live in the canonical rollout turn_context.
+  // Missing diagnostic fields never grant authority here: the exact thread/turn rollout is still
+  // required and validates that this is a root session before yielding filesystem access.
+  const requestKind = metadata?.request_kind;
+  if (!metadata
+    || (requestKind !== undefined && !isEnvironmentRequest(metadata, parsed))
+    || metadata.subagent_kind != null
     || (metadata.agent_name != null && metadata.agent_name !== "/root")) return undefined;
   const threadId = typeof metadata.thread_id === "string" ? metadata.thread_id.trim() : "";
-  const sandboxType = sandboxTypeFromMetadata(canonicalSandboxMetadata(metadata));
+  const sandboxType = sandboxTypeFromMetadata(canonicalSandboxMetadata(metadata)) ?? "canonical-rollout";
   const workspaces = record(metadata.workspaces);
   const workspacePaths = workspaces ? Object.keys(workspaces) : [];
-  if (!threadId || !sandboxType || workspacePaths.some(path => !isAbsolute(path))) return undefined;
+  if (!threadId || workspacePaths.some(path => !isAbsolute(path))) return undefined;
   return { threadId, sandboxType, workspaceRoots: [...new Set(workspacePaths.map(path => resolve(path)))] };
 }
 

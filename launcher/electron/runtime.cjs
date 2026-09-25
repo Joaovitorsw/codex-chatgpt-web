@@ -1124,6 +1124,35 @@ class RuntimeHost {
     return { ...result, enabled: enabled === true };
   }
 
+  async setContextAttachments(enabled) {
+    if (typeof enabled !== "boolean") throw new Error("Context attachments preference must be a boolean");
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Initialize the runtime before changing context attachments");
+    if (current.config?.browserInteractionMode === "manual") {
+      throw new Error("Context attachments are unavailable in Zero Risk mode");
+    }
+    const development = this.launcherProfile === "development";
+    const args = [
+      ...(development ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--acknowledge-unofficial",
+      ...(development ? [] : ["--replace-codex-route", "--restart-service"]),
+      enabled ? "--context-attachments" : "--inline-context",
+    ];
+    if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: enabled ? "Enabling large context attachments" : "Restoring inline context",
+      successMessage: enabled ? "Large context attachments enabled" : "Inline context restored",
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    };
+    const result = development
+      ? await this.runDevSetup("context-attachments", args, options)
+      : await this.runSetup("context-attachments", args, options);
+    return { ...result, enabled };
+  }
+
   async setFreshConversationPerTurn(enabled) {
     if (typeof enabled !== "boolean") throw new Error("Fresh conversation preference must be a boolean");
     const current = this.runtimeConfigSnapshot();

@@ -23,6 +23,7 @@ function brokerContent(content: string | CodexContentPart[]): unknown[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
   return content.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "file") return { type: "text", text: `[file attachment: ${part.filename}]` };
     const parsed = parseDataUrl(part.imageUrl);
     if (parsed) return { type: "image", data: parsed.base64, mimeType: parsed.mediaType };
     return { type: "resource_link", uri: part.imageUrl, name: "Codex tool image", mimeType: "image/*" };

@@ -82,6 +82,7 @@ if (!browserHelperBuild.success) {
 
 copyFileSync(join(root, "package.json"), join(appDir, "package.json"));
 copyFileSync(join(root, "bun.lock"), join(appDir, "bun.lock"));
+cpSync(join(root, "launcher", "assets", "skills"), join(appDir, "skills"), { recursive: true });
 const install = Bun.spawnSync([process.execPath, "install", "--production", "--frozen-lockfile", "--ignore-scripts"], {
   cwd: appDir,
   stdout: "pipe",

@@ -169,6 +169,27 @@ describe("trusted current Codex environment envelope", () => {
     expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
   });
 
+  test("a native create_thread delegation becomes the app-created task instruction", () => {
+    const output = "<codex_delegation>\n  <source_thread_id>01a0bbd4-8de6-78d2-891c-dc329238637a</source_thread_id>\n  <input>Run the isolated probe.</input>\n</codex_delegation>";
+    const request = parseRequest({
+      model: "chatgpt-web/gpt-5.6-sol",
+      input: [{
+        type: "function_call_output",
+        id: "fco_create_thread",
+        name: "create_thread",
+        namespace: "codex_app",
+        output,
+        internal_chat_message_metadata_passthrough: { turn_id: "01a0bbd4-8de6-78d2-891c-dc329238637b" },
+      }],
+      client_metadata: { "x-codex-turn-metadata": JSON.stringify({
+        thread_id: "01a0bbd4-8de6-78d2-891c-dc329238637c",
+        turn_id: "01a0bbd4-8de6-78d2-891c-dc329238637b",
+      }) },
+    });
+
+    expect(extractChatGptTurnUserRevision(request)).toBe(output);
+  });
+
   test("native compaction keeps environment and instruction separate with either summary placement", () => {
     for (const summaryOnly of [false, true]) {
       const request = currentWire({ threadId: `thread_summary_placement_${summaryOnly}` });
@@ -963,6 +984,77 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  test("recovers an app-created root task when request metadata carries only lifecycle identity", () => {
+    const { codexHome, request } = resumedRootFixture();
+    const body = request._rawBody as { client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: rolloutThreadId,
+      turn_id: rolloutTurnId,
+      parent_thread_id: "01a0d72f-33f5-7f82-9868-913fe6dd43a5",
+    });
+    request.context.tools = [{ name: "current_tool", description: "current", parameters: { type: "object" } }];
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toEqual({
+      cwd: root, roots: [root], writableRoots: [root], sandboxPolicy: { type: "dangerFullAccess" },
+      tools: request.context.tools,
+    });
+  });
+
+  test("recovers an app-created root task when optional metadata classification is unrecognized", () => {
+    const { codexHome, request } = resumedRootFixture();
+    const body = request._rawBody as { client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      request_kind: "agent_created_thread",
+      thread_id: rolloutThreadId,
+      turn_id: rolloutTurnId,
+    });
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+  });
+
+  test("recovers an app-created root turn id from its latest native item", () => {
+    const { codexHome, request } = resumedRootFixture();
+    const body = request._rawBody as {
+      input: Array<Record<string, unknown>>;
+      client_metadata: Record<string, string>;
+    };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({ thread_id: rolloutThreadId });
+    body.input.push({
+      type: "function_call_output",
+      call_id: "call_created_task",
+      output: "created",
+      internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
+    });
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+  });
+
+  test("app-created bootstrap may recover a cwd-less native diff only through its exact rollout", () => {
+    const { codexHome, request } = resumedRootFixture();
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    body.input.push(
+      {
+        type: "message",
+        role: "user",
+        id: "msg_app_created_environment",
+        content: [{ type: "input_text", text: "<environment_context><current_date>2026-09-25</current_date></environment_context>" }],
+        internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
+      },
+      {
+        type: "function_call_output",
+        name: "create_thread",
+        namespace: "codex_app",
+        call_id: "call_created_task",
+        output: `<codex_delegation>\n<source_thread_id>${rolloutParentId}</source_thread_id>\n<input>probe</input>\n</codex_delegation>`,
+        internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
+      },
+    );
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+    body.input.at(-1)!.namespace = "untrusted";
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow("missing cwd");
+  });
+
   function midnightRolloutFixture() {
     const fixture = resumedRootFixture();
     const body = fixture.request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
@@ -1637,9 +1729,38 @@ describe("trusted Codex task environment continuity", () => {
         file_system_sandbox_policy: { kind: "restricted", entries: workspaceEntries },
       })),
     ].join("\n") + "\n");
-    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(
       environmentlessChild(rolloutTurnId, "workspace-write", [root, auxiliaryRoot]),
-    )).toThrow("workspace-write permission profile is inconsistent");
+    ).sandboxPolicy).toEqual({
+      type: "workspaceWrite",
+      writableRoots: [root, auxiliaryRoot],
+      networkAccess: true,
+    });
+
+    writeFileSync(rolloutPath, [
+      JSON.stringify(childSessionMeta()),
+      JSON.stringify(childTurnContext(rolloutTurnId, {
+        workspace_roots: [root, auxiliaryRoot],
+        sandbox_policy: {
+          type: "workspace-write",
+          writable_roots: [auxiliaryRoot],
+          network_access: true,
+        },
+        permission_profile: {
+          type: "managed",
+          file_system: { type: "restricted", entries: workspaceEntries },
+          network: "restricted",
+        },
+        file_system_sandbox_policy: { kind: "restricted", entries: [...workspaceEntries].reverse() },
+      })),
+    ].join("\n") + "\n");
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(
+      environmentlessChild(rolloutTurnId, "workspace-write", [root, auxiliaryRoot]),
+    ).sandboxPolicy).toEqual({
+      type: "workspaceWrite",
+      writableRoots: [root, auxiliaryRoot],
+      networkAccess: false,
+    });
 
     const readOnlyEntries = [
       { path: { type: "special", value: { kind: "root" } }, access: "read" },

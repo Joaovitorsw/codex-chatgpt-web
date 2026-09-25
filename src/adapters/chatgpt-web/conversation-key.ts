@@ -36,9 +36,11 @@ export function chatGptConversationKey(
   return createHash("sha256").update(JSON.stringify({
     namespace,
     threadId: identity.threadId,
-    modelId: parsed.modelId,
-    reasoning: parsed.options.reasoning,
-    ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
+    // A saved ChatGPT conversation belongs to the native Codex task, not to the model picker
+    // state of one turn. The browser worker re-proves model family and effort immediately before
+    // every Send, including retained continuations, so changing Medium/High/Pro must not allocate
+    // another chat or resend canonical history. A compaction epoch remains a deliberate boundary:
+    // it represents the proven context-limit fallback where a fresh conversation is allowed.
     compaction: compactionEpoch(raw?.input),
   })).digest("hex");
 }

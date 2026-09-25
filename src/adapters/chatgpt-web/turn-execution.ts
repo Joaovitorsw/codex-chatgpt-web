@@ -56,11 +56,15 @@ interface TraceWaiter {
 export class ChatGptTraceFeed {
   private readonly queued: ChatGptTraceEvent[] = [];
   private readonly waiters = new Set<TraceWaiter>();
+  private lastPushedSignature: string | undefined;
 
   push(event: ChatGptTraceEvent): void {
     const normalized = event.continuation ? event.text : event.text.trim();
     if (!normalized) return;
     const normalizedEvent = { ...event, text: normalized };
+    const signature = `${normalizedEvent.kind}:${normalizedEvent.continuation === true ? "1" : "0"}:${normalizedEvent.text}`;
+    if (signature === this.lastPushedSignature) return;
+    this.lastPushedSignature = signature;
     this.queued.push(normalizedEvent);
     const waiter = this.waiters.values().next().value as TraceWaiter | undefined;
     if (!waiter) return;

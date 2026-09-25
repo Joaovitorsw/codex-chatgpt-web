@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -2115,9 +2116,31 @@ function ZeroRiskModelMenu({
 
 function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: string }) {
   const [expanded, setExpanded] = useState(false);
+  const [paused, setPaused] = useState(false);
   const inlineVideo = useRef<HTMLVideoElement>(null);
   const expandedVideo = useRef<HTMLVideoElement>(null);
   const expandedAt = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const active = expanded ? expandedVideo.current : inlineVideo.current;
+    if (expanded) inlineVideo.current?.pause();
+    if (paused) active?.pause();
+    else if (active) void active.play().catch(() => { if (!cancelled) setPaused(true); });
+    return () => { cancelled = true; };
+  }, [expanded, paused]);
+
+  const playbackControl = {
+    "aria-label": `${label}: ${paused ? copy.playGuideVideo : copy.pauseGuideVideo}`,
+    role: "button",
+    tabIndex: 0,
+    onClick: () => setPaused(value => !value),
+    onKeyDown: (event: ReactKeyboardEvent<HTMLVideoElement>) => {
+      if (event.repeat || (event.key !== " " && event.key !== "Enter")) return;
+      event.preventDefault();
+      setPaused(value => !value);
+    },
+  };
 
   const closeExpanded = () => {
     const currentTime = expandedVideo.current?.currentTime;
@@ -2139,7 +2162,10 @@ function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: s
   return (
     <>
       <div className="guide-media">
-        <video aria-label={label} autoPlay loop muted playsInline ref={inlineVideo} src={src} />
+        <video {...playbackControl} autoPlay={!paused && !expanded} loop muted playsInline ref={inlineVideo} src={src} />
+        <span aria-hidden="true" className={`guide-media-pause${paused ? " is-visible" : ""}`}>
+          <Icon name="pause" />
+        </span>
         <button
           aria-label={copy.expandGuideVideo}
           className="guide-media-expand"
@@ -2160,8 +2186,8 @@ function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: s
           role="dialog"
         >
           <video
-            aria-label={label}
-            autoPlay
+            {...playbackControl}
+            autoPlay={!paused}
             loop
             muted
             onLoadedMetadata={(event) => {
@@ -2171,6 +2197,9 @@ function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: s
             ref={expandedVideo}
             src={src}
           />
+          <span aria-hidden="true" className={`guide-media-pause${paused ? " is-visible" : ""}`}>
+            <Icon name="pause" />
+          </span>
           <button
             aria-label={copy.closeGuideVideo}
             autoFocus

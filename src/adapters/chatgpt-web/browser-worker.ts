@@ -3762,16 +3762,11 @@ export class ChatGptBrowserWorker {
       // otherwise move the menu highlight until it does. Keep
       // focus on the composer, activate through the menu's real keyboard owner, then prove the exact
       // selected connector pill below.
-      const rowHighlighted = async () => await appResult.evaluate((element) => (
-        element.hasAttribute("data-highlighted")
-        || element.getAttribute("aria-selected") === "true"
-        || element.getAttribute("aria-current") === "true"
-        || element === document.activeElement
-        || element.contains(document.activeElement)
-      ), undefined, {
-        signal: abortSignal,
-        timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-      });
+      const rowHighlighted = async () => {
+        const options = { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS };
+        return await appResult.getAttribute("data-highlighted", options) !== null
+          || await appResult.getAttribute("aria-current", options) === "true";
+      };
       if (!await rowHighlighted()) {
         const visibleRowCount = await withBrowserTurnAbort(
           withChatGptBrowserObservationTimeout(menuRows.filter({ visible: true }).count()),
@@ -4361,6 +4356,7 @@ export class ChatGptBrowserWorker {
     // otherwise the file is silently rejected before submission. Keep the historical selector as
     // a fallback for older surfaces.
     const input = page.locator([
+      'form[data-chatgpt-composer] input[type="file"][multiple]:not([accept])',
       'input[type="file"]:not([accept])',
       'input[type="file"][aria-label*="file" i]:not([accept*="image"]):not([accept*="video"])',
       'input[data-testid="upload-photos-input"]',
@@ -4485,6 +4481,12 @@ export class ChatGptBrowserWorker {
       // Final-answer Markdown follows the live status instead, so DOM order remains the semantic
       // boundary without relying on localized labels such as "Pro thinking".
       const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(answerRootSelector)]
+        .filter(candidate => {
+          if (!root.hasAttribute("data-turn-key")) return true;
+          const unit = candidate.closest("[data-content-search-unit-key]");
+          return Boolean(unit) && Array.from(unit!.children)
+            .some(child => child.getAttribute("data-conversation-role") === "assistant");
+        })
         .filter(candidate => !candidate.parentElement?.closest(answerRootSelector))
         .filter(renderedInDom);
       const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>("[data-streaming-response-status]")]

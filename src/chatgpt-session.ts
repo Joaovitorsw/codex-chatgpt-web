@@ -11,6 +11,7 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
+  'form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"][role="textbox"]',
   'form [contenteditable="true"][role="textbox"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
@@ -34,11 +35,13 @@ export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
   '[role="menu"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
   '[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
+  '[role="menu"]:has([data-model-picker-power-slider])',
 ].join(", ");
 export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
 export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = [
   '[data-model-reasoning-effort-slider]',
   '[data-reasoning-slider="true"]',
+  '[data-model-picker-power-slider]',
   // Current Pro picker variants keep the semantic ARIA slider but no longer mark
   // its owner with either historical data attribute. Scope the fallback to an
   // actual menu/group so unrelated page sliders cannot become account evidence.
@@ -49,12 +52,13 @@ export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = [
 export const CHATGPT_EFFORT_SLIDER_SELECTOR = [
   '[data-model-reasoning-effort-slider] [role="slider"]',
   '[data-reasoning-slider="true"] [role="slider"]',
+  '[data-model-picker-power-slider] [role="slider"]',
   '[data-testid="composer-intelligence-picker-content"] [role="slider"]',
   '[role="menu"] [role="slider"]',
   '[role="group"] [role="slider"]',
 ].join(", ");
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
-export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
+export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], form[data-chatgpt-composer] button[type="button"][aria-label="Stop"]';
 export const CHATGPT_SEND_BUTTON_SELECTOR = [
   '[data-testid="send-button"]',
   '[data-testid="composer-submit-button"]',
@@ -77,19 +81,21 @@ export const CHATGPT_COMPLETION_ACTION_SELECTOR = [
   'button[aria-label="Bad response"]',
   'button[aria-label="Boa resposta"]',
   'button[aria-label="Resposta ruim"]',
+  '[data-turn-key] .turn-action-controls button',
 ].join(", ");
 export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
-  '[data-testid^="conversation-turn-"][data-turn="assistant"]',
-  '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
-  '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
+  '[data-testid^="conversation-turn-"][data-turn="assistant"]:not([data-turn-key] *)',
+  '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]:not([data-turn-key] *)',
+  '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"]):not([data-turn-key] *)',
+  '[data-turn-key]:has([data-conversation-role="assistant"])',
   '[data-turn-key]:has(button[aria-label="Regenerate response"])',
   '[data-turn-key]:not(:has([data-user-message-bubble]))',
   '[data-chatgpt-search-unit-key]:has(> [data-conversation-role="assistant"])',
 ].join(", ");
 export const CHATGPT_USER_TURN_SELECTOR = [
-  '[data-testid^="conversation-turn-"][data-turn="user"]',
-  '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
-  '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
+  '[data-testid^="conversation-turn-"][data-turn="user"]:not([data-turn-key] *)',
+  '[data-testid^="conversation-turn-"][data-message-author-role="user"]:not([data-turn-key] *)',
+  '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"]):not([data-turn-key] *)',
   '[data-turn-key]:has([data-user-message-bubble])',
   '[data-chatgpt-search-unit-key]:has([data-user-message-bubble]):not([data-turn-key] [data-chatgpt-search-unit-key])',
 ].join(", ");
@@ -242,12 +248,12 @@ export async function readChatGptEffortAvailability(
 ): Promise<boolean[]> {
   // Plus exposes a fourth ARIA position for a locked Pro upsell. Only the ticks
   // carry both attributes; the slider root also has data-locked and is not a choice.
-  const locks = await sliderContainer.evaluate(container => Array.from(
-    container.querySelectorAll(
-      '[data-locked][data-selected], [data-model-picker-power-slider] [data-selected]',
-    ),
-    tick => tick.getAttribute("data-locked") ?? "false",
-  ));
+  const locks = await sliderContainer.evaluate(container => {
+    const power = container.hasAttribute("data-model-picker-power-slider")
+      && Boolean(container.querySelector('[data-orientation="horizontal"][aria-disabled="false"]'));
+    return Array.from(container.querySelectorAll("[data-selected]"), tick =>
+      tick.getAttribute("data-locked") ?? (power ? "false" : null));
+  });
   if (locks.length !== state.max - state.min + 1
     || locks.some(lock => lock !== "true" && lock !== "false")) {
     throw new Error("ChatGPT effort availability could not be verified from its slider ticks");

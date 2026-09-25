@@ -23,14 +23,25 @@ test("saved chats start empty and cannot reuse an arbitrary conversation or a Te
   for (const saved of [false, true]) {
     let url = "https://chatgpt.com/c/previous-task";
     const navigations: string[] = [];
-    const absent: any = { filter: () => absent, last: () => absent, isVisible: async () => false };
-    const composer: any = { count: async () => 1, nth: () => composer, isVisible: async () => true };
+    const absent: any = {
+      filter: () => absent, first: () => absent, last: () => absent,
+      isVisible: async () => false, isEnabled: async () => false, count: async () => 0,
+    };
+    const composerForm: any = { locator: () => absent };
+    const composer: any = {
+      count: async () => 1, nth: () => composer, isVisible: async () => true,
+      locator: () => composerForm,
+      evaluate: async () => "",
+    };
     const page: any = {
       url: () => url,
       goto: async (next: string) => { url = next; navigations.push(next); },
       locator: (selector: string) => selector === CHATGPT_COMPOSER_SELECTOR ? composer : absent,
     };
-    expect(await prepare.call({ activeComposer: async () => composer }, page, undefined, saved)).toBe(composer);
+    expect(await prepare.call({
+      activeComposer: async () => composer,
+      connectorIsSelected: async () => false,
+    }, page, undefined, saved)).toBe(composer);
     expect(navigations).toEqual([chatGptNewChatUrl(saved)]);
     await expect(assertNewChatPage(page, !saved)).rejects.toThrow("requested new");
     url = "https://chatgpt.com/c/previous-task";
@@ -259,7 +270,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; loseSelectionOnClose?: boolean; compactLabel?: boolean } = {}) {
+function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; loseSelectionOnClose?: boolean; compactLabel?: boolean; power?: boolean; disabled?: string } = {}) {
   let value = 0;
   let opened = true;
   const clicks: number[] = [];
@@ -292,11 +303,12 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
       // Captured Plus DOM: the slider root and each tick have data-locked, but only
       // ticks have data-selected. Its fourth position is a locked Pro upsell.
       const locks = options.locks ?? Array.from({ length: Number(options.max ?? "4") + 1 }, () => "false");
-      const document = createDocument(`<div data-model-reasoning-effort-slider>
-        <span data-locked="false"><span>${locks.map((lock, index) =>
+      const attribute = options.power ? "data-model-picker-power-slider" : "data-model-reasoning-effort-slider";
+      const document = createDocument(`<div ${attribute}>
+        <span data-locked="false" data-orientation="horizontal" aria-disabled="${options.disabled ?? "false"}"><span>${locks.map((lock, index) =>
           `<span data-selected="${index <= value}"${lock === null ? "" : ` data-locked="${lock}"`}></span>`).join("")}
         </span></span></div>`);
-      return read(document.querySelector("[data-model-reasoning-effort-slider]")!);
+      return read(document.querySelector(`[${attribute}]`)!);
     },
     isVisible: async () => true,
     waitFor: async ({ state }: { state: string }) => {
@@ -374,6 +386,18 @@ test("capabilities exclude the observed locked Plus upsell and reject unknown lo
     await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "3", locks }).page as never))
       .rejects.toThrow("availability");
   }
+});
+
+test("power picker omission of lock attributes requires its enabled structural owner and complete ticks", async () => {
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ power: true, locks: Array(5).fill(null) }).page as never))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ power: true, locks: [null, null, null, "true", "true"] }).page as never))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false });
+  for (const options of [
+    { power: false }, { power: true, disabled: "true" }, { power: true, disabled: "unknown" },
+    { power: true, max: "3" },
+  ]) await expect(detectChatGptAccountCapabilities(reasoningPicker({ ...options, locks: Array(5).fill(null) }).page as never))
+    .rejects.toThrow("availability");
 });
 
 test("stale saved capabilities cannot activate a locked effort; High remains selectable", async () => {

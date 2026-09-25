@@ -10,6 +10,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
+const { configureChatGptAnnouncementDismissal } = require("./browser-announcements.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
   shouldBlockSleepForTurns,
@@ -94,8 +95,7 @@ const COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
-  '[contenteditable="true"][role="textbox"]',
-  "textarea",
+  'form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"][role="textbox"]',
 ].join(", ");
 const IMAGE_GENERATION_SEND_SELECTOR = [
   '[data-testid="send-button"]',
@@ -417,6 +417,9 @@ class BrowserHost {
     this.cloudflareChallengeRecoveryDelayMs = CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS;
     this.cloudflareChallengeRecoverySettleMs = CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS;
     this.viewportCssKey = null;
+    this.primaryRendererReady = false;
+    this.primaryDeviceEmulationViewport = null;
+    this.primaryDeviceEmulationDirty = true;
     this.shellZoomShortcutBindings = new Map();
     this.authView = null;
     this.authNavigationError = null;
@@ -520,10 +523,12 @@ class BrowserHost {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
     }
     this.assertTurnTabsCanResetForInteractionModeChange();
+    const previousMode = browserInteractionModeFor(this);
     this.interactionModeOverride = mode;
     this.manualOperation = INTERACTION_MODE_CHANGE_OPERATION;
     let succeeded = false;
     try {
+      if (mode === "manual" && previousMode === "automatic") await this.configureAnnouncementDismissal(false);
       // Setup inspects the primary surface before committing runtime changes. Publish
       // its native target in the same mode as that inspection, including Zero Risk's exclusion.
       this.writeDescriptor();
@@ -533,7 +538,10 @@ class BrowserHost {
         // The runtime setup invokes this callback inside its own rollback boundary. Existing tabs
         // are mode-bound and remain valid history, so the browser commit has no irreversible tab
         // mutation that could survive a runtime rollback.
-        if (mode === "automatic") await this.markOwnedSurface();
+        if (mode === "automatic") {
+          await this.markOwnedSurface();
+          await this.configureAnnouncementDismissal(true);
+        }
         browserCommitted = true;
       };
       const result = await action(commitBrowserChange);
@@ -546,7 +554,10 @@ class BrowserHost {
       this.manualOperation = null;
       this.interactionModeOverride = null;
       // main persists the target mode after success; a failed setup keeps the old mode.
-      if (!succeeded) this.writeDescriptor();
+      if (!succeeded) {
+        if (previousMode !== mode) await this.configureAnnouncementDismissal(previousMode === "automatic");
+        this.writeDescriptor();
+      }
     }
   }
 
@@ -1185,7 +1196,20 @@ class BrowserHost {
         value: ${encoded}, configurable: true, enumerable: false, writable: false,
       });
       document.documentElement.dataset.codexWebGptSurface = ${encoded};
+      (${configureChatGptAnnouncementDismissal.toString()})(true);
     })()`, true);
+  }
+
+  async configureAnnouncementDismissal(enabled) {
+    if (enabled) requireAutomaticBrowserInspection(this, "ChatGPT announcement dismissal");
+    const views = [this.view, ...[...this.turnTabs.values()]
+      .filter(tab => tab.interactionMode === "automatic")
+      .map(tab => tab.view)];
+    await Promise.all(views.map(view => {
+      const contents = view?.webContents;
+      if (!contents || contents.isDestroyed()) return;
+      return contents.executeJavaScript(`(${configureChatGptAnnouncementDismissal.toString()})(${enabled})`, true);
+    }));
   }
 
   bindManualTurnContents(tab) {
@@ -1306,6 +1330,8 @@ class BrowserHost {
         this.setState({ url });
         return;
       }
+      this.primaryRendererReady = false;
+      this.primaryDeviceEmulationDirty = true;
       this.armHomeNavigationTimeout(contents, url);
       if (this.manualOperation === "ChatGPT login") {
         this.logger.info("browser.auth_navigation_started", {
@@ -1319,6 +1345,8 @@ class BrowserHost {
     });
     contents.on("did-finish-load", () => {
       this.clearHomeNavigationTimeout();
+      this.primaryRendererReady = true;
+      this.syncViewVisibility();
       if (this.manualOperation === "ChatGPT login") {
         this.logger.info("browser.auth_navigation_completed", {
           surface: "primary",
@@ -1834,7 +1862,26 @@ class BrowserHost {
     // the native View can make Windows drop it from the remote-debugging target set, leaving a
     // live descriptor whose ownership id cannot be leased. Keep the View attached and drawable
     // offscreen; only its placement, never its ownership lifetime, follows the launcher UI.
-    this.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
+    const automatic = browserInteractionModeFor(this) === "automatic";
+    const bounds = visible ? this.bounds : this.hiddenTurnBounds();
+    if (visible || !automatic) {
+      this.view.setBounds(bounds);
+      if (this.primaryRendererReady && this.primaryDeviceEmulationViewport) {
+        this.view.webContents.disableDeviceEmulation();
+        this.primaryDeviceEmulationViewport = null;
+      }
+      if (this.primaryRendererReady) this.primaryDeviceEmulationDirty = false;
+    } else {
+      if (this.primaryRendererReady
+        && (this.primaryDeviceEmulationDirty
+          || this.primaryDeviceEmulationViewport?.width !== bounds.width
+          || this.primaryDeviceEmulationViewport?.height !== bounds.height)) {
+        this.enableHiddenTurnViewport(this.view.webContents, bounds);
+        this.primaryDeviceEmulationViewport = { width: bounds.width, height: bounds.height };
+        this.primaryDeviceEmulationDirty = false;
+      }
+      this.view.setBounds(bounds);
+    }
     this.view.setVisible(true);
   }
 
@@ -2136,6 +2183,7 @@ class BrowserHost {
         writable: false,
       });
       document.documentElement.dataset.codexWebGptSurface = ${surfaceId};
+      (${configureChatGptAnnouncementDismissal.toString()})(true);
     })()`, true);
   }
 

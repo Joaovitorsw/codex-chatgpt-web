@@ -6,6 +6,8 @@ import { ChatGptBrowserWorker, ChatGptCompletionTracker, CHATGPT_COMPLETION_SETT
 import { ChatGptAnswerMarkdownDelivery, ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "../src/adapters/chatgpt-web/markdown";
 
 const smokeHtml = readFileSync(new URL("./fixtures/chatgpt-dil-smoke.html", import.meta.url), "utf8");
+const powerCompleteHtml = readFileSync(new URL("./fixtures/chatgpt-power-complete.html", import.meta.url), "utf8");
+const powerStreamingHtml = readFileSync(new URL("./fixtures/chatgpt-power-streaming.html", import.meta.url), "utf8");
 type Snapshot = {
   responsePresent: boolean;
   visibleText: string;
@@ -139,6 +141,24 @@ test("summarizes a closed DIL result card from the answer highlights", async () 
   buffer.observe(response.markdownSegments, 0);
   expect(buffer.finish().markdown).toContain("> **Resultado**");
   expect(buffer.finish().markdown).toContain("> 20 °C · predominantemente nublado");
+});
+
+test("captured power UI excludes the user footer during streaming and completes the assistant answer", async () => {
+  const streaming = await snapshot(powerStreamingHtml);
+  expect(streaming.visibleText).toContain("How a Rainbow Begins");
+  expect(streaming.visibleText).not.toContain("No tools or apps");
+  expect(streaming.completionActionVisible).toBeFalse();
+  const complete = await snapshot(powerCompleteHtml);
+  expect(complete.visibleText).toEndWith("STREAM_END_927");
+  expect(complete.completionActionVisible).toBeTrue();
+  const buffer = new ChatGptMarkdownBuffer();
+  buffer.observe(complete.markdownSegments, 0);
+  expect(buffer.finish().markdown).toContain("## How a Rainbow Begins");
+  const translated = await snapshot(powerCompleteHtml.replaceAll('aria-label="Copy"', 'aria-label="복사"'));
+  expect(translated.completionActionVisible).toBeTrue();
+  const noAssistant = await snapshot(powerCompleteHtml.replaceAll('data-conversation-role="assistant"', 'data-conversation-role="user"'));
+  expect(noAssistant.visibleText).toBe("");
+  expect(noAssistant.completionActionVisible).toBeFalse();
 });
 
 test("DIL response extraction preserves ownership, commentary and completion boundaries", async () => {

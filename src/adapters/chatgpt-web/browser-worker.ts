@@ -132,7 +132,7 @@ export const CHATGPT_RESPONSE_DOM_GRACE_MS = 120_000;
 export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
-export const CHATGPT_OVERTHINKING_STALL_MS = 20_000;
+export const CHATGPT_OVERTHINKING_STALL_MS = 120_000;
 // A rendered copy/regenerate action is strong evidence that ChatGPT considers the turn
 // complete, but its React tree may still consolidate the final human summary after that
 // control first appears. Two seconds was short enough to return the last progress paragraph

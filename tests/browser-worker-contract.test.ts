@@ -13,7 +13,7 @@ import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adap
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
-import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
+import { CHATGPT_STOP_BUTTON_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import { ChatGptExternalTurnProgress, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import type { CodexProviderConfig } from "../src/types";
 import { compileChatGptWebPrompt, formatChatGptWebMultipartCommit, formatChatGptWebMultipartStage } from "../src/adapters/chatgpt-web/prompt";
@@ -773,6 +773,70 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
   )).resolves.toBe("user_turn");
   expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: 0 });
   expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("a drafted follow-up waits for the previous response and then sends from a fresh baseline", async () => {
+  const worker = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web",
+    baseUrl: `browser://queued-follow-up-${Date.now()}`,
+    chatgptWeb: {
+      localToolsEnabled: false,
+      solAvailable: true,
+      extraHighAvailable: false,
+      proAvailable: false,
+      storageStatePath: `/tmp/queued-follow-up-${Date.now()}.json`,
+    },
+  }) as any;
+  let priorRunning = true;
+  let sends = 0;
+  const checkpoints: string[] = [];
+  const stop = {
+    last() { return this; },
+    isVisible: async () => priorRunning,
+    waitFor: async ({ state, timeout }: { state: string; timeout: number }) => {
+      expect(state).toBe("hidden");
+      expect(timeout).toBe(0);
+      priorRunning = false;
+    },
+  };
+  const sendButton = {
+    first() { return this; },
+    waitFor: async () => { expect(priorRunning).toBeFalse(); },
+    isEnabled: async () => true,
+    press: async () => { sends += 1; },
+  };
+  const composer = { locator: () => ({ locator: () => sendButton }) };
+  const hidden = {
+    filter() { return this; }, last() { return this; }, getByRole() { return this; },
+    isVisible: async () => false,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector === CHATGPT_STOP_BUTTON_SELECTOR ? stop : hidden,
+    getByText: () => hidden,
+    getByTestId: () => hidden,
+  } as unknown as Page;
+  const baseline: Record<string, unknown> = { initialTurnIdentities: ["old-running"] };
+  const settledBaseline = { initialTurnIdentities: ["old-complete"], domCache: {} };
+  worker.activeComposer = async () => composer;
+  worker.attachedPromptText = async () => "continue with the queued change";
+  worker.promptTextEquivalent = (expected: string, actual: string) => expected === actual;
+  worker.captureSubmissionBaseline = async () => settledBaseline;
+  worker.waitForSubmissionAcceptedWithRecovery = async (_page: Page, observed: unknown) => {
+    expect(observed).toBe(baseline);
+    expect(baseline).toMatchObject(settledBaseline);
+    return "user_turn";
+  };
+
+  const result = await worker.sendAttachedPrompt(
+    page,
+    baseline,
+    async (checkpoint: string) => { checkpoints.push(checkpoint); },
+  );
+  expect(result).toBe("user_turn");
+  expect(sends).toBe(1);
+  expect(checkpoints).toContain("send-queued-behind-active-response");
+  expect(checkpoints).toContain("send-queue-released");
 });
 
 test("two-part saved chats re-prove unchanged effort after the first message creates the conversation URL", async () => {

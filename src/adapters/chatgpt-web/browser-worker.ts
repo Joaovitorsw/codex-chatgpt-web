@@ -4021,7 +4021,26 @@ export class ChatGptBrowserWorker {
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
   ): Promise<ChatGptSubmissionEvidence> {
-    const composer = await this.activeComposer(page);
+    let composer = await this.activeComposer(page);
+    const priorStop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+    if (await priorStop.isVisible().catch(() => false)) {
+      const pendingPrompt = await this.attachedPromptText(page, abortSignal);
+      await captureDiagnostic?.("send-queued-behind-active-response");
+      // ChatGPT permits drafting the next instruction while the previous response is still
+      // running, but Enter is ignored in that state. Keep the exact draft, wait for the old
+      // response to settle, then refresh both composer and submission baseline before sending.
+      await priorStop.waitFor({ state: "hidden", timeout: 0, signal: abortSignal });
+      await settleChatGptUi();
+      const retainedPrompt = await this.attachedPromptText(page, abortSignal);
+      if (!this.promptTextEquivalent(pendingPrompt, retainedPrompt)) {
+        throw new ChatGptPromptAttachmentIntegrityError(
+          "ChatGPT changed the queued instruction while the previous response was finishing",
+        );
+      }
+      Object.assign(baseline, await this.captureSubmissionBaseline(page));
+      composer = await this.activeComposer(page);
+      await captureDiagnostic?.("send-queue-released");
+    }
     const sendButton = composer
       .locator("xpath=ancestor::form[1]")
       .locator(CHATGPT_SEND_BUTTON_SELECTOR)

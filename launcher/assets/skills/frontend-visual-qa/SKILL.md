@@ -1,15 +1,25 @@
 ---
 name: frontend-visual-qa
-description: Refine and validate substantial frontend UI work when visual consistency, repeated cards, media sizing, icon scale, typography, spacing, responsive behavior, or rendered quality matters. Use automatically for frontend implementation and visual-polish tasks; do not use for backend-only work or tiny isolated CSS questions.
+description: Implement and refine substantial frontend UI work with consistent cards, media, icons, typography, spacing, and responsive behavior. Use automatically for frontend coding and visual-polish tasks; prioritize concrete source edits and bounded validation over prolonged UI automation.
 ---
 
 # Frontend Visual QA
 
-Make the interface feel deliberately designed without imposing a generic visual style. Preserve the user's requested aesthetic and the project's existing design system.
+Make the interface feel deliberately designed without imposing a generic visual style. Preserve the user's requested aesthetic and the project's existing design system. Work code-first: visual tools verify an implementation; they do not replace it.
 
-## Inspect before changing
+## Execute code first
 
-- Inspect the rendered UI, reusable components, CSS architecture, tokens, and breakpoints before choosing dimensions.
+1. Inspect only the relevant components, styles, tokens, and existing tests needed to form the first implementation.
+2. Apply an initial coherent source edit promptly. For large requests, start with high-leverage shared tokens, layout primitives, or reusable components.
+3. Continue in small functional batches so progress and line changes become visible while the task runs.
+4. Run fast source-level checks before opening a visual surface.
+5. Use one focused rendered check after meaningful code changes, then fix only defects supported by that evidence.
+
+Do not use Windows window management for this workflow. If visual evidence is necessary, use the existing browser page or its DevTools only to confirm concrete risks such as clipping, overflow, broken sizing, or responsive layout. Do not reopen, resize, or refocus the same surface without a concrete reason.
+
+## Inspect efficiently
+
+- Inspect the reusable components, CSS architecture, tokens, and breakpoints before choosing dimensions. Inspect the rendered UI first only when the task depends on an unknown current visual state.
 - Identify repeated visual patterns and test them with the shortest, longest, missing, and unexpected content.
 - Reuse existing primitives and tokens before adding one-off values.
 
@@ -29,17 +39,17 @@ Make the interface feel deliberately designed without imposing a generic visual 
 - Give buttons and inputs consistent heights, padding, labels, hover, focus-visible, disabled, loading, and error states.
 - Preserve contrast, keyboard access, reduced-motion preferences, and semantic markup while polishing the visuals.
 
-## Verify the real interface
+## Verify quickly without looping
 
-1. Render the actual page whenever preview or browser tools are available; do not infer visual quality from source alone.
-2. Check narrow mobile, intermediate, and wide desktop widths, plus wrapping, overflow, zoom, and dynamic content.
-3. Compare repeated components side by side for aligned media, text, actions, and baselines.
-4. Check image loading failures, empty states, long localized copy, focus order, and visible focus.
-5. Run the relevant build, type checks, tests, and lint checks after visual validation.
-6. Iterate on concrete rendered defects rather than declaring success after the first pass.
+- Use the cheapest reliable validation for the change. A focused component check is enough when the edit does not require a full application tour.
+- Use the browser or DevTools primarily to check that the changed element is visible, not clipped, not overflowing, and behaves at the relevant breakpoint. Do not tour unrelated pages or states.
+- Perform one visual pass by default. Allow a second pass only when the first reveals a concrete defect that was then changed in source. Stop after that unless the user explicitly requested a visual audit.
+- Never repeat identical inspection or UI actions hoping for a different result. If the visual surface is unavailable or unstable, rely on source/build checks and state the remaining uncertainty.
+- Run the relevant build, type checks, tests, or lint checks in proportion to the change.
+- Do not perform exhaustive responsive, accessibility, or cross-page auditing unless the request calls for it or the edit creates a specific risk.
 
 ## Communicate progress and completion
 
-- For substantial edits, provide short, meaningful progress updates after inspection and after each coherent implementation or validation stage.
+- For substantial edits, provide short, meaningful progress updates after each coherent source-edit batch and validation stage.
 - Finish with a human summary of the visible improvements, the principal files changed, and the validation performed.
 - State any remaining visual uncertainty explicitly when the interface could not be rendered.

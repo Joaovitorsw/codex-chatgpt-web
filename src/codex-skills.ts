@@ -15,6 +15,7 @@ export const BUNDLED_CODEX_SKILLS = [
   "chatgpt-image-handoff",
   "code-work-orchestrator",
   "code-task-presentation",
+  "frontend-visual-qa",
 ] as const;
 
 export interface InstallBundledCodexSkillsOptions {

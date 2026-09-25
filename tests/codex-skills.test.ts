@@ -29,6 +29,9 @@ test("installs every bundled skill without removing personal skills", () => {
   expect(readFileSync(join(root, "codex", "skills", "chatgpt-image-handoff", "SKILL.md"), "utf8"))
     .toContain("without requiring the user to name this skill");
   expect(existsSync(join(root, "codex", "skills", "code-task-presentation", "agents", "openai.yaml"))).toBe(true);
+  expect(existsSync(join(root, "codex", "skills", "frontend-visual-qa", "agents", "openai.yaml"))).toBe(true);
+  expect(readFileSync(join(root, "codex", "skills", "frontend-visual-qa", "SKILL.md"), "utf8"))
+    .toContain("Use automatically for frontend implementation and visual-polish tasks");
   expect(existsSync(join(root, "codex", "skills", "code-work-orchestrator", "references", "diagnosis.md"))).toBe(true);
   expect(existsSync(join(root, "codex", "skills", "code-work-orchestrator", "references", "implementation.md"))).toBe(true);
   expect(existsSync(join(root, "codex", "skills", "code-work-orchestrator", "references", "frontend.md"))).toBe(true);

@@ -17,3 +17,5 @@ launcher/artifacts/
 .playwright-cli/
 output/
 notes.md
+/src.zip
+/APLICAR-CORRECAO.txt

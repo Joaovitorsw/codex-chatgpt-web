@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend visual QA"
+  short_description: "Polishes and validates consistent responsive UI."
+  default_prompt: "Refine this frontend for consistent component geometry, media, icons, typography, responsive behavior, and rendered visual quality."

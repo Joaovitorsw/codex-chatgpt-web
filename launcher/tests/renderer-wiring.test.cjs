@@ -95,15 +95,21 @@ test("setup preserves session-check failures and never installs without verified
   for (const dev of [false, true]) {
     let setup;
     let installs = 0;
+    let syncedSkills = null;
     let browser = { authenticated: false, status: "error", message: "ChatGPT session verification failed (HTTP 503)." };
-    const state = { browserInteractionMode: "automatic", coreSetupComplete: false };
+    const state = { browserInteractionMode: "automatic", coreSetupComplete: true, bundledSkillSelection: null };
     const run = async () => { installs++; return { mode: "browser-only", stdout: "" }; };
     vm.runInNewContext(source, {
       handle: (_name, handler) => { setup = handler; }, IS_DEV_PROFILE: dev,
       stateStore: { read: () => state, update() {} },
       browserHost: { probeAuthentication: async () => browser, returnToIdle: async () => {} },
       runtimeHost: { setupCore: run, setupDevCore: run, runtimeConfigSnapshot: () => ({ config: {} }) },
-      smokePassedThisSession: true, send() {}, startCatalogVerificationMonitor() {}, logger: {},
+      BUNDLED_SKILLS_PATH: "/fixture/skills", LAUNCHER_PROFILE: { codexHome: "/fixture/codex" },
+      listBundledSkills: () => ["alpha-skill"],
+      validateBundledSkillSelection: value => value,
+      syncBundledSkills: ({ selectedSkills }) => { syncedSkills = selectedSkills; return { selected: selectedSkills }; },
+      smokePassedThisSession: false, smokePassedForCurrentVersion: () => false,
+      send() {}, startCatalogVerificationMonitor() {}, logger: {},
     });
     await assert.rejects(setup, error => error.message === browser.message);
     assert.equal(installs, 0);
@@ -111,9 +117,18 @@ test("setup preserves session-check failures and never installs without verified
     await assert.rejects(setup, /Sign in to/);
     assert.equal(installs, 0);
     browser = { authenticated: true, status: "ready", message: "ChatGPT is ready" };
-    assert.equal((await setup()).ok, true);
+    assert.equal((await setup(null, { bundledSkills: [] })).ok, true);
     assert.equal(installs, 1);
+    assert.deepEqual(syncedSkills, []);
   }
+});
+
+test("setup lets the user keep, remove, or individually select bundled skills", () => {
+  assert.match(preloadSource, /setupCore: \(input\) => ipcRenderer\.invoke\("launcher:setup-core", input\)/);
+  assert.match(appSource, /setupCore\(\{ bundledSkills: selectedBundledSkills \}\)/);
+  assert.match(appSource, /copy\.keepAllSkills/);
+  assert.match(appSource, /copy\.removeAllSkills/);
+  assert.match(appSource, /availableBundledSkills\.map\(skill/);
 });
 
 test("startup failure stays visible on another launch and Retry exits the failed instance", async () => {
@@ -349,7 +364,7 @@ test("completed model setup remains a repeatable capability probe", () => {
   assert.match(appSource, /complete && !repeatable/);
   assert.match(
     electronMain,
-    /!setupState\.coreSetupComplete[\s\S]*?smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)/,
+    /smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)[\s\S]*?!setupState\.coreSetupComplete/,
   );
 });
 
@@ -477,6 +492,7 @@ test("fresh-conversation snapshot uses runtime configuration and mode switching 
     GITHUB_URL: "", X_URL: "", CONNECTORS_URL: "", TUNNELS_URL: "", KEYS_URL: "",
     process: { platform: "darwin" }, app: { isPackaged: false, getVersion: () => "test" },
     smokePassedThisSession: false, smokePassedForCurrentVersion: () => false, lastOperation: null, updateController: null,
+    BUNDLED_SKILLS_PATH: "/fixture/skills", listBundledSkills: () => ["frontend-visual-qa"],
   };
   vm.runInNewContext(electronMain.slice(electronMain.indexOf("function syncFreshConversationPreference("), electronMain.indexOf("function registerIpc(")) +
     electronMain.slice(electronMain.indexOf('handle("launcher:snapshot",'),

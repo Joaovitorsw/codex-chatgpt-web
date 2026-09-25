@@ -32,6 +32,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       pendingFreshConversationPerTurn: null,
       useSavedChats: false,
       zeroRiskProEnabled: false,
+      bundledSkillSelection: null,
       browserSmokePassed: false,
       browserSmokeVersion: null,
       sidebarOpen: true,
@@ -63,6 +64,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       pendingFreshConversationPerTurn: null,
       useSavedChats: false,
       zeroRiskProEnabled: false,
+      bundledSkillSelection: null,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
       sidebarOpen: true,
@@ -145,6 +147,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       pendingFreshConversationPerTurn: null,
       useSavedChats: false,
       zeroRiskProEnabled: false,
+      bundledSkillSelection: null,
       browserSmokePassed: false,
       browserSmokeVersion: null,
       sidebarOpen: true,
@@ -186,6 +189,20 @@ test("browser interaction defaults to Automatic and preserves a completed onboar
     assert.equal(createStateStore(file).read().browserInteractionMode, "manual");
     fs.writeFileSync(file, JSON.stringify({ version: 1, browserInteractionMode: "unsafe" }));
     assert.equal(createStateStore(file).read().browserInteractionMode, "automatic");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bundled skill selection is normalized and invalid persisted values are discarded", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-skill-selection-"));
+  const file = path.join(root, "state.json");
+  try {
+    const store = createStateStore(file);
+    store.update({ bundledSkillSelection: ["frontend-visual-qa", "code-task-presentation", "frontend-visual-qa"] });
+    assert.deepEqual(createStateStore(file).read().bundledSkillSelection, ["code-task-presentation", "frontend-visual-qa"]);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, bundledSkillSelection: ["../outside"] }));
+    assert.equal(createStateStore(file).read().bundledSkillSelection, null);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

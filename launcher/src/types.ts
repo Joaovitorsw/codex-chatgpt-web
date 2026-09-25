@@ -23,6 +23,7 @@ export interface LauncherState {
   pendingFreshConversationPerTurn: boolean | null;
   useSavedChats: boolean;
   zeroRiskProEnabled: boolean;
+  bundledSkillSelection: string[] | null;
   sidebarOpen: boolean;
   sidebarWidth: number;
   browserSmokePassed?: boolean;
@@ -108,6 +109,10 @@ export interface LauncherSnapshot {
     userData: string;
   };
   state: LauncherState;
+  bundledSkills: {
+    available: string[];
+    selected: string[] | null;
+  };
   browser: BrowserState | null;
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
@@ -156,7 +161,18 @@ export interface LauncherApi {
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
-  setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
+  setupCore(input: { bundledSkills: string[] }): Promise<{
+    ok: boolean;
+    stdout: string;
+    restartRequired: boolean;
+    bundledSkills: {
+      available: string[];
+      selected: string[];
+      installed: string[];
+      removed: string[];
+      preserved: string[];
+    };
+  }>;
   setupMcp(input: {
     tunnelId?: string;
     runtimeKey?: string;

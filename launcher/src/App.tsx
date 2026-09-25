@@ -1145,6 +1145,14 @@ function SetupSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [localBusy, setLocalBusy] = useState(false);
+  const availableBundledSkills = snapshot.bundledSkills.available;
+  const persistedBundledSkills = snapshot.state.bundledSkillSelection;
+  const [selectedBundledSkills, setSelectedBundledSkills] = useState<string[]>(
+    persistedBundledSkills ?? availableBundledSkills,
+  );
+  useEffect(() => {
+    setSelectedBundledSkills(persistedBundledSkills ?? availableBundledSkills);
+  }, [availableBundledSkills.join("\0"), persistedBundledSkills?.join("\0")]);
   const manualInteraction = snapshot.state.browserInteractionMode === "manual";
   // A verified Codex catalog proves the browser smoke gate was completed when the
   // integration was installed. A launcher update may intentionally invalidate the
@@ -1185,9 +1193,14 @@ function SetupSurface({
     onSmokeComplete();
   });
   const install = () => run(async () => {
-    await api!.setupCore();
+    await api!.setupCore({ bundledSkills: selectedBundledSkills });
     updateState((await api!.snapshot()).state);
   });
+  const toggleBundledSkill = (skill: string) => {
+    setSelectedBundledSkills(current => current.includes(skill)
+      ? current.filter(item => item !== skill)
+      : [...current, skill].sort());
+  };
   const setZeroRiskPro = (enabled: boolean) => run(async () => {
     updateState(await api!.setZeroRiskPro(enabled));
   });
@@ -1225,6 +1238,41 @@ function SetupSurface({
             title={copy.stepSmoke}
           />
         </> : null}
+        <div className="skill-install-panel">
+          <div className="skill-install-heading">
+            <div>
+              <strong>{copy.bundledSkillsTitle}</strong>
+              <p>{copy.bundledSkillsBody}</p>
+            </div>
+            <div className="skill-install-actions">
+              <button
+                className="text-button"
+                disabled={busy || selectedBundledSkills.length === availableBundledSkills.length}
+                onClick={() => setSelectedBundledSkills([...availableBundledSkills])}
+                type="button"
+              >{copy.keepAllSkills}</button>
+              <button
+                className="text-button"
+                disabled={busy || selectedBundledSkills.length === 0}
+                onClick={() => setSelectedBundledSkills([])}
+                type="button"
+              >{copy.removeAllSkills}</button>
+            </div>
+          </div>
+          <div className="skill-install-options" role="group" aria-label={copy.bundledSkillsTitle}>
+            {availableBundledSkills.map(skill => (
+              <label className="skill-install-option" key={skill}>
+                <input
+                  checked={selectedBundledSkills.includes(skill)}
+                  disabled={busy}
+                  onChange={() => toggleBundledSkill(skill)}
+                  type="checkbox"
+                />
+                <span>{skill}</span>
+              </label>
+            ))}
+          </div>
+        </div>
         <SetupRow
           action={snapshot.state.coreSetupComplete
             ? devProfile ? copy.devReinstall : copy.reinstall

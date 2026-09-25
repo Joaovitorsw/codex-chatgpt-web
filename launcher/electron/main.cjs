@@ -65,6 +65,11 @@ const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNEL
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 const BUNDLED_SKILLS_PATH = path.join(__dirname, "..", "assets", "skills");
+const {
+  listBundledSkills,
+  syncBundledSkills,
+  validateBundledSkillSelection,
+} = require("./bundled-skills.cjs");
 
 const launchEnvironment = {
   CODEX_CHATGPT_WEB_HOME: process.env.CODEX_CHATGPT_WEB_HOME,
@@ -107,23 +112,6 @@ let updateController = null;
 let limitsController = null;
 let pendingPreferenceTimer = null;
 let applyingPendingFreshConversation = false;
-
-function installBundledSkills() {
-  if (!fs.existsSync(BUNDLED_SKILLS_PATH)) return [];
-  const installed = [];
-  const skillsRoot = path.join(LAUNCHER_PROFILE.codexHome, "skills");
-  fs.mkdirSync(skillsRoot, { recursive: true });
-  for (const entry of fs.readdirSync(BUNDLED_SKILLS_PATH, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^[a-z0-9-]{1,63}$/.test(entry.name)) continue;
-    const source = path.join(BUNDLED_SKILLS_PATH, entry.name);
-    const destination = path.join(skillsRoot, entry.name);
-    const marker = path.join(destination, ".managed-by-codex-web-gpt");
-    if (fs.existsSync(destination) && !fs.existsSync(marker)) continue;
-    fs.cpSync(source, destination, { recursive: true, force: true, errorOnExist: false });
-    installed.push(entry.name);
-  }
-  return installed;
-}
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -653,6 +641,10 @@ function registerIpc({ logger, stateStore }) {
       userData: launcherUserData,
     },
     state: syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
+    bundledSkills: {
+      available: listBundledSkills(BUNDLED_SKILLS_PATH),
+      selected: stateStore.read().bundledSkillSelection,
+    },
     browser: browserHost?.snapshot() ?? null,
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
@@ -888,8 +880,13 @@ function registerIpc({ logger, stateStore }) {
     stopCatalogVerificationMonitor();
     return { cancelled: false, state };
   });
-  handle("launcher:setup-core", async () => {
+  handle("launcher:setup-core", async (_event, input = {}) => {
     const setupState = stateStore.read();
+    const availableBundledSkills = listBundledSkills(BUNDLED_SKILLS_PATH);
+    const selectedBundledSkills = validateBundledSkillSelection(
+      input?.bundledSkills ?? setupState.bundledSkillSelection ?? availableBundledSkills,
+      availableBundledSkills,
+    );
     const smokeProved = smokePassedThisSession || smokePassedForCurrentVersion(setupState);
     if (setupState.browserInteractionMode === "automatic" && !smokeProved) {
       const browser = await browserHost.probeAuthentication();
@@ -912,6 +909,11 @@ function registerIpc({ logger, stateStore }) {
       );
     }
     const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
+    const bundledSkillResult = syncBundledSkills({
+      sourceRoot: BUNDLED_SKILLS_PATH,
+      codexHome: LAUNCHER_PROFILE.codexHome,
+      selectedSkills: selectedBundledSkills,
+    });
     stateStore.update({
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
@@ -922,6 +924,7 @@ function registerIpc({ logger, stateStore }) {
       experimentalContextAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalContextAttachments === true,
       experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
       useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+      bundledSkillSelection: selectedBundledSkills,
       ...(result.mode === "full" ? {
         mcpRuntimeInstalled: true,
         mcpSetupComplete: false,
@@ -938,7 +941,7 @@ function registerIpc({ logger, stateStore }) {
       });
     });
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
-    return { ok: true, stdout: result.stdout, restartRequired: !IS_DEV_PROFILE };
+    return { ok: true, stdout: result.stdout, restartRequired: !IS_DEV_PROFILE, bundledSkills: bundledSkillResult };
   });
   handle("launcher:setup-mcp", async (_event, input) => {
     // The Setup surface may be opened while a slow smoke test is still waiting for
@@ -1212,8 +1215,6 @@ async function start() {
 
   await app.whenReady();
 
-  const bundledSkills = installBundledSkills();
-
   const startupStartedAt = Date.now();
   const preflightHidden = process.argv.includes("--hidden");
   if (!preflightHidden) startupWindow = await createStartupWindow();
@@ -1238,6 +1239,22 @@ async function start() {
   const runtimeValidationMs = Date.now() - runtimeValidationStartedAt;
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const availableBundledSkills = listBundledSkills(BUNDLED_SKILLS_PATH);
+  const initialState = stateStore.read();
+  const migratedBundledSkillSelection = initialState.bundledSkillSelection === null
+    ? (initialState.coreSetupComplete === true ? availableBundledSkills : null)
+    : initialState.bundledSkillSelection.filter(skill => availableBundledSkills.includes(skill));
+  const bundledSkills = migratedBundledSkillSelection === null
+    ? { available: availableBundledSkills, selected: null, installed: [], removed: [], preserved: [] }
+    : syncBundledSkills({
+      sourceRoot: BUNDLED_SKILLS_PATH,
+      codexHome: LAUNCHER_PROFILE.codexHome,
+      selectedSkills: migratedBundledSkillSelection,
+    });
+  if (migratedBundledSkillSelection !== null
+    && JSON.stringify(initialState.bundledSkillSelection) !== JSON.stringify(migratedBundledSkillSelection)) {
+    stateStore.update({ bundledSkillSelection: migratedBundledSkillSelection });
+  }
   const retainedConversationStore = createRetainedConversationStore(
     path.join(app.getPath("userData"), "retained-conversations.json"),
   );

@@ -962,6 +962,41 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).toBe(original);
   });
 
+  test("reconciles an active journal when config was already fully restored", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\napproval_policy = "never"\n';
+    writeFileSync(configPath, original);
+
+    installCodexIntegration(nativeConfig("browser-only"));
+    writeFileSync(configPath, original);
+
+    expect(deactivateCodexIntegration()).toEqual({ changed: true, active: false });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(JSON.parse(readFileSync(getCodexJournalPath(), "utf8"))).toMatchObject({
+      version: 10,
+      active: false,
+    });
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: false, errors: [] });
+  });
+
+  test("finishes a partially restored active route before reconciling its journal", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\napproval_policy = "never"\n';
+    writeFileSync(configPath, original);
+
+    installCodexIntegration(nativeConfig("browser-only"));
+    writeFileSync(
+      configPath,
+      `${original}experimental_realtime_webrtc_call_base_url = "https://chatgpt.com/backend-api/codex"\n`,
+    );
+
+    expect(deactivateCodexIntegration()).toEqual({ changed: true, active: false });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: false, errors: [] });
+  });
+
   test("Compatibility V1 reconnect ignores unrelated keys added to a previously absent agents table", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");

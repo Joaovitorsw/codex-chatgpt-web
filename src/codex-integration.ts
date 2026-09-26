@@ -358,6 +358,33 @@ export function deactivateCodexIntegration(): SetCodexIntegrationActiveResult {
     verifyRestoredRoute(current, existing);
     return { changed: false, active: false };
   }
+  // A previous launcher may have restored config.toml successfully and exited before
+  // persisting active:false to both journals. If the complete previous configuration is
+  // already present, reconcile the journal instead of treating our own restoration as a
+  // conflicting user edit.
+  if (existing.version === 4 || existing.version === 5 || existing.version === 6
+    || existing.version === 7 || existing.version === 8 || existing.version === 9 || existing.version === 10) {
+    try {
+      verifyRestoredRoute(current, existing);
+      const reconciled = { ...existing, active: false };
+      writeIntegrationState(reconciled, { path: existing.configPath, data: current }, [getCodexModelsCachePath()]);
+      return { changed: true, active: false };
+    } catch {
+      // Shutdown can be interrupted after restoring only part of the owned route. Strip
+      // any fragments that still match this journal, then require the complete previous
+      // state to verify. A newer user value survives replacementBaseline and fails this
+      // verification, preserving the conflict protection.
+      const recovered = replacementBaseline(current, true, existing);
+      try {
+        verifyRestoredRoute(recovered, existing);
+        const reconciled = { ...existing, active: false };
+        writeIntegrationState(reconciled, { path: existing.configPath, data: recovered }, [getCodexModelsCachePath()]);
+        return { changed: true, active: false };
+      } catch {
+        // Continue through the original strict error path below.
+      }
+    }
+  }
   const restored = restoreManagedRoute(current, existing);
   const disconnected:
     | CodexIntegrationJournal

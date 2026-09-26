@@ -345,10 +345,16 @@ export function restoreCodexInterruptHook(
   if (options.allowAbsent && managedMarkerCount(text) === 0 && !text.includes(MANAGED_INTERRUPT_HOOK_END)) {
     const { hooks } = Bun.TOML.parse(text) as { hooks?: unknown };
     if (hooks === undefined) return text;
-    if (hooks && typeof hooks === "object" && !Array.isArray(hooks) && !Object.hasOwn(hooks, "Interrupt")) {
-      const state = (hooks as Record<string, unknown>).state;
-      if (state === undefined || (state && typeof state === "object" && !Array.isArray(state)
-        && !Object.hasOwn(state, installed.stateKey))) return text;
+    if (hooks && typeof hooks === "object" && !Array.isArray(hooks)) {
+      const hookRecord = hooks as Record<string, unknown>;
+      const interrupt = hookRecord.Interrupt;
+      const ownedGroupAbsent = interrupt === undefined || (Array.isArray(interrupt) && interrupt.length > 0
+        && interrupt.every(group => group && typeof group === "object" && !Array.isArray(group)
+          && Object.keys(group as Record<string, unknown>).length === 0));
+      const state = hookRecord.state;
+      const ownedStateAbsent = state === undefined || (state && typeof state === "object" && !Array.isArray(state)
+        && !Object.hasOwn(state, installed.stateKey));
+      if (ownedGroupAbsent && ownedStateAbsent) return text;
     }
   }
   const owned = locateCodexInterruptHook(text, installed).sort((left, right) => right.start - left.start);

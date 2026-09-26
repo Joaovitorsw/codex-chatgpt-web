@@ -76,6 +76,22 @@ test("installs one narrowly trusted Interrupt hook and restores the exact Codex 
   verifyCodexInterruptHookRestored(original);
 });
 
+test("partial recovery accepts an empty Interrupt container after the owned hook was removed", () => {
+  const original = 'model = "example"\n';
+  const installed = installCodexInterruptHook(original, "/Users/test/.codex/config.toml", {
+    runtimeCommand: ["/opt/runtime"],
+  });
+  const partiallyRestored = `${original}\n[[hooks.Interrupt]]\n`;
+
+  expect(restoreCodexInterruptHook(partiallyRestored, installed.installed, { allowAbsent: true }))
+    .toBe(partiallyRestored);
+  expect(() => restoreCodexInterruptHook(
+    `${partiallyRestored}[[hooks.Interrupt.hooks]]\ncommand = "changed"\n`,
+    installed.installed,
+    { allowAbsent: true },
+  )).toThrow("changed after setup");
+});
+
 test("trusts the canonical Codex config path before a new config file exists", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex-interrupt-hook-"));
   try {

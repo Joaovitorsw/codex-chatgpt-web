@@ -559,6 +559,16 @@ test("Luna turns without a retained conversation never send connector identity a
   expect(runExclusive.slice(connectorIdentity - 260, connectorIdentity)).toContain("turn.nativeConnector");
 });
 
+test("chat preparation preserves page-read and composer errors instead of reporting an expired login", async () => {
+  const prepare = (ChatGptBrowserWorker.prototype as unknown as {
+    prepareChatSurface(page: unknown): Promise<unknown>;
+  }).prepareChatSurface;
+  for (const error of [new ChatGptBrowserObservationTimeoutError(5_000), new Error("ChatGPT composer is unavailable")]) {
+    const page = { url: () => "https://chatgpt.com/?temporary-chat=true" };
+    await expect(prepare.call({ activeComposer: async () => { throw error; } }, page)).rejects.toBe(error);
+  }
+});
+
 test("a stalled DOM observation fails within its probe budget", async () => {
   expect(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS).toBe(5_000);
   expect(MAX_CHATGPT_BROWSER_PAGE_REBINDS).toBe(2);
@@ -3590,6 +3600,11 @@ test("browser diagnostic state drops every rendered text field before persistenc
   const diagnostic = sanitizeChatGptBrowserDiagnosticState({
     url: "https://chatgpt.com/c/private-conversation-id",
     title: "private conversation title",
+    documentComplete: false,
+    composer: { unrecognizedEditors: [{
+      tag: "textarea", role: null, attributes: { placeholder: true, id: false },
+      inForm: false, focused: true, value: "private draft", placeholder: "private hint",
+    }] },
     location: { origin: "https://chatgpt.com", pathSegments: 2, temporaryChat: false },
     connectorRows: [{
       tag: "a",
@@ -3603,6 +3618,10 @@ test("browser diagnostic state drops every rendered text field before persistenc
   const encoded = JSON.stringify(diagnostic);
   expect(encoded).not.toContain("private");
   expect(diagnostic).toEqual({
+    documentComplete: false,
+    composer: { unrecognizedEditors: [{
+      tag: "textarea", role: null, attributes: { placeholder: true, id: false }, inForm: false, focused: true,
+    }] },
     location: { origin: "https://chatgpt.com", pathSegments: 2, temporaryChat: false },
     connectorRows: [{ tag: "a", role: "button", textChars: 28 }],
     overlays: [{ role: "status", textChars: 18 }],

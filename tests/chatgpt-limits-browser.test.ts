@@ -4,12 +4,15 @@ import { detectChatGptLimitsPlan } from "../src/adapters/chatgpt-web/limits";
 
 // Optional real-browser contract, with all requests served from fixtures and no account.
 const executablePath = process.env.CHATGPT_DOM_TEST_BROWSER;
-for (const modern of [false, true]) test.skipIf(!executablePath)(`Billing inspection preserves account and page in ${modern ? "page" : "dialog"} layout`, async () => {
+for (const planType of ["pro", "prolite"]) for (const modern of [false, true])
+for (const scenario of ["5x", "20x", "unknown", "account-change", ...(modern ? ["plan-change"] : [])])
+test.skipIf(!executablePath)(`Billing ${planType}/${modern ? "page" : "dialog"}/${scenario} preserves account and page`, async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
   try {
     const context = await browser.newContext();
-    let plan = "ChatGPT Pro 5x";
-    let changedAccount = false;
+    const plan = `ChatGPT Pro ${["5x", "20x", "unknown"].includes(scenario) ? scenario : "5x"}`;
+    const changedPlan = scenario === "plan-change";
+    const changedAccount = scenario === "account-change";
     let sessionReads = 0;
     let subscriptionClicks = 0;
     const row = () => `<div class="@container/settings-row"><div>${plan}</div><button onclick="fetch('/subscription-click')">プランを変更</button></div>`;
@@ -19,7 +22,8 @@ for (const modern of [false, true]) test.skipIf(!executablePath)(`Billing inspec
       if (pathname === "/api/auth/session") {
         sessionReads++;
         return route.fulfill({ json: { user: { id: "u" }, account: {
-          id: changedAccount && sessionReads % 2 === 0 ? "different" : "a", planType: "pro", structure: "personal",
+          id: changedAccount && sessionReads % 2 === 0 ? "different" : "a",
+          planType: changedPlan && sessionReads % 2 === 0 ? (planType === "pro" ? "prolite" : "pro") : planType, structure: "personal",
         } } });
       }
       if (pathname === "/subscription-click") { subscriptionClicks++; return route.fulfill({ body: "" }); }
@@ -37,19 +41,16 @@ for (const modern of [false, true]) test.skipIf(!executablePath)(`Billing inspec
     const page = await context.newPage();
     await page.bringToFront();
     const start = "https://chatgpt.com/?temporary-chat=true";
-    for (plan of ["ChatGPT Pro 5x", "ChatGPT Pro 20x", "ChatGPT Pro unknown"]) {
-      await page.goto(start);
-      if (plan.endsWith("unknown")) await expect(detectChatGptLimitsPlan(page)).rejects.toThrow("Could not distinguish");
-      else expect((await detectChatGptLimitsPlan(page)).plan).toBe(plan.endsWith("5x") ? "pro_100" : "pro_200");
-      expect(page.url()).toBe(start);
-      expect(await page.getByRole("dialog").filter({ visible: true }).count()).toBe(0);
-    }
-    plan = "ChatGPT Pro 5x";
-    changedAccount = true;
-    sessionReads = 0;
     await page.goto(start);
-    await expect(detectChatGptLimitsPlan(page)).rejects.toThrow("account or subscription changed");
+    if (changedAccount || changedPlan) {
+      await expect(detectChatGptLimitsPlan(page)).rejects.toThrow("account or subscription changed");
+    } else if (scenario === "unknown") {
+      await expect(detectChatGptLimitsPlan(page)).rejects.toThrow("Could not distinguish");
+    } else {
+      expect((await detectChatGptLimitsPlan(page)).plan).toBe(scenario === "5x" ? "pro_100" : "pro_200");
+    }
     expect(page.url()).toBe(start);
+    expect(await page.getByRole("dialog").filter({ visible: true }).count()).toBe(0);
     expect(subscriptionClicks).toBe(0);
     await context.close();
   } finally { await browser.close(); }

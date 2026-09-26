@@ -6,7 +6,7 @@ import type {
 } from "../../types";
 import { extractChatGptCompactionSourceRevision } from "./environment";
 import type { ChatGptBrowserWorker } from "./browser-worker";
-import { ChatGptCompactionHandoffAccepted } from "./adapter-error";
+import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompactionTransactionHandle } from "./compaction-transaction";
 import type { ChatGptWebCapabilities } from "./model";
 import {
@@ -328,14 +328,19 @@ export async function requestRetainedCompactionHandoff(
       abortSignal: browserAbort.signal,
       onTextDelta: () => {},
     });
-    const browserFailure = browser.then<never>(
-      () => new Promise<never>(() => {}),
-      error => { throw error; },
-    );
+    const handoff = broker.waitForCompactionHandoff(transaction.token, operationSignal);
+    const browserWithoutHandoff = browser.then<never>(() => {
+      // The control handler accepts the summary before replying to ChatGPT. A fully
+      // settled response without that receipt cannot become a successful checkpoint.
+      throw new ChatGptWebAdapterError(
+        "ChatGPT finished without sending the context summary to Codex. Check its response for a refusal or tool error.",
+        { status: 409, errorType: "invalid_request_error", code: "compaction_handoff_missing", retryable: false },
+      );
+    });
     const summary = await withCompactionAbort(
       Promise.race([
-        broker.waitForCompactionHandoff(transaction.token, operationSignal),
-        browserFailure,
+        handoff,
+        browserWithoutHandoff,
       ]),
       operationSignal,
     );

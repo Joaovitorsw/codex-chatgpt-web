@@ -152,6 +152,17 @@ After updating, if `codex_exec` still does not expose `sandbox_permissions`, `ju
 These fields only forward a permission request to Codex; its sandbox and approval policy still
 decide whether the command can run. Ordinary commands do not require these optional fields.
 
+### ChatGPT refuses a tool call or context compaction
+
+Share the exact failed tool result and an **Activity → Export safe log**. An assistant saying
+"safety block" without a failed tool result does not establish the cause. **Allow all actions**
+does not override ChatGPT's own safety checks.
+
+After updating, refresh **Codex Native2** in ChatGPT's plugin settings to load its current tool
+descriptions. This updates the compaction tool contract; it does not remove safety restrictions.
+If compaction ends without a submitted summary, the launcher reports that failure and preserves
+the existing task history.
+
 ### Tools disappear on follow-up messages
 
 If local tools work on the first message but disappear on a follow-up, check the same ChatGPT tab

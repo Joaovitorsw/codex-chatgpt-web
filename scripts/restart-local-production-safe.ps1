@@ -8,6 +8,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $runner = Join-Path $repoRoot 'run-local-production.cmd'
 $healthUrl = 'http://127.0.0.1:17841/healthz'
+$supervisorPath = Join-Path $env:USERPROFILE '.codex-chatgpt-web\runtime\launcher-supervisor.json'
 $logDir = Join-Path $repoRoot 'work\safe-restart'
 $logPath = Join-Path $logDir 'latest.log'
 
@@ -33,6 +34,19 @@ function Write-RestartLog([string]$Message) {
 }
 
 function Get-LauncherRootProcess {
+  if (Test-Path -LiteralPath $supervisorPath) {
+    try {
+      $supervisor = Get-Content -Raw -LiteralPath $supervisorPath | ConvertFrom-Json
+      if ($supervisor.ownerPid -is [int] -or $supervisor.ownerPid -is [long]) {
+        $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$supervisor.ownerPid)" -ErrorAction SilentlyContinue
+        if ($owner -and ($owner.Name -eq 'bun.exe' -or $owner.Name -eq 'Codex Web GPT.exe')) {
+          return $owner
+        }
+      }
+    } catch {
+      Write-RestartLog "Could not resolve the supervisor owner: $($_.Exception.Message)"
+    }
+  }
   Get-CimInstance Win32_Process |
     Where-Object {
       $_.Name -eq 'bun.exe' -and

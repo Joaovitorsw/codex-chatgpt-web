@@ -1717,9 +1717,10 @@ export class ChatGptTurnDomHealthTracker {
     currentText: string;
     completionActionVisible: boolean;
     externalProgressLive?: boolean;
+    externalToolCallsInFlight?: boolean;
   }, now = Date.now()): string | undefined {
     if (state.responsePresent) this.sawResponse = true;
-    if (state.externalProgressLive) {
+    if (state.externalProgressLive || state.externalToolCallsInFlight) {
       // Every conclusion below asserts that ChatGPT stopped producing this turn. A tool call that
       // is still completing disproves all of them, whatever the renderer is currently exposing, so
       // no window may accrue while the model is provably working.
@@ -1785,6 +1786,8 @@ export const MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS = 8;
  * long turn that keeps calling tools is never penalised for taking a long time.
  */
 export const CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS = 10 * 60_000;
+export const CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS = 30 * 60_000;
+export const CHATGPT_LARGE_TASK_TOKEN_THRESHOLD = 100_000;
 
 /** Tolerated clock difference between the recording daemon and the observing helper process. */
 export const CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS = 5_000;
@@ -1793,6 +1796,7 @@ export const CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS = 5_000;
 export function chatGptExternalProgressSuppressesDomHealth(
   snapshot: ChatGptExternalTurnProgressSnapshot | undefined,
   now: number,
+  stallCeilingMs = CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS,
 ): boolean {
   if (!chatGptExternalProgressIsLive(snapshot, now, CHATGPT_RESPONSE_DOM_GRACE_MS)) return false;
   const lastProgressAt = snapshot?.lastProgressAt;
@@ -1801,7 +1805,7 @@ export function chatGptExternalProgressSuppressesDomHealth(
   // A timestamp from the future would keep `age` below the ceiling forever. Recorded activity can
   // only precede the observation, so anything meaningfully ahead of now is not evidence at all.
   return age >= -CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS
-    && age < CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS;
+    && age < stallCeilingMs;
 }
 
 export function chatGptStoppedThinkingIsTerminal(
@@ -4178,6 +4182,7 @@ export class ChatGptBrowserWorker {
       const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
         externalProgressSnapshot,
         Date.now(),
+        CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS,
       );
       const externalToolCallsInFlight = chatGptExternalToolCallsAreInFlight(externalProgressSnapshot);
       // ChatGPT may briefly paint its "thinking stopped" status while an acknowledged Codex tool
@@ -4209,6 +4214,7 @@ export class ChatGptBrowserWorker {
         currentText: snapshot.visibleText,
         completionActionVisible: snapshot.completionActionVisible,
         externalProgressLive,
+        externalToolCallsInFlight,
       });
       if (domError) throw new Error(domError);
       if (completionTracker.update({
@@ -5783,6 +5789,10 @@ export class ChatGptBrowserWorker {
             CHATGPT_TOOL_COMPLETION_SETTLE_MS,
           )
         : new ChatGptCompletionTracker();
+      const progressStallCeilingMs = prepared.multipart
+        || estimatedInputTokens >= CHATGPT_LARGE_TASK_TOKEN_THRESHOLD
+        ? CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS
+        : CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS;
       const recordFinalUsage = await usageSubmission();
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
@@ -5995,6 +6005,7 @@ export class ChatGptBrowserWorker {
         const externalProgressLive = chatGptExternalProgressSuppressesDomHealth(
           externalProgressSnapshot,
           Date.now(),
+          progressStallCeilingMs,
         );
         const externalToolCallsInFlight = chatGptExternalToolCallsAreInFlight(externalProgressSnapshot);
         // A child operation can remount the ChatGPT status UI and expose "thinking stopped" even
@@ -6084,6 +6095,7 @@ export class ChatGptBrowserWorker {
             currentText: snapshot.visibleText,
             completionActionVisible: snapshot.completionActionVisible,
             externalProgressLive,
+            externalToolCallsInFlight,
           });
           if (domError) throw new Error(domError);
           const completionReady = completionTracker.update({
@@ -6189,6 +6201,7 @@ export class ChatGptBrowserWorker {
             currentText: "",
             completionActionVisible: false,
             externalProgressLive,
+            externalToolCallsInFlight,
           });
           if (domError) throw new Error(domError);
         }

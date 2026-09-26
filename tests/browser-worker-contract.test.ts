@@ -7,7 +7,7 @@ import { createContext, runInContext } from "node:vm";
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
 import { ChatGptOverthinkingRecoveryTracker } from "../src/adapters/chatgpt-web/browser-worker";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptComposerNeedsReload, chatGptExternalProgressSuppressesDomHealth, chatGptStoppedThinkingIsTerminal, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptMissingFinalAnswerSummary, chatGptToolFinalNeedsSummary, chatGptFinalIsOnlyProspectiveProgress, chatGptLatestNewTurnIdentity, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, retryChatGptTerminalError, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs, chatGptRateLimitBackoffMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptComposerNeedsReload, chatGptExternalProgressSuppressesDomHealth, chatGptStoppedThinkingIsTerminal, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptMissingFinalAnswerSummary, chatGptToolFinalNeedsSummary, chatGptFinalIsOnlyProspectiveProgress, chatGptLatestNewTurnIdentity, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, retryChatGptTerminalError, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs, chatGptRateLimitBackoffMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -4184,6 +4184,16 @@ test("stale MCP progress stops suppressing DOM health without penalising long ac
     hoursIn + 1_000,
   )).toBeTrue();
 
+  // Large/multipart work receives a wider sliding inactivity window. A newer local event advances
+  // lastProgressAt and starts that full window again without changing the normal threshold.
+  expect(CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS)
+    .toBeGreaterThan(CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS);
+  expect(chatGptExternalProgressSuppressesDomHealth(
+    { ...outstanding, lastProgressAt: hoursIn + CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS },
+    hoursIn + CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS,
+    CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS,
+  )).toBeTrue();
+
   // No recorded activity is never evidence.
   expect(chatGptExternalProgressSuppressesDomHealth(undefined, 1_000)).toBeFalse();
   expect(chatGptExternalProgressSuppressesDomHealth(
@@ -4326,6 +4336,21 @@ test("the shipped commentary classifier separates answer Markdown from reasoning
     "Checked working directory location",
   ]);
   expect(classified.answerRoots.map(root => root.textContent.trim())).toEqual(["Resposta final."]);
+});
+
+test("an in-flight local operation vetoes every DOM timeout independently of event age", () => {
+  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
+  const stalled = {
+    responsePresent: true,
+    running: false,
+    currentText: "partial answer",
+    completionActionVisible: false,
+  };
+
+  expect(tracker.update({ ...stalled, externalToolCallsInFlight: true }, 1_000)).toBeUndefined();
+  expect(tracker.update({ ...stalled, externalToolCallsInFlight: true }, 60 * 60_000)).toBeUndefined();
+  expect(tracker.update(stalled, 60 * 60_000 + 1)).toBeUndefined();
+  expect(tracker.update(stalled, 60 * 60_000 + 751)).toContain("did not expose its completed-turn action");
 });
 
 test("current activity Markdown without a search-unit wrapper stays eligible for trace capture", () => {

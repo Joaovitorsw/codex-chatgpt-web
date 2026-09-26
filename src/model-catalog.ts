@@ -141,7 +141,7 @@ export function buildChatGptWebModel(
     upgrade: null,
     default_reasoning_level: route.codexEffort,
     supported_reasoning_levels: efforts.map(effort => reasoningLevel(template, effort,
-      efforts.length === 1 ? route.displayName
+      efforts.length === 1 ? effort === "max" ? "Pro" : route.displayName
         : route.backendModel === "gpt-5.6-luna" ? effort === "low" ? "Ordinary Luna" : "Think"
           : `${route.displayName} — ${effort === "xhigh" ? "Extra High" : effort}`)),
     context_window: limits.contextWindow,

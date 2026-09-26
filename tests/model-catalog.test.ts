@@ -95,6 +95,12 @@ describe("native /models augmentation", () => {
     }
     expect((web[1]!.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
       .toEqual(["medium", "high", "xhigh"]);
+    for (const slug of ["chatgpt-web/gpt-5.6-pro", "chatgpt-web/gpt-6-pro"]) {
+      expect(web.find(model => model.slug === slug)).toMatchObject({
+        default_reasoning_level: "max",
+        supported_reasoning_levels: [{ effort: "max", description: "Pro" }],
+      });
+    }
     expect(() => buildChatGptWebModel(originalModels[1], {
       ...CHATGPT_WEB_MODEL_ROUTES[1]!, supportedCodexEfforts: ["low", "medium"],
     }, { ...config, proAvailable: false })).toThrow("Cannot group different context budgets");

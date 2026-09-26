@@ -123,12 +123,35 @@ test("setup preserves session-check failures and never installs without verified
   }
 });
 
+test("packaged setup recovers a persisted login before smoke and installation", () => {
+  const smokeHandler = electronMain.slice(
+    electronMain.indexOf('handle("launcher:browser-smoke"'),
+    electronMain.indexOf('handle("launcher:mcp-verify"'),
+  );
+  assert.match(smokeHandler, /await browserHost\.waitForManualOperationIdle\(\)/);
+  assert.match(smokeHandler, /await browserHost\.refreshAuthentication\(\)/);
+  assert.match(smokeHandler, /if \(!browser\.authenticated\)/);
+  assert.match(smokeHandler, /await browserHost\.smokeTest\(\)/);
+  assert.doesNotMatch(appSource, /disabled=\{busy \|\| !browser\?\.authenticated\}/);
+  assert.match(appSource, /if \(!manualInteraction && !browserSetupGateComplete\)[\s\S]*?await api!\.smokeTest\(\)[\s\S]*?await api!\.setupCore/);
+  assert.doesNotMatch(appSource, /disabled=\{busy \|\| \(!browserSetupGateComplete/);
+});
+
 test("setup lets the user keep, remove, or individually select bundled skills", () => {
   assert.match(preloadSource, /setupCore: \(input\) => ipcRenderer\.invoke\("launcher:setup-core", input\)/);
   assert.match(appSource, /setupCore\(\{ bundledSkills: selectedBundledSkills \}\)/);
   assert.match(appSource, /copy\.keepAllSkills/);
   assert.match(appSource, /copy\.removeAllSkills/);
   assert.match(appSource, /availableBundledSkills\.map\(skill/);
+});
+
+test("packaged skills are loaded from real resources instead of the ASAR virtual directory", () => {
+  assert.match(electronMain, /app\.isPackaged[\s\S]*?process\.resourcesPath, "skills"/);
+  const launcherPackage = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));
+  assert.ok(
+    launcherPackage.build.extraResources.some(entry => entry.from === "assets/skills" && entry.to === "skills"),
+  );
+  assert.equal(launcherPackage.build.files.includes("assets/skills/**"), false);
 });
 
 test("startup failure stays visible on another launch and Retry exits the failed instance", async () => {
@@ -220,6 +243,18 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.match(appSource, /api!\.setBiggerContext\(enabled\)/);
   assert.match(electronMain, /runtimeHost\.setBiggerContext\(enabled === true\)/);
   assert.doesNotMatch(electronMain, /IS_DEV_PROFILE && key === "experimentalBiggerContext"/);
+});
+
+test("a real launcher quit restores the native Codex route before stopping the bridge", () => {
+  const requestQuit = electronMain.slice(
+    electronMain.indexOf("async function requestQuit()"),
+    electronMain.indexOf("async function start()"),
+  );
+  const restore = requestQuit.indexOf('await runtimeHost?.restoreBridgeRoute("launcher-quit")');
+  const shutdown = requestQuit.indexOf("await runtimeSupervisor?.shutdown");
+
+  assert.ok(restore >= 0, "quit must restore the previous Codex route");
+  assert.ok(shutdown > restore, "the local bridge must remain alive until route restoration completes");
 });
 
 test("macOS passkey sign-in is additive to the unchanged embedded login action", () => {

@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 
 const SKILL_NAME = /^[a-z0-9-]{1,63}$/;
 
@@ -24,6 +25,30 @@ function validateBundledSkillSelection(value, available) {
   return selected.sort();
 }
 
+function copyDirectoryContents(source, destination) {
+  fs.mkdirSync(destination, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const sourceEntry = path.join(source, entry.name);
+    const destinationEntry = path.join(destination, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryContents(sourceEntry, destinationEntry);
+    } else if (entry.isFile()) {
+      fs.writeFileSync(destinationEntry, fs.readFileSync(sourceEntry));
+    }
+  }
+}
+
+function replaceManagedSkill(source, destination, skillsRoot) {
+  const temporary = path.join(skillsRoot, `.codex-web-gpt-${randomUUID()}.tmp`);
+  try {
+    copyDirectoryContents(source, temporary);
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.renameSync(temporary, destination);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
 function syncBundledSkills({ sourceRoot, codexHome, selectedSkills }) {
   const available = listBundledSkills(sourceRoot);
   const selected = validateBundledSkillSelection(selectedSkills, available);
@@ -43,7 +68,7 @@ function syncBundledSkills({ sourceRoot, codexHome, selectedSkills }) {
         preserved.push(skill);
         continue;
       }
-      fs.cpSync(source, destination, { recursive: true, force: true, errorOnExist: false });
+      replaceManagedSkill(source, destination, skillsRoot);
       installed.push(skill);
       continue;
     }

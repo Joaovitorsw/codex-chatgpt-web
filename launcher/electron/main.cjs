@@ -64,7 +64,9 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL, LIMITS_SOURCE_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
-const BUNDLED_SKILLS_PATH = path.join(__dirname, "..", "assets", "skills");
+const BUNDLED_SKILLS_PATH = app.isPackaged
+  ? path.join(process.resourcesPath, "skills")
+  : path.join(__dirname, "..", "assets", "skills");
 const {
   listBundledSkills,
   syncBundledSkills,
@@ -744,6 +746,15 @@ function registerIpc({ logger, stateStore }) {
     if (stateStore.read().browserInteractionMode === "manual") {
       throw new Error("Browser smoke testing is disabled in Zero Risk mode");
     }
+    // The packaged app can finish mounting its persisted ChatGPT partition after the
+    // startup probe has already published a signed-out snapshot. Recheck at action time
+    // so a valid saved session is never blocked by stale renderer state.
+    await browserHost.waitForManualOperationIdle();
+    const browser = await browserHost.refreshAuthentication();
+    if (!browser.authenticated) {
+      if (browser.status === "error") throw new Error(browser.message);
+      throw new Error("Sign in to ChatGPT before running the browser smoke test");
+    }
     const result = await browserHost.smokeTest();
     stateStore.update({ browserSmokePassed: true, browserSmokeVersion: app.getVersion() });
     smokePassedThisSession = true;
@@ -1169,6 +1180,10 @@ async function requestQuit() {
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
+    // Codex routes every model request through the local bridge while the launcher is
+    // active. Restore the user's previous route before stopping that bridge so an
+    // intentional launcher exit cannot strand existing Codex tasks in reconnect loops.
+    await runtimeHost?.restoreBridgeRoute("launcher-quit");
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     if (pendingPreferenceTimer) clearInterval(pendingPreferenceTimer);
     pendingPreferenceTimer = null;
@@ -1244,13 +1259,19 @@ async function start() {
   const migratedBundledSkillSelection = initialState.bundledSkillSelection === null
     ? (initialState.coreSetupComplete === true ? availableBundledSkills : null)
     : initialState.bundledSkillSelection.filter(skill => availableBundledSkills.includes(skill));
-  const bundledSkills = migratedBundledSkillSelection === null
-    ? { available: availableBundledSkills, selected: null, installed: [], removed: [], preserved: [] }
-    : syncBundledSkills({
-      sourceRoot: BUNDLED_SKILLS_PATH,
-      codexHome: LAUNCHER_PROFILE.codexHome,
-      selectedSkills: migratedBundledSkillSelection,
-    });
+  let bundledSkills = { available: availableBundledSkills, selected: migratedBundledSkillSelection, installed: [], removed: [], preserved: [] };
+  let bundledSkillsStartupError = null;
+  if (migratedBundledSkillSelection !== null) {
+    try {
+      bundledSkills = syncBundledSkills({
+        sourceRoot: BUNDLED_SKILLS_PATH,
+        codexHome: LAUNCHER_PROFILE.codexHome,
+        selectedSkills: migratedBundledSkillSelection,
+      });
+    } catch (error) {
+      bundledSkillsStartupError = error instanceof Error ? error.message : String(error);
+    }
+  }
   if (migratedBundledSkillSelection !== null
     && JSON.stringify(initialState.bundledSkillSelection) !== JSON.stringify(migratedBundledSkillSelection)) {
     stateStore.update({ bundledSkillSelection: migratedBundledSkillSelection });
@@ -1290,6 +1311,9 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  if (bundledSkillsStartupError) {
+    logger.warn("launcher.bundled_skills_sync_failed", { message: bundledSkillsStartupError });
+  }
   logger.info("launcher.startup_preflight_completed", {
     runtimeValidationMs,
     elapsedMs: Date.now() - startupStartedAt,

@@ -1193,6 +1193,10 @@ function SetupSurface({
     onSmokeComplete();
   });
   const install = () => run(async () => {
+    if (!manualInteraction && !browserSetupGateComplete) {
+      await activateBrowser();
+      await api!.smokeTest();
+    }
     await api!.setupCore({ bundledSkills: selectedBundledSkills });
     updateState((await api!.snapshot()).state);
   });
@@ -1231,7 +1235,7 @@ function SetupSurface({
             action={copy.runSmoke}
             complete={browserSetupGateComplete}
             description={copy.stepSmokeBody}
-            disabled={busy || !browser?.authenticated}
+            disabled={busy}
             index={2}
             onAction={smoke}
             repeatable
@@ -1279,7 +1283,7 @@ function SetupSurface({
             : devProfile ? copy.devInstall : copy.install}
           complete={snapshot.state.codexCatalogVerified === true}
           description={devProfile ? copy.devStepInstallBody : copy.stepInstallBody}
-          disabled={busy || (!browserSetupGateComplete && snapshot.state.coreSetupComplete !== true)}
+          disabled={busy}
           index={manualInteraction ? 1 : 3}
           onAction={install}
           repeatable

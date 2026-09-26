@@ -11,7 +11,7 @@ import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePa
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, priorChatGptAbortedTurnIds } from "../src/adapters/chatgpt-web/environment";
-import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter, emitTraceEvents } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import {
@@ -32,6 +32,21 @@ import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool }
 const tempRoot = join(tmpdir(), `codex-chatgpt-web-harness-${process.pid}-${Date.now()}`);
 mkdirSync(tempRoot, { recursive: true });
 afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
+
+test("visible ChatGPT trace preserves white commentary and gray action summaries", () => {
+  const events: AdapterEvent[] = [];
+  emitTraceEvents([
+    { kind: "commentary", text: "Vou preparar a build agora." },
+    { kind: "reasoning", text: "Built and verified the application" },
+  ], event => events.push(event));
+
+  expect(events).toEqual([
+    { type: "assistant_boundary" },
+    { type: "text_delta", text: "Vou preparar a build agora.", phase: "commentary" },
+    { type: "assistant_boundary" },
+    { type: "thinking_delta", thinking: "Built and verified the application" },
+  ]);
+});
 
 test("current-turn MCP progress tracks active calls without claiming completion", async () => {
   const progress = new ChatGptExternalTurnProgress();

@@ -264,15 +264,17 @@ function emitBrowserCompletion(outcome: ChatGptBrowserOutcome, usage: CodexUsage
   emit({ type: "done", stopReason: "stop", endTurn: true, usage });
 }
 
-function emitTraceEvents(trace: ChatGptTraceEvent[], emit: (event: AdapterEvent) => void): void {
+export function emitTraceEvents(trace: ChatGptTraceEvent[], emit: (event: AdapterEvent) => void): void {
   for (const event of trace) {
     if (!event.continuation) emit({ type: "assistant_boundary" });
-    // The Codex desktop renderer currently drops `text_delta` frames whose phase is commentary
-    // in some multi-round tool turns, even though it continues rendering thinking and native tool
-    // events. ChatGPT's visible intermediate prose is already part of the public Thinking surface,
-    // so carry both commentary paragraphs and compact action summaries through thinking_delta.
-    // The completion-fenced Markdown answer remains the only final_answer stream.
-    emit({ type: "thinking_delta", thinking: event.text });
+    // Preserve ChatGPT's public visual semantics in Codex: ordinary progress prose is an
+    // assistant commentary item (white), while compact action/status summaries remain reasoning
+    // (gray). The completion-fenced Markdown answer is still the only final_answer stream.
+    if (event.kind === "commentary") {
+      emit({ type: "text_delta", text: event.text, phase: "commentary" });
+    } else {
+      emit({ type: "thinking_delta", thinking: event.text });
+    }
   }
 }
 

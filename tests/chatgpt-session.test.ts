@@ -12,9 +12,45 @@ import {
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   assertNewChatPage,
+  chatGptEffortSlider,
   chatGptNewChatUrl,
   detectChatGptAccountCapabilities,
 } from "../src/chatgpt-session";
+
+test("effort slider selects the newest semantic node when ChatGPT renders duplicates", () => {
+  const selectedSlider = { id: "newest-slider" };
+  let selectedLast = false;
+  const duplicateSliders = {
+    last() {
+      selectedLast = true;
+      return selectedSlider;
+    },
+  };
+  const activeContainer = {
+    locator(selector: string) {
+      expect(selector).toBe('[role="slider"]');
+      return duplicateSliders;
+    },
+  };
+  const containers = {
+    filter(options: unknown) {
+      expect(options).toEqual({ visible: true });
+      return this;
+    },
+    last() { return activeContainer; },
+  };
+  const page = {
+    locator(selector: string) {
+      expect(selector).toBe(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR);
+      return containers;
+    },
+  };
+
+  const result = chatGptEffortSlider(page as never);
+  expect(result.sliderContainer).toBe(activeContainer as never);
+  expect(result.slider).toBe(selectedSlider as never);
+  expect(selectedLast).toBe(true);
+});
 
 test("saved chats start empty and cannot reuse an arbitrary conversation or a Temporary Chat", async () => {
   expect(chatGptNewChatUrl()).toBe("https://chatgpt.com/?temporary-chat=true");
@@ -282,6 +318,7 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
     }),
   };
   const slider = {
+    last() { return this; },
     isVisible: async () => false, // Live DOM: aria-hidden=true, zero-width semantic span.
     filter: () => { throw new Error("Semantic input must not be visibility-filtered"); },
     waitFor: async ({ state }: { state: string }) => { expect(state).toBe("attached"); },

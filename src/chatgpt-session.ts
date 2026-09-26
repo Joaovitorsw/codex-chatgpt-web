@@ -117,7 +117,10 @@ export function chatGptEffortSlider(page: Page): { sliderContainer: Locator; sli
   const sliderContainer = page.locator(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR).filter({ visible: true }).last();
   // The current picker keeps ARIA values on a zero-width, aria-hidden semantic input.
   // Its visible container proves the active surface; the input proves the effort range.
-  return { sliderContainer, slider: sliderContainer.locator('[role="slider"]') };
+  // Some ChatGPT deployments render two equivalent semantic inputs while the
+  // picker transitions. Selecting the last one keeps Locator operations strict
+  // and binds us to the newest node in the active surface.
+  return { sliderContainer, slider: sliderContainer.locator('[role="slider"]').last() };
 }
 
 function effortMenuSelectorForId(menuId: string): string {

@@ -1036,13 +1036,13 @@ function BrowserSurface({
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />
-            <h1>{activeBrowserTurn
+            {!checkingSavedSession ? <><h1>{activeBrowserTurn
               ? copy.activeTaskHidden
               : manualInteraction
                 ? copy.browserReady
                 : browser?.authenticated
                   ? copy.noActiveTask
-                  : checkingSavedSession ? copy.checkingSignIn : copy.stepAccount}</h1>
+                  : copy.stepAccount}</h1>
             <p>{activeBrowserTurn
               ? copy.activeTaskHiddenBody
               : manualInteraction
@@ -1051,10 +1051,10 @@ function BrowserSurface({
                   ? copy.noActiveTaskBody
                   : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyWaiting || checkingSavedSession} onClick={() => void toggle()}>
+              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
                 {manualInteraction || browser?.authenticated
                   ? copy.openChatgpt
-                  : checkingSavedSession ? copy.checkingSignIn : copy.signIn}
+                  : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (
                 <SecondaryButton
@@ -1066,7 +1066,7 @@ function BrowserSurface({
                     : copy.passkeySignIn}
                 </SecondaryButton>
               ) : null}
-            </div>
+            </div></> : null}
           </div>
         ) : (
           <div className="browser-underlay" aria-hidden="true">

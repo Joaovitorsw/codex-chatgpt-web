@@ -2073,7 +2073,7 @@ test("launcher session refresh resolves persisted authentication before setup ac
   assert.deepEqual(state, { authenticated: true });
   assert.deepEqual(calls, [
     ["operation", "session refresh"],
-    ["state", { status: "loading", message: "Checking saved ChatGPT session" }],
+    ["state", { status: "loading", message: "Starting ChatGPT" }],
     ["load", "https://chatgpt.com/?temporary-chat=true"],
     ["probe"],
     ["state", { status: "ready", message: "ChatGPT is ready" }],

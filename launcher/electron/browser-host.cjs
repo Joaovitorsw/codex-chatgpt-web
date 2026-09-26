@@ -441,7 +441,7 @@ class BrowserHost {
     this.bounds = { x: 0, y: 0, width: 1, height: 1 };
     this.state = {
       status: "loading",
-      message: "Checking saved ChatGPT session",
+      message: "Starting ChatGPT",
       url: "about:blank",
       title: "ChatGPT",
       authenticated: false,
@@ -740,10 +740,37 @@ class BrowserHost {
           return visible.length === 1 && visible[0].isContentEditable === true;
         })()`, true).catch(() => false);
         if (ready) {
+          const sessionAuthenticated = await contents.executeJavaScript(`(async () => {
+            try {
+              const response = await fetch("/api/auth/session", {
+                credentials: "include",
+                cache: "no-store",
+                headers: { accept: "application/json" },
+              });
+              if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) return false;
+              const payload = await response.json();
+              const user = payload?.user && typeof payload.user === "object" && !Array.isArray(payload.user)
+                ? payload.user
+                : null;
+              const expiryValid = payload?.expires === undefined || payload.expires === null
+                || (typeof payload.expires === "string"
+                  && Number.isFinite(Date.parse(payload.expires))
+                  && Date.parse(payload.expires) > Date.now());
+              return user !== null && Object.keys(user).length > 0
+                && (payload?.error === undefined || payload.error === null || payload.error === "")
+                && expiryValid;
+            } catch { return false; }
+          })()`, true).catch(() => false);
+          if (!sessionAuthenticated) break;
           tab.status = "prewarmed";
           tab.loading = false;
           tab.message = "ChatGPT is ready";
           this.prewarmedTurnTab = tab;
+          this.setState({
+            authenticated: true,
+            status: this.activeTraceId ? "running" : "ready",
+            message: this.activeTraceId ? "ChatGPT is working" : "ChatGPT is ready",
+          });
           this.logger.info("browser.tab_prewarmed", { tabId: tab.id, url: contents.getURL() });
           this.writeDescriptor();
           return;
@@ -3153,7 +3180,7 @@ class BrowserHost {
     requireAutomaticBrowserInspection(this, "ChatGPT authentication refresh");
     if (this.sessionRefreshOperation) return this.sessionRefreshOperation;
     const operation = this.withManualOperation("session refresh", async () => {
-      this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
+      this.setState({ status: "loading", message: "Starting ChatGPT" });
       if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
         await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
       }
@@ -3180,9 +3207,12 @@ class BrowserHost {
       if (!this.view || this.view.webContents.isDestroyed()) return this.snapshot();
       let url = this.view.webContents.getURL();
       if (url === IDLE_BROWSER_URL) {
+        const checkingSavedSession = Boolean(this.prewarmTurnTabOperation || this.prewarmedTurnTab);
         this.setState({
-          status: this.state.authenticated ? "ready" : "signed-out",
-          message: this.state.authenticated ? "No active task" : "Sign in to ChatGPT",
+          status: this.state.authenticated ? "ready" : checkingSavedSession ? "loading" : "signed-out",
+          message: this.state.authenticated
+            ? "No active task"
+            : checkingSavedSession ? "Starting ChatGPT" : "Sign in to ChatGPT",
           url,
         });
         return this.snapshot();

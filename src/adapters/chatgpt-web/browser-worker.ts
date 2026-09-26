@@ -132,7 +132,7 @@ export const CHATGPT_RESPONSE_DOM_GRACE_MS = 120_000;
 export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
-export const CHATGPT_OVERTHINKING_STALL_MS = 120_000;
+export const CHATGPT_OVERTHINKING_STALL_MS = 5 * 60_000;
 // A rendered copy/regenerate action is strong evidence that ChatGPT considers the turn
 // complete, but its React tree may still consolidate the final human summary after that
 // control first appears. Two seconds was short enough to return the last progress paragraph
@@ -1659,9 +1659,18 @@ export class ChatGptOverthinkingRecoveryTracker {
 
   constructor(private readonly stallMs = CHATGPT_OVERTHINKING_STALL_MS) {}
 
-  update(text: string, running: boolean, externalProgressLive: boolean, now = Date.now()): boolean {
+  update(
+    text: string,
+    running: boolean,
+    externalProgressLive: boolean,
+    externalToolCallsInFlight: boolean,
+    now = Date.now(),
+  ): boolean {
     const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
-    if (!running || externalProgressLive || !normalized.includes(CHATGPT_OVERTHINKING_NOTICE)) {
+    if (!running
+      || externalProgressLive
+      || externalToolCallsInFlight
+      || !normalized.includes(CHATGPT_OVERTHINKING_NOTICE)) {
       this.reset();
       return false;
     }
@@ -1775,7 +1784,7 @@ export const MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS = 8;
  * bounds the silence since the last recorded activity rather than the turn's total duration, so a
  * long turn that keeps calling tools is never penalised for taking a long time.
  */
-export const CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS = 10 * 60_000;
+export const CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS = 30 * 60_000;
 
 /** Tolerated clock difference between the recording daemon and the observing helper process. */
 export const CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS = 5_000;
@@ -6010,7 +6019,12 @@ export class ChatGptBrowserWorker {
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
         if (automaticOverthinkingRecoveries < 1
-          && overthinkingRecovery.update(snapshot.visibleText, running, externalProgressLive)) {
+          && overthinkingRecovery.update(
+            snapshot.visibleText,
+            running,
+            externalProgressLive,
+            externalToolCallsInFlight,
+          )) {
           await diagnostics.capture(page, "overthinking-stall-detected");
           await regenerateStalledChatGptResponse(page, responseTurn.locator, turn.abortSignal);
           automaticOverthinkingRecoveries += 1;

@@ -2931,15 +2931,16 @@ test("the current response error action can be retried once in the same conversa
   }
 });
 
-test("the overthinking notice must remain stagnant and cannot override live tool progress", () => {
+test("the overthinking notice must remain stagnant and cannot override any live tool evidence", () => {
   const tracker = new ChatGptOverthinkingRecoveryTracker(120_000);
   const notice = "Our systems are thinking a bit more about this request before responding.";
-  expect(tracker.update(notice, true, false, 1_000)).toBeFalse();
-  expect(tracker.update(notice, true, false, 120_999)).toBeFalse();
-  expect(tracker.update(notice, true, false, 121_000)).toBeTrue();
-  expect(tracker.update(`${notice} Still working`, true, false, 121_100)).toBeFalse();
-  expect(tracker.update(`${notice} Still working`, true, true, 150_000)).toBeFalse();
-  expect(tracker.update(notice, false, false, 180_000)).toBeFalse();
+  expect(tracker.update(notice, true, false, false, 1_000)).toBeFalse();
+  expect(tracker.update(notice, true, false, false, 120_999)).toBeFalse();
+  expect(tracker.update(notice, true, false, false, 121_000)).toBeTrue();
+  expect(tracker.update(`${notice} Still working`, true, false, false, 121_100)).toBeFalse();
+  expect(tracker.update(`${notice} Still working`, true, true, false, 150_000)).toBeFalse();
+  expect(tracker.update(notice, true, false, true, 180_000)).toBeFalse();
+  expect(tracker.update(notice, false, false, false, 210_000)).toBeFalse();
 });
 
 test("a previous response error cannot reject a newly accepted user submission", async () => {

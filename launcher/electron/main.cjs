@@ -69,6 +69,7 @@ const BUNDLED_SKILLS_PATH = app.isPackaged
   : path.join(__dirname, "..", "assets", "skills");
 const {
   listBundledSkills,
+  migrateBundledSkillSelection,
   syncBundledSkills,
   validateBundledSkillSelection,
 } = require("./bundled-skills.cjs");
@@ -1308,9 +1309,11 @@ async function start() {
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
   const availableBundledSkills = listBundledSkills(BUNDLED_SKILLS_PATH);
   const initialState = stateStore.read();
-  const migratedBundledSkillSelection = initialState.bundledSkillSelection === null
-    ? (initialState.coreSetupComplete === true ? availableBundledSkills : null)
-    : initialState.bundledSkillSelection.filter(skill => availableBundledSkills.includes(skill));
+  const migratedBundledSkillSelection = migrateBundledSkillSelection(
+    initialState.bundledSkillSelection,
+    availableBundledSkills,
+    initialState.coreSetupComplete,
+  );
   let bundledSkills = { available: availableBundledSkills, selected: migratedBundledSkillSelection, installed: [], removed: [], preserved: [] };
   let bundledSkillsStartupError = null;
   if (migratedBundledSkillSelection !== null) {

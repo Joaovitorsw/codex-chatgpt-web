@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const {
   listBundledSkills,
+  migrateBundledSkillSelection,
   syncBundledSkills,
   validateBundledSkillSelection,
 } = require("../electron/bundled-skills.cjs");
@@ -32,6 +33,25 @@ test("lists and validates bundled skill choices deterministically", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("selecting the local scheduler also installs its native task bridge", () => {
+  const available = ["codex-local-scheduler", "codex-native-task-bridge", "frontend-visual-qa"];
+  assert.deepEqual(
+    validateBundledSkillSelection(["codex-local-scheduler"], available),
+    ["codex-local-scheduler", "codex-native-task-bridge"],
+  );
+  assert.deepEqual(validateBundledSkillSelection([], available), []);
+});
+
+test("startup migration adds new dependencies without resetting a saved selection", () => {
+  const available = ["code-task-presentation", "codex-local-scheduler", "codex-native-task-bridge"];
+  assert.deepEqual(
+    migrateBundledSkillSelection(["codex-local-scheduler", "removed-old-skill"], available, true),
+    ["codex-local-scheduler", "codex-native-task-bridge"],
+  );
+  assert.deepEqual(migrateBundledSkillSelection(null, available, true), available);
+  assert.equal(migrateBundledSkillSelection(null, available, false), null);
 });
 
 test("selection installs chosen managed skills and removes deselected managed skills", () => {

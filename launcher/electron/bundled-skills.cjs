@@ -3,6 +3,9 @@ const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 
 const SKILL_NAME = /^[a-z0-9-]{1,63}$/;
+const SKILL_DEPENDENCIES = new Map([
+  ["codex-local-scheduler", ["codex-native-task-bridge"]],
+]);
 
 function listBundledSkills(sourceRoot) {
   if (!fs.existsSync(sourceRoot)) return [];
@@ -22,7 +25,20 @@ function validateBundledSkillSelection(value, available) {
     }
     if (!selected.includes(skill)) selected.push(skill);
   }
+  for (const skill of [...selected]) {
+    for (const dependency of SKILL_DEPENDENCIES.get(skill) || []) {
+      if (allowed.has(dependency) && !selected.includes(dependency)) selected.push(dependency);
+    }
+  }
   return selected.sort();
+}
+
+function migrateBundledSkillSelection(value, available, coreSetupComplete) {
+  if (value === null) return coreSetupComplete === true ? [...available] : null;
+  return validateBundledSkillSelection(
+    value.filter(skill => available.includes(skill)),
+    available,
+  );
 }
 
 function copyDirectoryContents(source, destination) {
@@ -83,6 +99,7 @@ function syncBundledSkills({ sourceRoot, codexHome, selectedSkills }) {
 
 module.exports = {
   listBundledSkills,
+  migrateBundledSkillSelection,
   syncBundledSkills,
   validateBundledSkillSelection,
 };

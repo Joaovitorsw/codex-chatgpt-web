@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agendador local do Codex"
+  short_description: "Agenda prompts no mesmo chat usando o Windows."
+  default_prompt: "Use $codex-local-scheduler para agendar esta instrução localmente na tarefa correta do Codex."
+policy:
+  allow_implicit_invocation: true

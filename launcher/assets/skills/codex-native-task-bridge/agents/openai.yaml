@@ -1,0 +1,6 @@
+interface:
+  display_name: "Ponte para tarefas nativas do Codex"
+  short_description: "Cria e acompanha tarefas no Codex oficial."
+  default_prompt: "Use $codex-native-task-bridge para executar esta validação em uma tarefa nativa do Codex e trazer o resultado final."
+policy:
+  allow_implicit_invocation: true

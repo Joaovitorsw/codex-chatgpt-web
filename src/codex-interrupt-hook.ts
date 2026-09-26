@@ -94,7 +94,7 @@ export function installCodexInterruptHookCommand(
   command: string,
 ): { text: string; installed: InstalledCodexInterruptHook } {
   if (managedMarkerCount(text) !== 0 || text.includes(MANAGED_INTERRUPT_HOOK_END)) {
-    throw new Error("Codex config already contains a codex-chatgpt-web interrupt hook marker");
+    text = restoreOrphanedCodexInterruptHook(text, configPath);
   }
   const groups = parseHookDocument(text).hooks?.Interrupt;
   if (groups !== undefined && !Array.isArray(groups)) throw new Error("Codex Interrupt hooks must be an array");
@@ -142,6 +142,68 @@ export function installCodexInterruptHookCommand(
     text: installedText,
     installed: { command, groupIndex, stateKey, trustedHash, fragment },
   };
+}
+
+/**
+ * Reconcile a complete hook left by another codex-chatgpt-web installation.
+ * Ownership is accepted only when one marker pair, one matching command hook and one matching
+ * trusted hash agree. The regular strict restoration path then proves that no foreign TOML is
+ * removed. This makes local/packaged reinstalls idempotent without weakening corruption checks.
+ */
+export function restoreOrphanedCodexInterruptHook(text: string, configPath: string): string {
+  if (managedMarkerCount(text) !== 1 || text.split(MANAGED_INTERRUPT_HOOK_END).length - 1 !== 1) {
+    throw new Error("Codex config contains ambiguous codex-chatgpt-web interrupt hook markers");
+  }
+  let document: HookDocument;
+  try {
+    document = parseHookDocument(text);
+  } catch {
+    throw new Error("Codex config contains an invalid codex-chatgpt-web interrupt hook");
+  }
+  const groups = document.hooks?.Interrupt;
+  const states = document.hooks?.state;
+  if (!Array.isArray(groups) || !states || typeof states !== "object") {
+    throw new Error("Codex config contains an incomplete codex-chatgpt-web interrupt hook");
+  }
+  const candidates: InstalledCodexInterruptHook[] = [];
+  groups.forEach((group, groupIndex) => {
+    if (!group || typeof group !== "object" || Array.isArray(group)) return;
+    const hooks = (group as { hooks?: unknown }).hooks;
+    if (!Array.isArray(hooks) || hooks.length !== 1) return;
+    const hook = hooks[0];
+    if (!hook || typeof hook !== "object" || Array.isArray(hook)) return;
+    const record = hook as Record<string, unknown>;
+    const command = typeof record.command === "string" ? record.command : "";
+    if (record.type !== "command" || record.timeout !== 3
+      || !/(?:^|[\\/\s"'])codex-chatgpt-web(?:[\\/\s"']|$)|(?:^|\s)["']?hook["']?\s+["']?interrupt["']?\s*$/.test(command)) return;
+    const stateKey = `${canonicalConfigPath(configPath)}:interrupt:${groupIndex}:0`;
+    const trustedHash = codexInterruptHookHash(command);
+    const state = states[stateKey];
+    if (!state || typeof state !== "object" || Array.isArray(state)
+      || (state as Record<string, unknown>).trusted_hash !== trustedHash) return;
+    candidates.push({ command, groupIndex, stateKey, trustedHash, fragment: "" });
+  });
+  if (candidates.length !== 1) {
+    throw new Error("Codex config contains an unverified codex-chatgpt-web interrupt hook");
+  }
+  const candidate = candidates[0]!;
+  // locateCodexInterruptHook validates the journal fragment too. Recreate the exact canonical
+  // fragment used for that validation while removal itself remains AST/range based.
+  const ending = lineEnding(text);
+  candidate.fragment = [
+    MANAGED_INTERRUPT_HOOK_START,
+    "[[hooks.Interrupt]]",
+    "",
+    "[[hooks.Interrupt.hooks]]",
+    'type = "command"',
+    `command = ${JSON.stringify(candidate.command)}`,
+    "timeout = 3",
+    "",
+    `[hooks.state.${JSON.stringify(candidate.stateKey)}]`,
+    `trusted_hash = ${JSON.stringify(candidate.trustedHash)}`,
+    MANAGED_INTERRUPT_HOOK_END,
+  ].join(ending);
+  return restoreCodexInterruptHook(text, candidate);
 }
 
 type SourceRange = { start: number; end: number };

@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  MANAGED_INTERRUPT_HOOK_START,
   MANAGED_INTERRUPT_HOOK_END,
   codexInterruptHookCommand,
   codexInterruptHookHash,
@@ -131,7 +132,7 @@ test("Interrupt hook trust hash is deterministic and changes with its exact comm
   expect(codexInterruptHookHash("'other-runtime' 'hook' 'interrupt'")).not.toBe(first);
 });
 
-test("refuses to remove a modified or duplicated managed hook", () => {
+test("reconciles one valid orphaned hook but refuses modified or duplicated ownership", () => {
   const original = 'model = "gpt-5.6-sol"\n';
   const installed = installCodexInterruptHook(
     original,
@@ -140,6 +141,9 @@ test("refuses to remove a modified or duplicated managed hook", () => {
   );
   const modified = installed.text.replace("timeout = 3", "timeout = 2");
   expect(() => restoreCodexInterruptHook(modified, installed.installed)).toThrow("changed after setup");
+  expect(() => installCodexInterruptHook(modified, "/Users/test/.codex/config.toml", {
+    runtimeCommand: ["/opt/new-runtime"],
+  })).toThrow("unverified");
   expect(() => restoreCodexInterruptHook(
     installed.text.replace(MANAGED_INTERRUPT_HOOK_END, `approved = false\n${MANAGED_INTERRUPT_HOOK_END}`),
     installed.installed,
@@ -162,8 +166,17 @@ test("refuses to remove a modified or duplicated managed hook", () => {
     installed.text,
   ].join("\n");
   expect(() => restoreCodexInterruptHook(reordered, installed.installed)).toThrow("order changed after setup");
-  expect(() => installCodexInterruptHook(installed.text, "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] }))
-    .toThrow("already contains");
+  const reinstalled = installCodexInterruptHook(installed.text, "/Users/test/.codex/config.toml", {
+    runtimeCommand: ["/opt/new-runtime"],
+  });
+  expect(reinstalled.text).not.toContain("'/opt/runtime' 'hook' 'interrupt'");
+  expect(reinstalled.text).toContain("/opt/new-runtime");
+  verifyCodexInterruptHook(reinstalled.text, reinstalled.installed);
+  expect(() => installCodexInterruptHook(
+    installed.text + `\n${MANAGED_INTERRUPT_HOOK_START}\n`,
+    "/Users/test/.codex/config.toml",
+    { runtimeCommand: ["/opt/new-runtime"] },
+  )).toThrow("ambiguous");
 });
 
 test("preserves native TOML editor tables inserted before the trailing hook comment", () => {

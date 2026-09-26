@@ -2939,7 +2939,9 @@ test("the overthinking notice must remain stagnant and cannot override any live 
   expect(tracker.update(notice, true, false, false, 121_000)).toBeTrue();
   expect(tracker.update(`${notice} Still working`, true, false, false, 121_100)).toBeFalse();
   expect(tracker.update(`${notice} Still working`, true, true, false, 150_000)).toBeFalse();
-  expect(tracker.update(notice, true, false, true, 180_000)).toBeFalse();
+  // An operation that remains claimed is authoritative even after the separate progress-age
+  // window expires; elapsed time alone must never abort work still executing on the computer.
+  expect(tracker.update(notice, true, false, true, 10 * 60_000 + 180_000)).toBeFalse();
   expect(tracker.update(notice, false, false, false, 210_000)).toBeFalse();
 });
 

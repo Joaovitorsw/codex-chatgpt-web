@@ -9,11 +9,11 @@ Schedule prompts through Windows Task Scheduler and `codex exec resume`. Existin
 
 ## Workflow
 
-1. Resolve the target task:
+1. Resolve the target task once:
    - Prefer `$env:CODEX_THREAD_ID` for the current Codex task.
    - Accept an exact task UUID or exact task name supplied by the user.
    - Create a new task only when the user explicitly requests one. Capture its thread id from the `thread.started` event emitted by `codex exec --json`.
-   - When this skill is invoked from a Web-backed task and the user wants normal or native Codex, use `$codex-native-task-bridge` first. Schedule the returned UUID with `-NativeCodex`; do not schedule a ChatGPT conversation id or create another Electron browser tab.
+   - When this skill is invoked from a Web-backed task and the user wants normal or native Codex, use `$codex-native-task-bridge` once. Reuse its returned UUID for every schedule in the same workflow; do not call `Create` once per scheduled prompt.
 2. Resolve the requested local date and time in the machine timezone. State the absolute date and recurrence when relative wording could be confusing.
 3. Choose a short stable schedule name and invoke [scripts/manage-codex-schedule.ps1](scripts/manage-codex-schedule.ps1):
    - `Create` registers a one-time, daily, or weekly task.
@@ -23,11 +23,13 @@ Schedule prompts through Windows Task Scheduler and `codex exec resume`. Existin
    - `Resume` is the default execution mode and wakes a dormant task to run the prompt.
    - `Queue` is available only when the user explicitly wants to append a message to an already active task.
 4. Verify the saved definition and Windows task with `Status` after creation.
-5. Report the target Codex task, next run, recurrence, state file, and log file.
+5. Report the target Codex task, clickable `threadUrl`, next run, recurrence, state file, and log file.
 
 ## Defaults and boundaries
 
 - Use the current task id automatically when it exists.
+- Multiple schedules for one workflow must carry the exact same `threadId`. A different schedule name does not justify creating another chat.
+- For native tasks, read the target rollout when the schedule is created and persist its model and reasoning effort. Each run must pass those values back to `codex exec resume` so Instant does not silently become the default model.
 - The current task id does not prove that its model is native. Use `-NativeCodex` only for a task created or verified by `$codex-native-task-bridge`.
 - Resume mode preserves the target task's existing sandbox and workspace. Use a task created with the required write access when the scheduled instruction must edit files.
 - Native Codex schedules add `--ignore-user-config`, so the saved global Web GPT route cannot convert the scheduled execution back into a Web model.
@@ -42,6 +44,10 @@ Schedule prompts through Windows Task Scheduler and `codex exec resume`. Existin
 
 ```powershell
 & "$PSScriptRoot\scripts\manage-codex-schedule.ps1" -Action Create -Name "revisao-noturna" -Message "Revise as alterações de hoje e resuma os riscos." -DelayMinutes 30
+```
+
+```powershell
+& "$PSScriptRoot\scripts\manage-codex-schedule.ps1" -Action Create -Name "teste-em-10-segundos" -ThreadId "TASK_UUID" -NativeCodex -Message "Execute o próximo teste neste mesmo contexto." -DelaySeconds 10
 ```
 
 ```powershell

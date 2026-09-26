@@ -43,14 +43,24 @@ test("creates a visible app-server task and resumes it without loading the Web G
     'const readline = require("node:readline");',
     'const args = process.argv.slice(2);',
     `const threadId = "${threadId}";`,
+    'const sessionDir = path.join(process.env.CODEX_HOME, "sessions", "2026", "09", "26");',
+    'const rollout = path.join(sessionDir, `rollout-2026-09-26T00-00-00-${threadId}.jsonl`);',
     'if (args.includes("app-server")) {',
     '  const rl = readline.createInterface({ input: process.stdin });',
     '  const send = value => process.stdout.write(JSON.stringify(value) + "\\n");',
     '  rl.on("line", line => {',
     '    const request = JSON.parse(line);',
     '    if (request.method === "initialize") send({ id: request.id, result: { userAgent: "fake", codexHome: process.env.CODEX_HOME, platformFamily: "windows", platformOs: "windows" } });',
-    '    if (request.method === "model/list") send({ id: request.id, result: { data: [{ id: "gpt-6-astra", model: "gpt-6-astra", displayName: "GPT-6 Astra", description: "native", hidden: false, isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }], nextCursor: null } });',
-    '    if (request.method === "thread/start") send({ id: request.id, result: { thread: { id: threadId, source: "vscode", originator: "Codex Desktop", path: path.join(process.env.CODEX_HOME, "sessions", `rollout-${threadId}.jsonl`) }, model: "gpt-6-astra", modelProvider: "openai" } });',
+    '    if (request.method === "model/list") send({ id: request.id, result: { data: [{ id: "gpt-6-astra", model: "gpt-6-astra", displayName: "GPT-6 Astra", description: "native", hidden: false, isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }, { id: "gpt-6-sol", model: "gpt-6-sol", displayName: "GPT-6 Instant", description: "fast native", hidden: false, isDefault: false, defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low" }] }], nextCursor: null } });',
+    '    if (request.method === "thread/start") {',
+    '      fs.mkdirSync(sessionDir, { recursive: true });',
+    '      fs.writeFileSync(rollout, [',
+    '        JSON.stringify({ type: "session_meta", payload: { id: threadId, cwd: process.cwd(), source: "vscode", model_provider: "openai" } }),',
+    '        JSON.stringify({ type: "turn_context", payload: { model: request.params.model } }),',
+    '        JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "NATIVE_TASK_OK" } }),',
+    '      ].join("\\n") + "\\n");',
+    '      send({ id: request.id, result: { thread: { id: threadId, source: "vscode", originator: "Codex Desktop", path: rollout }, model: request.params.model, modelProvider: "openai" } });',
+    '    }',
     '    if (request.method === "turn/start") {',
     '      send({ id: request.id, result: { turn: { id: "turn_test", status: "inProgress", items: [] } } });',
     '      send({ method: "turn/completed", params: { threadId, turn: { id: "turn_test", status: "completed", items: [] } } });',
@@ -61,12 +71,16 @@ test("creates a visible app-server task and resumes it without loading the Web G
     '}',
     'const outputIndex = args.indexOf("-o");',
     'if (outputIndex >= 0) fs.writeFileSync(args[outputIndex + 1], "NATIVE_TASK_OK\\n");',
-    'const sessionDir = path.join(process.env.CODEX_HOME, "sessions", "2026", "09", "26");',
+    'fs.mkdirSync(process.env.CODEX_HOME, { recursive: true });',
+    'fs.writeFileSync(path.join(process.env.CODEX_HOME, "resume-args.json"), JSON.stringify(args));',
+    'const modelIndex = args.indexOf("-m");',
+    'const resumeModel = modelIndex >= 0 ? args[modelIndex + 1] : "gpt-6-astra";',
+    'const effortArgument = args.find(value => String(value).startsWith("model_reasoning_effort=")) || "";',
+    'const resumeEffort = (effortArgument.split("=")[1] || "").replaceAll("\\\"", "");',
     'fs.mkdirSync(sessionDir, { recursive: true });',
-    'const rollout = path.join(sessionDir, `rollout-2026-09-26T00-00-00-${threadId}.jsonl`);',
     'fs.writeFileSync(rollout, [',
     '  JSON.stringify({ type: "session_meta", payload: { id: threadId, cwd: process.cwd(), source: "vscode", model_provider: "openai" } }),',
-    '  JSON.stringify({ type: "turn_context", payload: { model: "gpt-6-astra" } }),',
+    '  JSON.stringify({ type: "turn_context", payload: { model: resumeModel, effort: resumeEffort } }),',
     '  JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ text: "Crie um teste nativo" }] } }),',
     '  JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ text: "NATIVE_TASK_OK" }] } }),',
     '  JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "NATIVE_TASK_OK" } }),',
@@ -80,7 +94,10 @@ test("creates a visible app-server task and resumes it without loading the Web G
   try {
     const createDryRun = runPowerShell([
       "-Action", "Create",
+      "-ContextId", "web-context-1",
       "-Prompt", "Crie um teste nativo",
+      "-Model", "instant",
+      "-ReasoningEffort", "low",
       "-WorkingDirectory", launcherRoot,
       "-CodexPath", process.execPath,
       "-CodexPrefixArguments", fakeCodex,
@@ -98,7 +115,10 @@ test("creates a visible app-server task and resumes it without loading the Web G
 
     const created = runPowerShell([
       "-Action", "Create",
+      "-ContextId", "web-context-1",
       "-Prompt", "Crie um teste nativo",
+      "-Model", "instant",
+      "-ReasoningEffort", "low",
       "-WorkingDirectory", launcherRoot,
       "-CodexPath", process.execPath,
       "-CodexPrefixArguments", fakeCodex,
@@ -110,12 +130,38 @@ test("creates a visible app-server task and resumes it without loading the Web G
     assert.equal(created.visibleInCodex, true);
     assert.equal(created.transport, "app-server");
     assert.equal(created.source, "vscode");
-    assert.equal(created.model, "gpt-6-astra");
+    assert.equal(created.model, "gpt-6-sol");
     assert.equal(created.modelProvider, "openai");
+    assert.equal(created.reasoningEffort, "low");
     assert.equal(created.threadId, threadId);
+    assert.equal(created.threadUrl, `codex://threads/${threadId}`);
+    assert.equal(created.contextId, "web-context-1");
+    assert.equal(created.reusedContext, false);
     assert.equal(created.finalMessage, "NATIVE_TASK_OK");
     assert.equal(fs.existsSync(created.eventLog), true);
     assert.equal(fs.existsSync(created.receiptPath), true);
+
+    const reused = runPowerShell([
+      "-Action", "Create",
+      "-ContextId", "web-context-1",
+      "-Prompt", "Continue no mesmo chat",
+      "-WorkingDirectory", launcherRoot,
+      "-CodexPath", process.execPath,
+      "-CodexPrefixArguments", fakeCodex,
+      "-CodexHome", codexHome,
+      "-StateRoot", stateRoot,
+    ]);
+    assert.equal(reused.transport, "exec-resume");
+    assert.equal(reused.threadId, threadId);
+    assert.equal(reused.threadUrl, `codex://threads/${threadId}`);
+    assert.equal(reused.contextId, "web-context-1");
+    assert.equal(reused.reusedContext, true);
+    assert.equal(reused.model, "gpt-6-sol");
+    assert.equal(reused.reasoningEffort, "low");
+    assert.equal(reused.finalMessage, "NATIVE_TASK_OK");
+    const reusedArguments = JSON.parse(fs.readFileSync(path.join(codexHome, "resume-args.json"), "utf8"));
+    assert.ok(reusedArguments.includes("gpt-6-sol"));
+    assert.ok(reusedArguments.includes('model_reasoning_effort="low"'));
 
     const resumeDryRun = runPowerShell([
       "-Action", "Resume",
@@ -132,6 +178,9 @@ test("creates a visible app-server task and resumes it without loading the Web G
       fakeCodex, "exec", "resume", "--ignore-user-config", "--json",
     ]);
     assert.ok(resumeDryRun.arguments.includes(threadId));
+    assert.ok(resumeDryRun.arguments.includes("gpt-6-sol"));
+    assert.ok(resumeDryRun.arguments.includes('model_reasoning_effort="low"'));
+    assert.equal(resumeDryRun.threadUrl, `codex://threads/${threadId}`);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

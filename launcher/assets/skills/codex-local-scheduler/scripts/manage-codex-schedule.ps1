@@ -8,6 +8,8 @@ param(
     [datetime]$At = [datetime]::MinValue,
     [ValidateRange(0, 525600)]
     [int]$DelayMinutes = 0,
+    [ValidateRange(0, 31536000)]
+    [int]$DelaySeconds = 0,
     [ValidateSet("Once", "Daily", "Weekly")]
     [string]$Frequency = "Once",
     [ValidateSet("Resume", "Queue")]
@@ -18,13 +20,14 @@ param(
     [ValidateSet("read-only", "workspace-write", "danger-full-access")]
     [string]$Sandbox = "read-only",
     [string]$Model,
-    [ValidateSet("low", "medium", "high", "xhigh", "max")]
+    [ValidateSet("low", "medium", "high", "xhigh", "max", "ultra")]
     [string]$ReasoningEffort,
     [string]$Profile,
     [ValidateRange(1, 20)]
     [int]$RetryCount = 6,
     [ValidateRange(1, 600)]
     [int]$RetryDelaySeconds = 20,
+    [string]$CodexHome,
     [string]$StateRoot,
     [string]$DefinitionPath,
     [string]$CodexPath,
@@ -36,15 +39,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+if ([string]::IsNullOrWhiteSpace($userProfile)) {
+    throw "User profile directory is unavailable"
+}
 if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
     $WorkingDirectory = (Get-Location).Path
 }
 if ([string]::IsNullOrWhiteSpace($StateRoot)) {
-    $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    if ([string]::IsNullOrWhiteSpace($userProfile)) {
-        throw "User profile directory is unavailable"
-    }
     $StateRoot = Join-Path $userProfile ".codex\local-scheduler"
+}
+if ([string]::IsNullOrWhiteSpace($CodexHome)) {
+    $CodexHome = Join-Path $userProfile ".codex"
 }
 
 function ConvertTo-SafeName {
@@ -57,6 +63,58 @@ function ConvertTo-SafeName {
         $safe = $safe.Substring(0, 80).TrimEnd([char[]]"-.")
     }
     return $safe
+}
+
+function Get-CodexThreadUrl {
+    param([Parameter(Mandatory)][string]$Id)
+    return "codex://threads/$Id"
+}
+
+function Get-CodexThreadConfiguration {
+    param([Parameter(Mandatory)][string]$Id)
+    $sessions = Join-Path $CodexHome "sessions"
+    if (-not (Test-Path -LiteralPath $sessions -PathType Container)) {
+        return $null
+    }
+    $rollout = Get-ChildItem -LiteralPath $sessions -Recurse -File -Filter "*$Id*.jsonl" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if (-not $rollout) {
+        return $null
+    }
+    $model = ""
+    $reasoningEffort = ""
+    foreach ($line in Get-Content -LiteralPath $rollout.FullName) {
+        try {
+            $entry = $line | ConvertFrom-Json
+        } catch {
+            continue
+        }
+        if ($entry.type -ne "turn_context") {
+            continue
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$entry.payload.model)) {
+            $model = [string]$entry.payload.model
+        } elseif ($entry.payload.collaboration_mode -and $entry.payload.collaboration_mode.settings) {
+            $model = [string]$entry.payload.collaboration_mode.settings.model
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$entry.payload.effort)) {
+            $reasoningEffort = [string]$entry.payload.effort
+        } elseif (-not [string]::IsNullOrWhiteSpace([string]$entry.payload.reasoning_effort)) {
+            $reasoningEffort = [string]$entry.payload.reasoning_effort
+        } elseif ($entry.payload.collaboration_mode -and $entry.payload.collaboration_mode.settings -and
+            -not [string]::IsNullOrWhiteSpace([string]$entry.payload.collaboration_mode.settings.reasoning_effort)) {
+            $reasoningEffort = [string]$entry.payload.collaboration_mode.settings.reasoning_effort
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($model)) {
+        return $null
+    }
+    return [pscustomobject]@{
+        model = $model
+        reasoningEffort = $reasoningEffort
+        rolloutPath = $rollout.FullName
+    }
 }
 
 function Resolve-CodexPath {
@@ -183,6 +241,7 @@ function Get-TaskState {
         name = $Definition.name
         taskName = $Definition.taskName
         threadId = $Definition.threadId
+        threadUrl = Get-CodexThreadUrl ([string]$Definition.threadId)
         mode = if ($Definition.PSObject.Properties.Name -contains "mode") { $Definition.mode } else { "Resume" }
         nativeCodex = if ($Definition.PSObject.Properties.Name -contains "nativeCodex") { [bool]$Definition.nativeCodex } else { $false }
         frequency = $Definition.frequency
@@ -247,6 +306,8 @@ function Invoke-CodexSchedule {
             dryRun = $true
             executable = $definition.codexPath
             arguments = $codexArgs
+            threadId = [string]$definition.threadId
+            threadUrl = Get-CodexThreadUrl ([string]$definition.threadId)
             definitionPath = $Path
         } | ConvertTo-Json -Depth 6 -Compress
         return
@@ -318,11 +379,16 @@ function New-Schedule {
     if ((Test-Path -LiteralPath $paths.Definition) -and -not $Replace) {
         throw "Schedule already exists: $($paths.SafeName). Use -Replace to update it"
     }
-    if ($DelayMinutes -gt 0) {
+    if ($DelayMinutes -gt 0 -and $DelaySeconds -gt 0) {
+        throw "Use DelayMinutes or DelaySeconds, not both"
+    }
+    if ($DelaySeconds -gt 0) {
+        $At = (Get-Date).AddSeconds($DelaySeconds)
+    } elseif ($DelayMinutes -gt 0) {
         $At = (Get-Date).AddMinutes($DelayMinutes)
     }
     if ($At -eq [datetime]::MinValue) {
-        throw "At or DelayMinutes is required"
+        throw "At, DelayMinutes, or DelaySeconds is required"
     }
     if ($Frequency -eq "Once" -and $At -le (Get-Date)) {
         throw "A one-time schedule must run in the future"
@@ -339,6 +405,26 @@ function New-Schedule {
     if ($NativeCodex -and -not [string]::IsNullOrWhiteSpace($Model) -and $Model.StartsWith("chatgpt-web/", [StringComparison]::OrdinalIgnoreCase)) {
         throw "NativeCodex cannot use a chatgpt-web model"
     }
+    $effectiveModel = $Model
+    $effectiveReasoningEffort = $ReasoningEffort
+    if ($NativeCodex -and
+        ([string]::IsNullOrWhiteSpace($effectiveModel) -or [string]::IsNullOrWhiteSpace($effectiveReasoningEffort))) {
+        $configuration = Get-CodexThreadConfiguration $ThreadId
+        if ($configuration) {
+            if ([string]::IsNullOrWhiteSpace($effectiveModel)) {
+                $effectiveModel = [string]$configuration.model
+            }
+            if ([string]::IsNullOrWhiteSpace($effectiveReasoningEffort)) {
+                $effectiveReasoningEffort = [string]$configuration.reasoningEffort
+            }
+        }
+    }
+    if ($NativeCodex -and [string]::IsNullOrWhiteSpace($effectiveModel)) {
+        throw "Could not resolve the target native Codex model for $ThreadId"
+    }
+    if ($NativeCodex -and $effectiveModel.StartsWith("chatgpt-web/", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "NativeCodex cannot use a chatgpt-web model"
+    }
     $validDays = [System.DayOfWeek].GetEnumNames()
     foreach ($day in $DaysOfWeek) {
         if ($validDays -notcontains $day) {
@@ -352,14 +438,15 @@ function New-Schedule {
         displayName = $Name
         taskName = $paths.TaskName
         threadId = $ThreadId
+        threadUrl = Get-CodexThreadUrl $ThreadId
         mode = $Mode
         nativeCodex = [bool]$NativeCodex
         message = $Message
         workingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path
         sandbox = $Sandbox
         approveForMe = [bool]$ApproveForMe
-        model = if ([string]::IsNullOrWhiteSpace($Model)) { $null } else { $Model }
-        reasoningEffort = if ([string]::IsNullOrWhiteSpace($ReasoningEffort)) { $null } else { $ReasoningEffort }
+        model = if ([string]::IsNullOrWhiteSpace($effectiveModel)) { $null } else { $effectiveModel }
+        reasoningEffort = if ([string]::IsNullOrWhiteSpace($effectiveReasoningEffort)) { $null } else { $effectiveReasoningEffort }
         profile = if ([string]::IsNullOrWhiteSpace($Profile)) { $null } else { $Profile }
         frequency = $Frequency
         daysOfWeek = @($DaysOfWeek)

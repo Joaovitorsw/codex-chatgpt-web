@@ -3,12 +3,13 @@ param(
     [ValidateSet("Create", "Resume", "Read", "List")]
     [string]$Action = "Create",
     [string]$ThreadId,
+    [string]$ContextId = $env:CODEX_THREAD_ID,
     [string]$Prompt,
     [string]$WorkingDirectory,
     [ValidateSet("read-only", "workspace-write", "danger-full-access")]
     [string]$Sandbox = "read-only",
     [string]$Model,
-    [ValidateSet("low", "medium", "high", "xhigh", "max")]
+    [ValidateSet("low", "medium", "high", "xhigh", "max", "ultra")]
     [string]$ReasoningEffort,
     [string]$CodexPath,
     [string[]]$CodexPrefixArguments = @(),
@@ -18,6 +19,7 @@ param(
     [int]$Limit = 20,
     [ValidateRange(30, 3600)]
     [int]$TimeoutSeconds = 900,
+    [switch]$ForceNew,
     [switch]$DryRun
 )
 
@@ -64,6 +66,88 @@ function Assert-ThreadId {
     if ($Value -match '(?i)chatgpt\.com/c/' -or $Value -notmatch '^[0-9a-f]{8}-[0-9a-f-]{20,}$') {
         throw "ThreadId must be an exact native Codex task UUID, not a ChatGPT conversation id or URL"
     }
+}
+
+function Get-CodexThreadUrl {
+    param([Parameter(Mandatory)][string]$Id)
+    Assert-ThreadId $Id
+    return "codex://threads/$Id"
+}
+
+function Get-ContextBindingPath {
+    param([Parameter(Mandatory)][string]$Value)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+    $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+    return Join-Path (Join-Path $StateRoot "contexts") "$hash.json"
+}
+
+function Read-ContextBinding {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+    $path = Get-ContextBindingPath $Value
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $binding = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if ($binding.schemaVersion -ne 1 -or [string]$binding.contextId -ne $Value) {
+            throw "Invalid context binding"
+        }
+        Assert-ThreadId ([string]$binding.threadId)
+        $snapshot = Get-NativeTaskSnapshot ([string]$binding.threadId)
+        if (-not $snapshot -or $snapshot.nativeCodex -ne $true -or $snapshot.source -eq "exec") {
+            throw "Mapped native Codex task is unavailable"
+        }
+        return $binding
+    } catch {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+}
+
+function Save-ContextBinding {
+    param(
+        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)]$Result
+    )
+    $path = Get-ContextBindingPath $Value
+    $directory = Split-Path -Parent $path
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $binding = [pscustomobject]@{
+        schemaVersion = 1
+        contextId = $Value
+        threadId = [string]$Result.threadId
+        threadUrl = Get-CodexThreadUrl ([string]$Result.threadId)
+        model = [string]$Result.model
+        reasoningEffort = [string]$Result.reasoningEffort
+        workingDirectory = $WorkingDirectory
+        createdAt = (Get-Date).ToString("o")
+        updatedAt = (Get-Date).ToString("o")
+    }
+    $temporary = "$path.$PID.tmp"
+    $binding | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $path -Force
+}
+
+function Complete-ContextResult {
+    param(
+        [Parameter(Mandatory)][string]$Json,
+        [Parameter(Mandatory)][bool]$Reused
+    )
+    $result = $Json | ConvertFrom-Json
+    if (-not [string]::IsNullOrWhiteSpace([string]$result.threadId)) {
+        $result | Add-Member -NotePropertyName threadUrl -NotePropertyValue (Get-CodexThreadUrl ([string]$result.threadId)) -Force
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ContextId)) {
+        $result | Add-Member -NotePropertyName contextId -NotePropertyValue $ContextId -Force
+        $result | Add-Member -NotePropertyName reusedContext -NotePropertyValue $Reused -Force
+    }
+    if (-not $DryRun -and -not [string]::IsNullOrWhiteSpace([string]$result.receiptPath) -and (Test-Path -LiteralPath $result.receiptPath -PathType Leaf)) {
+        $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $result.receiptPath -Encoding UTF8
+    }
+    $result | ConvertTo-Json -Depth 8 -Compress
 }
 
 function Invoke-NativeProcess {
@@ -264,6 +348,13 @@ function Select-NativeModel {
         $selected = $models | Where-Object {
             [string]$_.model -eq $RequestedModel -or [string]$_.id -eq $RequestedModel
         } | Select-Object -First 1
+        if (-not $selected -and $RequestedModel.Equals("instant", [StringComparison]::OrdinalIgnoreCase)) {
+            $selected = $models | Where-Object {
+                [string]$_.model -match '(?i)sol|instant' -or
+                [string]$_.id -match '(?i)sol|instant' -or
+                [string]$_.displayName -match '(?i)sol|instant'
+            } | Select-Object -First 1
+        }
         if (-not $selected) {
             throw "Native Codex model is unavailable: $RequestedModel"
         }
@@ -291,6 +382,7 @@ function Invoke-VisibleNativeTask {
             transport = "app-server"
             nativeCodex = $true
             visibleInCodex = $true
+            threadUrl = $null
             executable = $ResolvedCodex
             arguments = $arguments
             eventLog = $paths.EventLog
@@ -447,6 +539,7 @@ function Invoke-VisibleNativeTask {
             modelProvider = [string]$threadResponse.result.modelProvider
             reasoningEffort = $selectedEffort
             threadId = $resolvedThreadId
+            threadUrl = Get-CodexThreadUrl $resolvedThreadId
             turnId = $turnId
             status = "completed"
             exitCode = 0
@@ -477,20 +570,39 @@ function Invoke-VisibleNativeTask {
 }
 
 function Invoke-TaskTurn {
-    param([ValidateSet("Create", "Resume")][string]$Mode)
+    param(
+        [ValidateSet("Create", "Resume")][string]$Mode,
+        [string]$RequestedThreadId = $ThreadId,
+        [string]$RequestedModel = $Model,
+        [string]$RequestedReasoningEffort = $ReasoningEffort
+    )
     if ([string]::IsNullOrWhiteSpace($Prompt)) {
         throw "Prompt is required"
     }
     if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
         throw "Working directory was not found: $WorkingDirectory"
     }
-    Assert-NativeModel $Model
     if ($Mode -eq "Resume") {
-        if ([string]::IsNullOrWhiteSpace($ThreadId)) {
+        if ([string]::IsNullOrWhiteSpace($RequestedThreadId)) {
             throw "ThreadId is required for Resume"
         }
-        Assert-ThreadId $ThreadId
+        Assert-ThreadId $RequestedThreadId
     }
+    $effectiveModel = $RequestedModel
+    $effectiveReasoningEffort = $RequestedReasoningEffort
+    if ($Mode -eq "Resume" -and
+        ([string]::IsNullOrWhiteSpace($effectiveModel) -or [string]::IsNullOrWhiteSpace($effectiveReasoningEffort))) {
+        $configuration = Get-NativeTaskSnapshot $RequestedThreadId
+        if ($configuration) {
+            if ([string]::IsNullOrWhiteSpace($effectiveModel)) {
+                $effectiveModel = [string]$configuration.model
+            }
+            if ([string]::IsNullOrWhiteSpace($effectiveReasoningEffort)) {
+                $effectiveReasoningEffort = [string]$configuration.reasoningEffort
+            }
+        }
+    }
+    Assert-NativeModel $effectiveModel
     $resolvedCodex = Resolve-CodexExecutable $CodexPath
     $resolvedWorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path
     if ($Mode -eq "Create") {
@@ -506,13 +618,13 @@ function Invoke-TaskTurn {
         "--json",
         "-o", $paths.LastMessage
     )
-    if (-not [string]::IsNullOrWhiteSpace($Model)) {
-        $arguments += @("-m", $Model)
+    if (-not [string]::IsNullOrWhiteSpace($effectiveModel)) {
+        $arguments += @("-m", $effectiveModel)
     }
-    if (-not [string]::IsNullOrWhiteSpace($ReasoningEffort)) {
-        $arguments += @("-c", "model_reasoning_effort=`"$ReasoningEffort`"")
+    if (-not [string]::IsNullOrWhiteSpace($effectiveReasoningEffort)) {
+        $arguments += @("-c", "model_reasoning_effort=`"$effectiveReasoningEffort`"")
     }
-    $arguments += $ThreadId
+    $arguments += $RequestedThreadId
     $arguments += $Prompt
     if ($DryRun) {
         [pscustomobject]@{
@@ -520,6 +632,10 @@ function Invoke-TaskTurn {
             action = $Mode
             transport = "exec-resume"
             nativeCodex = $true
+            threadId = $RequestedThreadId
+            threadUrl = Get-CodexThreadUrl $RequestedThreadId
+            model = $effectiveModel
+            reasoningEffort = $effectiveReasoningEffort
             executable = $resolvedCodex
             arguments = $arguments
             eventLog = $paths.EventLog
@@ -535,7 +651,7 @@ function Invoke-TaskTurn {
     $resolvedThreadId = if ($started -and -not [string]::IsNullOrWhiteSpace([string]$started.thread_id)) {
         [string]$started.thread_id
     } else {
-        $ThreadId
+        $RequestedThreadId
     }
     if (-not [string]::IsNullOrWhiteSpace($resolvedThreadId)) {
         Assert-ThreadId $resolvedThreadId
@@ -568,7 +684,9 @@ function Invoke-TaskTurn {
         visibleInCodex = [bool]($snapshot -and $snapshot.source -ne "exec")
         model = if ($snapshot) { $snapshot.model } else { "" }
         modelProvider = if ($snapshot) { $snapshot.modelProvider } else { "" }
+        reasoningEffort = if ($snapshot) { $snapshot.reasoningEffort } else { $effectiveReasoningEffort }
         threadId = $resolvedThreadId
+        threadUrl = Get-CodexThreadUrl $resolvedThreadId
         status = $status
         exitCode = $result.ExitCode
         finalMessage = $finalMessage
@@ -607,6 +725,7 @@ function Get-NativeTaskSnapshot {
     }
     $metadata = $null
     $model = ""
+    $reasoningEffort = ""
     $latestUser = ""
     $latestAssistant = ""
     $status = "unknown"
@@ -624,6 +743,14 @@ function Get-NativeTaskSnapshot {
                 $model = [string]$entry.payload.model
             } elseif ($entry.payload.collaboration_mode -and $entry.payload.collaboration_mode.settings) {
                 $model = [string]$entry.payload.collaboration_mode.settings.model
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string]$entry.payload.effort)) {
+                $reasoningEffort = [string]$entry.payload.effort
+            } elseif (-not [string]::IsNullOrWhiteSpace([string]$entry.payload.reasoning_effort)) {
+                $reasoningEffort = [string]$entry.payload.reasoning_effort
+            } elseif ($entry.payload.collaboration_mode -and $entry.payload.collaboration_mode.settings -and
+                -not [string]::IsNullOrWhiteSpace([string]$entry.payload.collaboration_mode.settings.reasoning_effort)) {
+                $reasoningEffort = [string]$entry.payload.collaboration_mode.settings.reasoning_effort
             }
             $status = "active-or-incomplete"
         }
@@ -647,8 +774,10 @@ function Get-NativeTaskSnapshot {
         nativeCodex = -not [string]::IsNullOrWhiteSpace($model) -and
             -not $model.StartsWith("chatgpt-web/", [StringComparison]::OrdinalIgnoreCase)
         threadId = $Id
+        threadUrl = Get-CodexThreadUrl $Id
         status = $status
         model = $model
+        reasoningEffort = $reasoningEffort
         modelProvider = $modelProvider
         cwd = if ($metadata) { [string]$metadata.cwd } else { "" }
         source = if ($metadata) { [string]$metadata.source } else { "" }
@@ -689,8 +818,28 @@ function Get-NativeTasks {
     $results | ConvertTo-Json -Depth 8 -Compress
 }
 
+function Invoke-ContextAwareCreate {
+    if (-not $ForceNew -and -not [string]::IsNullOrWhiteSpace($ContextId)) {
+        $binding = Read-ContextBinding $ContextId
+        if ($binding) {
+            $json = Invoke-TaskTurn -Mode "Resume" `
+                -RequestedThreadId ([string]$binding.threadId) `
+                -RequestedModel ([string]$binding.model) `
+                -RequestedReasoningEffort ([string]$binding.reasoningEffort)
+            Complete-ContextResult -Json $json -Reused $true
+            return
+        }
+    }
+    $json = Invoke-TaskTurn "Create"
+    if (-not $DryRun -and -not [string]::IsNullOrWhiteSpace($ContextId)) {
+        $created = $json | ConvertFrom-Json
+        Save-ContextBinding -Value $ContextId -Result $created
+    }
+    Complete-ContextResult -Json $json -Reused $false
+}
+
 switch ($Action) {
-    "Create" { Invoke-TaskTurn "Create" }
+    "Create" { Invoke-ContextAwareCreate }
     "Resume" { Invoke-TaskTurn "Resume" }
     "Read" { Read-NativeTask }
     "List" { Get-NativeTasks }

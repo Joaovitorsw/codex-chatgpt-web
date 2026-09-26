@@ -462,6 +462,10 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       nodeIntegration: false,
       sandbox: true,
       spellcheck: true,
+      // This BrowserWindow owns the ChatGPT WebContentsViews. On Windows the
+      // parent renderer can suspend its children when the launcher is hidden or
+      // minimized even if each child disables throttling independently.
+      backgroundThrottling: false,
       v8CacheOptions: "bypassHeatCheckAndEagerCompile",
     },
   });

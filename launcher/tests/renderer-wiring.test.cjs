@@ -47,6 +47,17 @@ test("closing the launcher never shuts down active browser infrastructure", () =
   assert.match(appSource, /setPreference\("keepRunningOnClose", checked\)/);
 });
 
+test("hidden launcher keeps its parent renderer active for background ChatGPT turns", () => {
+  const createMainWindow = electronMain.slice(
+    electronMain.indexOf("function createWindow("),
+    electronMain.indexOf("async function loadRenderer", electronMain.indexOf("function createWindow(")),
+  );
+  assert.match(createMainWindow, /backgroundThrottling:\s*false/);
+  assert.match(electronMain, /disable-backgrounding-occluded-windows/);
+  assert.match(electronMain, /disable-renderer-backgrounding/);
+  assert.match(electronMain, /disable-background-timer-throttling/);
+});
+
 test("a foreground launch request survives hidden startup until the launcher window is ready", () => {
   const showMainWindow = electronMain.slice(
     electronMain.indexOf("function showMainWindow()"),

@@ -156,6 +156,19 @@ test("setup lets the user keep, remove, or individually select bundled skills", 
   assert.match(appSource, /availableBundledSkills\.map\(skill/);
 });
 
+test("settings restores native Codex without invoking the destructive uninstall flow", () => {
+  assert.match(preloadSource, /restoreNativeCodex: \(\) => ipcRenderer\.invoke\("launcher:restore-native-codex"\)/);
+  assert.match(appSource, /const restoreNativeCodex = async \(\) => \{/);
+  assert.match(appSource, /api!\.restoreNativeCodex\(\)/);
+  const handler = electronMain.slice(
+    electronMain.indexOf('handle("launcher:restore-native-codex"'),
+    electronMain.indexOf('handle("launcher:uninstall-integration"'),
+  );
+  assert.match(handler, /runtimeHost\.restoreNativeCodex\(\)/);
+  assert.doesNotMatch(handler, /runtimeHost\.uninstallIntegration\(\)|stopForSetup|cancelActiveTurns/);
+  assert.match(electronMain, /"pt-BR": Object\.freeze\([\s\S]*?restoreTitle: "Reverter para o Codex nativo"/);
+});
+
 test("packaged skills are loaded from real resources instead of the ASAR virtual directory", () => {
   assert.match(electronMain, /app\.isPackaged[\s\S]*?process\.resourcesPath, "skills"/);
   const launcherPackage = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));

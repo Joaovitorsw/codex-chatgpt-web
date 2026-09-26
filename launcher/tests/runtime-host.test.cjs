@@ -619,6 +619,41 @@ test("startup recovery can restore the Codex route without requiring a healthy l
   assert.deepEqual(fixture.calls, ["route status", "route disconnect", "route status"]);
 });
 
+test("explicit native restoration keeps the launcher runtime running and verifies the removed route", async () => {
+  const calls = [];
+  const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "6.1.1" };
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-native-restore") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor: {
+      readConfig: () => config,
+      readSetupConfig: () => config,
+      stopForSetup: async () => { throw new Error("native restoration must not stop the runtime"); },
+    },
+  });
+  host.run = async (_name, args) => {
+    const action = args.join(" ");
+    calls.push(action);
+    if (action === "route restore-native") {
+      return { stdout: JSON.stringify({
+        changed: true,
+        backupPath: "/codex/codex-web-gpt-backups/fixture",
+        conflicts: [],
+      }) };
+    }
+    if (action === "route status") {
+      return { stdout: JSON.stringify({ installed: false, active: false, errors: [] }) };
+    }
+    throw new Error(`Unexpected command: ${action}`);
+  };
+
+  const result = await host.restoreNativeCodex();
+  assert.equal(result.details.changed, true);
+  assert.deepEqual(calls, ["route restore-native", "route status"]);
+});
+
 test("failed runtime cleanup during removal still restores the previous Codex route", async () => {
   const calls = [];
   const config = { mode: "full", browserHost: "launcher", releaseVersion: "1.1.2" };

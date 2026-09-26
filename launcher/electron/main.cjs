@@ -243,6 +243,10 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Remove Codex Web GPT",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+    restore: "Restore",
+    restoreTitle: "Restore native Codex",
+    restoreMessage: "Back up the current Codex configuration and restore native Codex routing?",
+    restoreDetail: "No active task or launcher runtime will be stopped. Authentication and unrelated settings are preserved; restart Codex once afterward.",
     retry: "Retry",
     startupTitle: "Codex Web GPT could not start",
     startupDetail: "Retry starts the launcher again without changing your saved settings or ChatGPT profile.",
@@ -308,6 +312,25 @@ const NATIVE_COPY = Object.freeze({
     startupDetail: "저장된 설정이나 ChatGPT 프로필을 변경하지 않고 런처를 다시 시작합니다.",
     startupCleanupFailed: "시작 정리에 실패했습니다",
     catalogFailure: "Codex가 런처에 연결했지만 모델 목록을 불러오지 못했습니다(HTTP {status}; {reason}). 활동에서 세부 정보를 확인하고 문제가 계속되면 안전한 로그를 내보내 주세요.",
+  }),
+  "pt-BR": Object.freeze({
+    openLauncher: "Abrir Codex Web GPT",
+    quit: "Sair",
+    exportDiagnostics: "Exportar diagnóstico seguro",
+    cancel: "Cancelar",
+    remove: "Remover",
+    removeTitle: "Remover Codex Web GPT",
+    removeMessage: "Remover os modelos ChatGPT Web do Codex e restaurar a rota anterior?",
+    removeDetail: "O perfil de login do ChatGPT será preservado. O Codex precisará ser reiniciado uma vez.",
+    restore: "Reverter",
+    restoreTitle: "Reverter para o Codex nativo",
+    restoreMessage: "Fazer backup da configuração atual e restaurar a rota nativa do Codex?",
+    restoreDetail: "Nenhuma tarefa ativa nem o runtime do launcher será encerrado. A autenticação e configurações não relacionadas serão preservadas; depois, reinicie o Codex uma vez.",
+    retry: "Tentar novamente",
+    startupTitle: "O Codex Web GPT não pôde iniciar",
+    startupDetail: "A nova tentativa reinicia o launcher sem alterar suas configurações salvas ou o perfil do ChatGPT.",
+    startupCleanupFailed: "Falha na limpeza da inicialização",
+    catalogFailure: "O Codex alcançou o launcher, mas não conseguiu carregar o catálogo de modelos (HTTP {status}; {reason}). Consulte Atividade e exporte um log seguro se o problema persistir.",
   }),
 });
 
@@ -856,6 +879,31 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:cancel-turns", () => {
     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
     return runtimeHost.cancelActiveTurns();
+  });
+  handle("launcher:restore-native-codex", async () => {
+    if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex integration to restore");
+    const copy = nativeCopyFor(stateStore.read().language);
+    const fallback = NATIVE_COPY.en;
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: [copy.cancel, copy.restore || fallback.restore],
+      defaultId: 0,
+      cancelId: 0,
+      title: copy.restoreTitle || fallback.restoreTitle,
+      message: copy.restoreMessage || fallback.restoreMessage,
+      detail: copy.restoreDetail || fallback.restoreDetail,
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return { cancelled: true };
+    await runtimeHost.restoreNativeCodex();
+    const state = stateStore.update({
+      coreSetupComplete: false,
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+    });
+    send("launcher:state-changed", state);
+    stopCatalogVerificationMonitor();
+    return { cancelled: false, state };
   });
   handle("launcher:uninstall-integration", async () => {
     if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex integration to remove");

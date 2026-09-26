@@ -14,6 +14,7 @@ import {
   preflightCodexIntegration,
   readCodexSubagentProtocol,
   readCodexModelContextOverride,
+  restoreNativeCodexIntegration,
   setCodexSubagentProtocol,
   uninstallCodexIntegration,
 } from "../src/codex-integration";
@@ -656,6 +657,132 @@ describe("reversible native Codex route integration", () => {
     writeFileSync(cachePath, '{"models":["native-and-web"]}\n');
     uninstallCodexIntegration();
     expect(() => readFileSync(cachePath, "utf8")).toThrow();
+  });
+
+  test("adopts a local installation from another app home without preserving the Web bridge as the native route", () => {
+    const { root, codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "chatgpt-web/gpt-5.6-sol"\n\n[mcp_servers.notes]\ncommand = "user-notes"\n';
+    writeFileSync(configPath, original);
+    const local = nativeConfig("browser-only");
+    local.runtimeCommand = [join(root, "local-runtime", "runtime.exe")];
+    installCodexIntegration(local);
+    rmSync(getCodexJournalPath());
+    rmSync(getCodexJournalRecoveryPath());
+
+    process.env.CODEX_CHATGPT_WEB_HOME = join(root, "packaged-app");
+    const packaged = nativeConfig("browser-only");
+    packaged.runtimeCommand = [join(root, "packaged-runtime", "runtime.exe")];
+    const installed = installCodexIntegration(packaged, { replaceExistingRoute: true });
+    const active = readFileSync(configPath, "utf8");
+
+    expect(installed.previous.openai_base_url.present).toBe(false);
+    expect(installed.previousRealtimeWebrtcCallBaseUrl.present).toBe(false);
+    expect(active.match(/Managed by codex-chatgpt-web: release the exact Responses request/g)).toHaveLength(1);
+    expect(active).toContain("packaged-runtime");
+    expect(active).not.toContain("local-runtime");
+
+    deactivateCodexIntegration();
+    expect(Bun.TOML.parse(readFileSync(configPath, "utf8"))).toEqual(Bun.TOML.parse(original));
+  });
+
+  test("restores native Codex from an orphaned installation with a recoverable backup and no auth changes", () => {
+    const { root, codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const authPath = join(codexHome, "auth.json");
+    const cachePath = getCodexModelsCachePath();
+    const original = 'model = "chatgpt-web/gpt-5.6-sol"\n\n[mcp_servers.notes]\ncommand = "user-notes"\n';
+    writeFileSync(configPath, original);
+    writeFileSync(authPath, '{"auth_mode":"chatgpt","tokens":{"access_token":"preserved"}}\n');
+    installCodexIntegration(nativeConfig("browser-only"));
+    const active = readFileSync(configPath, "utf8");
+    rmSync(getCodexJournalPath());
+    rmSync(getCodexJournalRecoveryPath());
+    process.env.CODEX_CHATGPT_WEB_HOME = join(root, "packaged-app");
+    writeFileSync(cachePath, '{"models":["chatgpt-web/gpt-5.6-sol"]}\n');
+
+    const restored = restoreNativeCodexIntegration();
+    expect(restored.changed).toBe(true);
+    expect(restored.conflicts).toEqual([]);
+    expect(restored.backupPath).toBeTruthy();
+    expect(readFileSync(join(restored.backupPath!, "config.toml"), "utf8")).toBe(active);
+    expect(readFileSync(authPath, "utf8")).toContain('"access_token":"preserved"');
+    expect(existsSync(cachePath)).toBe(false);
+    const native = readFileSync(configPath, "utf8");
+    expect(native).not.toContain("chatgpt-web/");
+    expect(native).not.toContain("openai_base_url");
+    expect(native).not.toContain("codex-chatgpt-web interrupt");
+    expect(native).toContain('[mcp_servers.notes]');
+    expect(native).toContain('command = "user-notes"');
+    expect(restoreNativeCodexIntegration()).toEqual({ changed: false, conflicts: [] });
+  });
+
+  test("native restoration preserves a newer user route while removing orphaned Web GPT ownership", () => {
+    const { root, codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(nativeConfig("browser-only"));
+    const userEdited = readFileSync(configPath, "utf8")
+      .replace('openai_base_url = "http://127.0.0.1:17841/v1"', 'openai_base_url = "https://custom.example/v1"');
+    writeFileSync(configPath, userEdited);
+    rmSync(getCodexJournalPath());
+    rmSync(getCodexJournalRecoveryPath());
+    process.env.CODEX_CHATGPT_WEB_HOME = join(root, "packaged-app");
+
+    const restored = restoreNativeCodexIntegration();
+    const native = readFileSync(configPath, "utf8");
+    expect(restored.changed).toBe(true);
+    expect(restored.conflicts).toContain("openai_base_url was changed after setup and was preserved");
+    expect(native).toContain('openai_base_url = "https://custom.example/v1"');
+    expect(native).not.toContain(MANAGED_ROUTE_COMMENT);
+    expect(native).not.toContain("codex-chatgpt-web interrupt");
+  });
+
+  test("native restoration preserves a journal-proven previous route even when it uses the default bridge port", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = [
+      'model = "gpt-5.6-sol"',
+      'openai_base_url = "http://127.0.0.1:17841/v1"',
+      "",
+      "[mcp_servers.notes]",
+      'command = "user-notes"',
+      "",
+    ].join("\n");
+    writeFileSync(configPath, original);
+    const config = { ...nativeConfig("browser-only"), port: 17842 };
+    installCodexIntegration(config, { replaceExistingRoute: true });
+
+    const restored = restoreNativeCodexIntegration();
+    expect(restored.changed).toBe(true);
+    expect(restored.conflicts).toEqual([]);
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
+
+  test("native restoration recovers from corrupted journal copies without touching authentication", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const authPath = join(codexHome, "auth.json");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    writeFileSync(authPath, '{"auth_mode":"chatgpt","tokens":{"access_token":"preserved"}}\n');
+    installCodexIntegration(nativeConfig("browser-only"));
+    writeFileSync(getCodexJournalPath(), "{broken-primary");
+    writeFileSync(getCodexJournalRecoveryPath(), "{broken-recovery");
+
+    const restored = restoreNativeCodexIntegration();
+    expect(restored.changed).toBe(true);
+    expect(restored.conflicts).toHaveLength(1);
+    expect(restored.conflicts[0]).toContain("saved integration journal was invalid and was removed");
+    expect(restored.backupPath).toBeTruthy();
+    expect(readFileSync(join(restored.backupPath!, "integration-journal.json"), "utf8"))
+      .toBe("{broken-primary");
+    expect(readFileSync(authPath, "utf8")).toContain('"access_token":"preserved"');
+    const native = readFileSync(configPath, "utf8");
+    expect(native).toContain('model = "gpt-5.6-sol"');
+    expect(native).not.toContain("openai_base_url");
+    expect(native).not.toContain("codex-chatgpt-web interrupt");
+    expect(existsSync(getCodexJournalPath())).toBe(false);
+    expect(existsSync(getCodexJournalRecoveryPath())).toBe(false);
   });
 
   test("requires explicit replacement and preserves every non-port route assignment", () => {

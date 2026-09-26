@@ -1,19 +1,33 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { AppConfig } from "./config";
 import { getConfigPath, loadConfig, saveConfig } from "./config";
-import { installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
+import {
+  installCodexInterruptHook,
+  installCodexInterruptHookCommand,
+  MANAGED_INTERRUPT_HOOK_END,
+  MANAGED_INTERRUPT_HOOK_START,
+  restoreOrphanedCodexInterruptHook,
+} from "./codex-interrupt-hook";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   getCodexConfigPath,
+  getCodexHome,
   getCodexJournalPath,
   getCodexJournalRecoveryPath,
   getCodexModelsCachePath,
+  MANAGED_COMMENT,
+  MANAGED_MULTI_AGENT_LINE,
+  MANAGED_MULTI_AGENT_V2_LINE,
+  MANAGED_MULTI_AGENT_V2_TABLE_LINE,
+  MANAGED_REMOTE_COMPACTION_LINE,
+  MANAGED_ROUTE_COMMENT,
   restoreFileSnapshot,
   routeUrl,
   sha256,
   snapshotFile,
   writeFileSnapshot,
+  writeFilesWithCompensation,
   writeIntegrationState,
 } from "./codex-integration-shared";
 import type {
@@ -33,6 +47,10 @@ import { assertJournalTargetsConfig, readJournal } from "./codex-integration-jou
 import {
   findTopLevelAssignment,
   installCompatibilityV1Features,
+  parseDocument,
+  removeDocumentLine,
+  removeManagedComment,
+  renderDocument,
   splitLines,
   textFormat,
 } from "./codex-integration-document";
@@ -221,6 +239,8 @@ export function preflightCodexIntegration(
       throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
     }
     baseline = restoreLegacyV2(currentText, existing);
+  } else if (hasJournalIndependentManagedEvidence(currentText)) {
+    baseline = stripJournalIndependentManagedArtifacts(currentText, configPath, { removeWebModel: false }).text;
   }
   installConfiguredRoute(
     baseline,
@@ -310,6 +330,8 @@ export function installCodexIntegration(
       throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
     }
     baseline = restoreLegacyV2(currentText, existing);
+  } else if (hasJournalIndependentManagedEvidence(currentText)) {
+    baseline = stripJournalIndependentManagedArtifacts(currentText, configPath, { removeWebModel: false }).text;
   }
   const patched = installConfiguredRoute(
     baseline,
@@ -468,6 +490,226 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   return { changed: true, active: true };
 }
 
+export interface RestoreNativeCodexResult {
+  changed: boolean;
+  backupPath?: string;
+  conflicts: string[];
+}
+
+function managedBridgeUrl(
+  value: string | undefined,
+  ownedEvidence: boolean,
+  allowDefaultPort: boolean,
+): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+    const defaultPort = url.port === "17841";
+    return url.protocol === "http:" && loopback && /^\/v1\/?$/.test(url.pathname)
+      && (ownedEvidence || (allowDefaultPort && defaultPort));
+  } catch {
+    return false;
+  }
+}
+
+function hasJournalIndependentManagedEvidence(text: string): boolean {
+  return text.includes(MANAGED_INTERRUPT_HOOK_START)
+    || text.includes(MANAGED_INTERRUPT_HOOK_END)
+    || splitLines(text).some(line => line === MANAGED_ROUTE_COMMENT || line === MANAGED_COMMENT);
+}
+
+function stripJournalIndependentManagedArtifacts(
+  input: string,
+  configPath: string,
+  options: {
+    removeWebModel?: boolean;
+    removeBridgeWithoutEvidence?: boolean;
+  } = {},
+): { text: string; conflicts: string[] } {
+  let text = input;
+  const conflicts: string[] = [];
+  const hookStartCount = text.split(MANAGED_INTERRUPT_HOOK_START).length - 1;
+  const hookEndCount = text.split(MANAGED_INTERRUPT_HOOK_END).length - 1;
+  const ownedHook = hookStartCount > 0 || hookEndCount > 0;
+  if (ownedHook) text = restoreOrphanedCodexInterruptHook(text, configPath);
+
+  const document = parseDocument(text);
+  const routeMarkerCount = document.lines.filter(line =>
+    line === MANAGED_ROUTE_COMMENT || line === MANAGED_COMMENT).length;
+  if (routeMarkerCount > 1) {
+    throw new Error("Codex config contains ambiguous codex-chatgpt-web route markers");
+  }
+  const ownedRoute = routeMarkerCount === 1 || ownedHook;
+  const removals = new Set<number>();
+
+  const model = findTopLevelAssignment(document.lines, "model");
+  if (options.removeWebModel !== false
+    && model.index !== undefined
+    && model.value?.startsWith("chatgpt-web/")) removals.add(model.index);
+
+  const route = findTopLevelAssignment(document.lines, "openai_base_url");
+  if (route.index !== undefined) {
+    if (managedBridgeUrl(
+      route.value,
+      ownedRoute,
+      options.removeBridgeWithoutEvidence !== false,
+    )) removals.add(route.index);
+    else if (routeMarkerCount > 0) conflicts.push("openai_base_url was changed after setup and was preserved");
+  }
+
+  const realtime = findTopLevelAssignment(document.lines, "experimental_realtime_webrtc_call_base_url");
+  if (realtime.index !== undefined && ownedRoute) {
+    if (realtime.value === CODEX_REALTIME_WEBRTC_CALL_BASE_URL) removals.add(realtime.index);
+    else conflicts.push("experimental_realtime_webrtc_call_base_url was changed after setup and was preserved");
+  }
+
+  const exactManagedLines = new Set([
+    MANAGED_REMOTE_COMPACTION_LINE,
+    MANAGED_MULTI_AGENT_LINE,
+    MANAGED_MULTI_AGENT_V2_LINE,
+    MANAGED_MULTI_AGENT_V2_TABLE_LINE,
+  ]);
+  document.lines.forEach((line, index) => {
+    if (exactManagedLines.has(line)
+      || /^max_depth = \d+ # Managed by codex-chatgpt-web: allows nested routed Web subagents in Compatibility V1\.$/.test(line)) {
+      removals.add(index);
+    }
+  });
+  [...removals].sort((left, right) => right - left).forEach(index => removeDocumentLine(document, index));
+  removeManagedComment(document);
+  return { text: renderDocument(document), conflicts };
+}
+
+function restorationWithJournal(
+  current: string,
+  journal: AnyCodexIntegrationJournal,
+): { text: string; conflicts: string[] } {
+  try {
+    if (journal.version === 2) {
+      if (existsSync(journal.catalogPath) && sha256(readFileSync(journal.catalogPath)) !== journal.catalogSha256) {
+        throw new Error(`Managed legacy catalog changed after setup: ${journal.catalogPath}`);
+      }
+      return { text: restoreLegacyV2(current, journal), conflicts: [] };
+    }
+    if ((journal.version === 4 || journal.version === 5 || journal.version === 6
+      || journal.version === 7 || journal.version === 8 || journal.version === 9 || journal.version === 10)
+      && !journal.active) {
+      verifyRestoredRoute(current, journal);
+      return { text: current, conflicts: [] };
+    }
+    return { text: restoreManagedRoute(current, journal), conflicts: [] };
+  } catch (error) {
+    if (journal.version === 2) throw error;
+    let baseline: string;
+    try {
+      baseline = replacementBaseline(current, true, journal);
+    } catch (replacementError) {
+      if (journal.version !== 10
+        || (!current.includes(MANAGED_INTERRUPT_HOOK_START) && !current.includes(MANAGED_INTERRUPT_HOOK_END))) {
+        throw replacementError;
+      }
+      const withoutOrphan = restoreOrphanedCodexInterruptHook(current, journal.configPath);
+      const journalWithoutHook: LegacyCodexIntegrationJournalV9 = {
+        version: 9,
+        active: journal.active,
+        configPath: journal.configPath,
+        installed: journal.installed,
+        previous: journal.previous,
+        previousRealtimeWebrtcCallBaseUrl: journal.previousRealtimeWebrtcCallBaseUrl,
+        ...(journal.previousMultiAgent ? { previousMultiAgent: journal.previousMultiAgent } : {}),
+        ...(journal.previousMultiAgentV2 ? { previousMultiAgentV2: journal.previousMultiAgentV2 } : {}),
+        ...(journal.previousAgentMaxDepth ? { previousAgentMaxDepth: journal.previousAgentMaxDepth } : {}),
+        ...(journal.format ? { format: journal.format } : {}),
+      };
+      baseline = replacementBaseline(withoutOrphan, true, journalWithoutHook);
+    }
+    const recovered = stripJournalIndependentManagedArtifacts(baseline, journal.configPath, {
+      removeBridgeWithoutEvidence: false,
+    });
+    return {
+      text: recovered.text,
+      conflicts: [
+        `The saved integration journal no longer matched the active config: ${error instanceof Error ? error.message : String(error)}`,
+        ...recovered.conflicts,
+      ],
+    };
+  }
+}
+
+function createNativeRestoreBackup(snapshots: ReturnType<typeof snapshotFile>[]): string {
+  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "");
+  const backupPath = join(getCodexHome(), "codex-web-gpt-backups", `${stamp}-${process.pid}`);
+  mkdirSync(backupPath, { recursive: true });
+  const names = new Map<string, string>([
+    [getCodexConfigPath(), "config.toml"],
+    [getCodexModelsCachePath(), "models_cache.json"],
+    [getCodexJournalPath(), "integration-journal.json"],
+    [getCodexJournalRecoveryPath(), "integration-journal.recovery.json"],
+  ]);
+  const writes = snapshots.flatMap(snapshot => snapshot.exists && snapshot.data
+    ? [{ path: join(backupPath, names.get(snapshot.path) ?? basename(snapshot.path)), data: snapshot.data }]
+    : []);
+  if (writes.length > 0) writeFilesWithCompensation(writes);
+  return backupPath;
+}
+
+/**
+ * Restore official Codex routing without stopping the launcher runtime or deleting its data.
+ * A valid journal restores the exact previous values. Missing or inconsistent journals fall back
+ * to strict project markers, trusted hooks, loopback bridge URLs, and the chatgpt-web model namespace.
+ */
+export function restoreNativeCodexIntegration(): RestoreNativeCodexResult {
+  const configPath = getCodexConfigPath();
+  const paths = [
+    configPath,
+    getCodexModelsCachePath(),
+    getCodexJournalPath(),
+    getCodexJournalRecoveryPath(),
+  ];
+  const snapshots = paths.map(path => snapshotFile(path, { followSymlink: path === configPath }));
+  const configSnapshot = snapshots[0]!;
+  const current = configSnapshot.exists ? configSnapshot.data!.toString("utf8") : "";
+  let journal: AnyCodexIntegrationJournal | undefined;
+  let journalError: unknown;
+  try {
+    journal = readJournal();
+  } catch (error) {
+    journalError = error;
+  }
+
+  let restored = current;
+  let conflicts: string[] = [];
+  if (journal) {
+    assertJournalTargetsConfig(journal, configPath);
+    const result = restorationWithJournal(current, journal);
+    const cleaned = stripJournalIndependentManagedArtifacts(result.text, configPath, {
+      removeBridgeWithoutEvidence: false,
+    });
+    restored = cleaned.text;
+    conflicts = [...result.conflicts, ...cleaned.conflicts];
+  } else if (configSnapshot.exists) {
+    const result = stripJournalIndependentManagedArtifacts(current, configPath);
+    restored = result.text;
+    conflicts = result.conflicts;
+  }
+  if (journalError) {
+    conflicts.unshift(`The saved integration journal was invalid and was removed: ${journalError instanceof Error ? journalError.message : String(journalError)}`);
+  }
+
+  const removals = [getCodexModelsCachePath(), getCodexJournalPath(), getCodexJournalRecoveryPath()];
+  if (journal?.version === 2) removals.push(journal.catalogPath);
+  const changed = restored !== current || removals.some(path => existsSync(path));
+  if (!changed) return { changed: false, conflicts };
+
+  const backupPath = createNativeRestoreBackup(snapshots);
+  writeFilesWithCompensation(
+    configSnapshot.exists ? [{ path: configPath, data: restored, followSymlink: true }] : [],
+    removals,
+  );
+  return { changed: true, backupPath, conflicts };
+}
+
 export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   const journal = readJournal();
   if (!journal) return { changed: false };
@@ -479,7 +721,8 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
       throw new Error(`Managed legacy catalog changed after setup: ${journal.catalogPath}`);
     }
     restored = restoreLegacyV2(current, journal);
-  } else if ((journal.version === 4 || journal.version === 5 || journal.version === 6 || journal.version === 7 || journal.version === 8 || journal.version === 9 || journal.version === 10) && !journal.active) {
+  } else if ((journal.version === 4 || journal.version === 5 || journal.version === 6 || journal.version === 7
+    || journal.version === 8 || journal.version === 9 || journal.version === 10) && !journal.active) {
     verifyRestoredRoute(current, journal);
     restored = current;
   } else {

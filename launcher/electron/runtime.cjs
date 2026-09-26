@@ -988,6 +988,29 @@ class RuntimeHost {
     }
   }
 
+  async restoreNativeCodex() {
+    this.assertProductionProfile("Native Codex route restoration");
+    const name = "restore-native-codex";
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    this.lifecycleOperation = name;
+    try {
+      const result = await this.run(name, ["route", "restore-native"], {
+        embedded: true,
+        message: "Backing up and restoring native Codex routing",
+        successMessage: "Native Codex routing restored",
+        timeoutMs: 30_000,
+      });
+      const details = JSON.parse(result.stdout);
+      const verified = await this.bridgeStatus(name);
+      if (verified.installed || verified.active) {
+        throw new Error("Native Codex restoration did not remove the managed bridge route");
+      }
+      return { ...result, details };
+    } finally {
+      this.lifecycleOperation = null;
+    }
+  }
+
   async setupCore() {
     this.assertProductionProfile("Codex integration setup");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);

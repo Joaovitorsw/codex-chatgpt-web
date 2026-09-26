@@ -17,6 +17,7 @@ import {
   deactivateCodexIntegration,
   inspectCodexIntegration,
   readCodexSubagentProtocol,
+  restoreNativeCodexIntegration,
   setCodexSubagentProtocol,
   uninstallCodexIntegration,
 } from "./codex-integration";
@@ -40,7 +41,7 @@ Usage:
   codex-chatgpt-web setup --full --tunnel-id ID --runtime-key-file PATH [options]
   codex-chatgpt-web login
   codex-chatgpt-web doctor [--json]
-  codex-chatgpt-web route <status|connect|disconnect>
+  codex-chatgpt-web route <status|connect|disconnect|restore-native>
   codex-chatgpt-web subagents <status|compatibility-v1|native>
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
@@ -408,6 +409,8 @@ async function routeCommand(args: string[]): Promise<void> {
       ? activateCodexIntegration()
       : action === "disconnect"
         ? deactivateCodexIntegration()
+        : action === "restore-native"
+          ? restoreNativeCodexIntegration()
         : undefined;
   if (!result) throw new Error(`Unknown route action: ${action}`);
   stdout.write(`${JSON.stringify(result, null, 2)}\n`);

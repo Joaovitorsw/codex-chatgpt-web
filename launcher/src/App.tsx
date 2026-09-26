@@ -1825,11 +1825,11 @@ function SettingsSurface({
       setBusy(false);
     }
   };
-  const uninstallIntegration = async () => {
+  const restoreNativeCodex = async () => {
     setBusy(true);
     setError(null);
     try {
-      const result = await api!.uninstallIntegration();
+      const result = await api!.restoreNativeCodex();
       if (!result.cancelled) {
         updateState(result.state);
         setIntegrationRemoved(true);
@@ -1971,7 +1971,7 @@ function SettingsSurface({
         </span>
         <Icon name="chevron" />
       </button> : null}
-      {!devProfile ? <button className="diagnostic-row" disabled={busy} onClick={() => void uninstallIntegration()} type="button">
+      {!devProfile ? <button className="diagnostic-row" disabled={busy} onClick={() => void restoreNativeCodex()} type="button">
         <Icon name="close" />
         <span>
           <strong>{copy.uninstallIntegration}</strong>

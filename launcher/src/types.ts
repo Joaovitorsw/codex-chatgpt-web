@@ -160,6 +160,7 @@ export interface LauncherApi {
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
+  restoreNativeCodex(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(input: { bundledSkills: string[] }): Promise<{
     ok: boolean;

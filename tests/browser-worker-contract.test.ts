@@ -4249,7 +4249,11 @@ test("the shipped commentary classifier separates answer Markdown from reasoning
     .replace(/\):\s*\{[^}]*\}\s*=>/, ") =>");
   const selectChatGptAnswerRoots = new Function(
     `${javascript}; return selectChatGptAnswerRoots;`,
-  )() as (roots: unknown[], statuses: unknown[]) => { answerRoots: Array<{ textContent: string }> };
+  )() as (roots: unknown[], statuses: unknown[]) => {
+    answerRoots: Array<{ textContent: string }>;
+    commentaryRoots: Array<{ textContent: string }>;
+    statusRoots: Array<{ textContent: string }>;
+  };
 
   const answerFor = (html: string): string => {
     const document = createDocument(`<body>${html}</body>`);
@@ -4296,6 +4300,35 @@ test("the shipped commentary classifier separates answer Markdown from reasoning
 
   // A turn with no status container at all is entirely answer.
   expect(answerFor('<div class="markdown">ONLY ANSWER</div>')).toBe("ONLY ANSWER");
+
+  // Current ChatGPT activity DOM keeps white commentary and gray summaries in separate roots,
+  // without data-streaming-response-status. Preserve their visual semantics and only expose the
+  // standalone root as the final answer.
+  const current = createDocument('<body>'
+    + '<div class="block-current"><div class="flex flex-col gap-2 pt-2 pb-1">'
+    + '<div class="MarkdownRoot-current">Vou verificar o diretório.</div></div>'
+    + '<div class="group/activity-header"><span class="agent-activity-summary-color">'
+    + '<div class="MarkdownRoot-current">Checked working directory location</div>'
+    + '</span></div>'
+    + '<div class="flex flex-col gap-2 pt-2 pb-1">'
+    + '<div class="MarkdownRoot-current">Confirmei o diretório.</div></div></div>'
+    + '<div class="group"><div class="MarkdownRoot-current">Resposta final.</div></div>'
+    + '</body>');
+  const currentRoots = Array.from(current.body.querySelectorAll('[class*="MarkdownRoot-"]'));
+  const classified = selectChatGptAnswerRoots(currentRoots, []);
+  expect(classified.commentaryRoots.map(root => root.textContent.trim())).toEqual([
+    "Vou verificar o diretório.", "Confirmei o diretório.",
+  ]);
+  expect(classified.statusRoots.map(root => root.textContent.trim())).toEqual([
+    "Checked working directory location",
+  ]);
+  expect(classified.answerRoots.map(root => root.textContent.trim())).toEqual(["Resposta final."]);
+});
+
+test("current activity Markdown without a search-unit wrapper stays eligible for trace capture", () => {
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  expect(worker).toContain("if (!unit) return true;");
+  expect(worker).toContain('candidate.matches(".rich-text-user-turn")');
 });
 
 test("embedded chart hydration cannot replace Markdown answer content with renderer UI", () => {
@@ -4342,6 +4375,8 @@ test("embedded chart hydration cannot replace Markdown answer content with rende
     expect(projected.querySelector("pre")?.getAttribute("data-start")).toBe("22");
   }
   const text = (html: string) => textFor(contentFor(createDocument(html).body));
+  expect(text('<p>Resposta final.</p><button data-testid="chatgpt-library-file-citation">codex-task-context--abc.txt</button>'))
+    .toBe("Resposta final.");
   expect(text("<p>A<br>B</p>")).not.toBe(text("<p>AB</p>"));
   expect(text("<pre><code>one\n\ntwo</code></pre>"))
     .not.toBe(text("<pre><code>one\ntwo</code></pre>"));

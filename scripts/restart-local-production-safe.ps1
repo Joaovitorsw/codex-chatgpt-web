@@ -33,28 +33,37 @@ function Write-RestartLog([string]$Message) {
   Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format o) $Message"
 }
 
-function Get-LauncherRootProcess {
+function Get-LauncherRootProcesses {
+  $all = @(Get-CimInstance Win32_Process)
+  $roots = [System.Collections.Generic.Dictionary[int, object]]::new()
   if (Test-Path -LiteralPath $supervisorPath) {
     try {
       $supervisor = Get-Content -Raw -LiteralPath $supervisorPath | ConvertFrom-Json
       if ($supervisor.ownerPid -is [int] -or $supervisor.ownerPid -is [long]) {
         $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$supervisor.ownerPid)" -ErrorAction SilentlyContinue
         if ($owner -and ($owner.Name -eq 'bun.exe' -or $owner.Name -eq 'Codex Web GPT.exe')) {
-          return $owner
+          $roots[[int]$owner.ProcessId] = $owner
         }
       }
     } catch {
       Write-RestartLog "Could not resolve the supervisor owner: $($_.Exception.Message)"
     }
   }
-  Get-CimInstance Win32_Process |
-    Where-Object {
-      $_.Name -eq 'bun.exe' -and
-      $_.CommandLine -match 'run scripts/dev\.cjs' -and
-      $_.CommandLine -notmatch 'restart-local-production-safe'
-    } |
-    Sort-Object CreationDate -Descending |
-    Select-Object -First 1
+  # A previous launcher can lose ownership of the supervisor file while its Electron tree and
+  # console remain alive. Find every dev supervisor whose direct Electron child belongs to this
+  # exact checkout, so a restart cannot leave two local-production instances competing.
+  $escapedLauncher = [regex]::Escape((Join-Path $repoRoot 'launcher'))
+  foreach ($candidate in $all | Where-Object {
+    $_.Name -eq 'bun.exe' -and $_.CommandLine -match 'run scripts/dev\.cjs'
+  }) {
+    $ownsThisCheckout = $all | Where-Object {
+      $_.ParentProcessId -eq $candidate.ProcessId -and
+      $_.Name -eq 'electron.exe' -and
+      $_.CommandLine -match $escapedLauncher
+    } | Select-Object -First 1
+    if ($ownsThisCheckout) { $roots[[int]$candidate.ProcessId] = $candidate }
+  }
+  @($roots.Values)
 }
 
 function Get-OwnedLauncherConsoleProcesses {
@@ -106,11 +115,14 @@ if ((Get-Date) -ge $deadline) {
   exit 1
 }
 
-$rootProcess = Get-LauncherRootProcess
+$rootProcesses = @(Get-LauncherRootProcesses)
 $ownedLauncherConsoles = @(Get-OwnedLauncherConsoleProcesses)
-if ($rootProcess) {
-  Write-RestartLog "Stopping idle launcher tree rooted at PID $($rootProcess.ProcessId)."
-  Stop-ProcessTree -RootPid ([int]$rootProcess.ProcessId)
+if ($rootProcesses.Count -gt 0) {
+  $rootPids = ($rootProcesses | ForEach-Object { [string]$_.ProcessId }) -join ', '
+  Write-RestartLog "Stopping $($rootProcesses.Count) idle launcher tree(s), rooted at PID(s): $rootPids."
+  foreach ($rootProcess in $rootProcesses) {
+    Stop-ProcessTree -RootPid ([int]$rootProcess.ProcessId)
+  }
   Start-Sleep -Seconds 1
 }
 

@@ -3023,8 +3023,12 @@ export class ChatGptBrowserWorker {
     const composerForm = composer.locator("xpath=ancestor::form[1]");
     const draftText = await composer.evaluate(element => element.textContent?.trim() ?? "");
     const hasSelectedConnector = await this.connectorIsSelected(composer);
-    const hasSubmittableDraft = await composerForm.locator(CHATGPT_SEND_BUTTON_SELECTOR).first()
-      .isEnabled().catch(() => false);
+    const sendControls = composerForm.locator(CHATGPT_SEND_BUTTON_SELECTOR);
+    // The empty 2026 composer omits its Send button entirely. Calling isEnabled() on a missing
+    // locator spends Playwright's full 30-second action timeout on every fresh turn. Count first;
+    // only an existing control can be evidence of a file-only or otherwise submittable draft.
+    const hasSubmittableDraft = await sendControls.count().catch(() => 0) > 0
+      && await sendControls.first().isEnabled().catch(() => false);
     // An upload in progress keeps Send disabled, so button state alone cannot prove that a new-chat
     // composer is clean. Count attachment tiles directly to avoid inheriting files from an aborted
     // or helper-restarted turn.
@@ -4568,7 +4572,7 @@ export class ChatGptBrowserWorker {
       // ChatGPT's DIL renderer has no .markdown class (#538). Read its response root within the
       // assistant-owned PUIK container; the CSS module hash is build-specific. Both renderers
       // feed the same content serializer and completion checks below, without reading UI text.
-      const answerRootSelector = '.markdown, [data-markdown-text-style="assistant-message"], [data-message-author-role="assistant"] .puik-root.not-markdown > [class*="_DilResponseRoot"]';
+      const answerRootSelector = '.markdown, [class*="MarkdownRoot-"], [data-markdown-text-style="assistant-message"], [data-message-author-role="assistant"] .puik-root.not-markdown > [class*="_DilResponseRoot"]';
       // ChatGPT uses the same content renderer for intermediate commentary and for the final
       // answer. Older responses nested commentary in the streaming-status container. Pro can also
       // render a completed commentary Markdown root immediately before that live status container.
@@ -4578,9 +4582,14 @@ export class ChatGptBrowserWorker {
         .filter(candidate => {
           if (!root.hasAttribute("data-turn-key")) return true;
           const unit = candidate.closest("[data-content-search-unit-key]");
-          return Boolean(unit) && Array.from(unit!.children)
+          // Current activity commentary/status roots belong to the bound assistant turn but sit
+          // outside data-content-search-unit-key. The turn locator already scopes ownership, so
+          // only apply the unit-role check when ChatGPT actually supplies that optional wrapper.
+          if (!unit) return true;
+          return Array.from(unit.children)
             .some(child => child.getAttribute("data-conversation-role") === "assistant");
         })
+        .filter(candidate => !candidate.matches(".rich-text-user-turn"))
         .filter(candidate => !candidate.parentElement?.closest(answerRootSelector))
         .filter(renderedInDom);
       const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>("[data-streaming-response-status]")]
@@ -4591,14 +4600,25 @@ export class ChatGptBrowserWorker {
       const selectChatGptAnswerRoots = (
         markdownRoots: HTMLElement[],
         statusContainers: HTMLElement[],
-      ): { commentaryRoots: HTMLElement[]; answerRoots: HTMLElement[] } => {
+      ): { commentaryRoots: HTMLElement[]; answerRoots: HTMLElement[]; statusRoots: HTMLElement[] } => {
         const firstStatusContainer = statusContainers[0];
-        const commentary = markdownRoots.filter(candidate => (
+        // The 2026 activity renderer no longer exposes data-streaming-response-status. Its gray
+        // summaries live in a group/activity-header, while white commentary is placed in a small
+        // pt-2/pb-1 activity column. Keep those roots out of the final answer without relying on
+        // localized labels such as "Checked" or "Inspected".
+        const activityStatus = markdownRoots.filter(candidate => (
+          candidate.closest('[class*="group/activity-header"]') !== null
+          || candidate.closest('[class*="agent-activity-summary-color"]') !== null
+        ));
+        const commentary = markdownRoots.filter(candidate => !activityStatus.includes(candidate) && (
           candidate.closest("[data-streaming-response-status]") !== null
           // Chain-of-thought components carry reasoning, never the final answer, so containment is
           // a position-independent commentary signal. Position alone cannot separate "commentary
           // between two status containers" from "answer between two tool calls".
           || candidate.closest('[data-testid^="cot-v5"]') !== null
+          || Boolean(candidate.parentElement
+            && candidate.parentElement.classList.contains("pt-2")
+            && candidate.parentElement.classList.contains("pb-1"))
           // Only Markdown that precedes the FIRST status container is prior commentary. Keying
           // this on "some status follows me" silently reclassified answer text as commentary as
           // soon as a second tool call opened another status container below it, which both zeroed
@@ -4610,12 +4630,16 @@ export class ChatGptBrowserWorker {
         ));
         return {
           commentaryRoots: commentary,
-          answerRoots: markdownRoots.filter(candidate => !commentary.includes(candidate)),
+          answerRoots: markdownRoots.filter(candidate => (
+            !commentary.includes(candidate) && !activityStatus.includes(candidate)
+          )),
+          statusRoots: activityStatus,
         };
       };
       // CHATGPT_COMMENTARY_CLASSIFIER_END
       const classified = selectChatGptAnswerRoots(allMarkdownRoots, streamingStatusContainers);
       const commentaryRoots = classified.commentaryRoots;
+      const activityStatusRoots = classified.statusRoots;
       const renderedRoots = classified.answerRoots;
       // Native ChatGPT result cards (weather, markets, sports and similar widgets) are
       // siblings of the Markdown answer. The Responses transport cannot carry their React
@@ -4678,6 +4702,11 @@ export class ChatGptBrowserWorker {
           ".chart-widget-container, [data-code-block-preview-pane], script, style, svg, img, picture, source",
         ))) widget.remove();
         for (const button of Array.from(content.querySelectorAll("button"))) {
+          if (button.matches('[data-testid="chatgpt-library-file-citation"]')
+            && /^codex-task-context--/i.test(button.textContent?.trim() ?? "")) {
+            button.remove();
+            continue;
+          }
           // Observed file-reference controls have a label but no authoritative download URL.
           // Keep only their text; never carry button attributes or infer a link from the name.
           if (button.matches(".behavior-btn.entity-underline")
@@ -4945,6 +4974,7 @@ export class ChatGptBrowserWorker {
       const candidates = new Map<HTMLElement, ChatGptVisibleTraceBlock["kind"]>();
       answerContentRoots.forEach(candidate => candidates.set(candidate, "answer"));
       commentaryRoots.forEach(candidate => candidates.set(candidate, "commentary"));
+      activityStatusRoots.forEach(candidate => candidates.set(candidate, "status"));
       const overlapsRenderedAnswer = (candidate: HTMLElement): boolean => renderedRoots.some(rendered => (
         candidate.contains(rendered) || rendered.contains(candidate)
       ));
@@ -4960,16 +4990,19 @@ export class ChatGptBrowserWorker {
           ?? candidate;
       };
       const traceText = (candidate: HTMLElement): string => {
-        const ariaLabel = candidate.getAttribute("aria-label")?.trim();
+        const semanticCandidate = candidate.matches(answerRootSelector)
+          ? chatGptMarkdownContent(candidate)
+          : candidate;
+        const ariaLabel = semanticCandidate.getAttribute("aria-label")?.trim();
         if (ariaLabel) return ariaLabel;
         // Animated ChatGPT action counters visually split a phrase around the changing number, so
         // `innerText` can become `Searching websites\n3`. The button's screen-reader label already
         // carries the stable semantic phrase (`Searching 3 websites`) without enclosing unrelated
         // commentary from the surrounding streaming-status container.
-        const screenReaderText = [...candidate.querySelectorAll<HTMLElement>(".sr-only")]
+        const screenReaderText = [...semanticCandidate.querySelectorAll<HTMLElement>(".sr-only")]
           .map(element => element.textContent?.replace(/\s+/g, " ").trim() ?? "")
           .find(Boolean);
-        return screenReaderText || candidate.innerText.trim();
+        return screenReaderText || semanticCandidate.innerText.trim();
       };
       const traceKey = (candidate: HTMLElement, kind: ChatGptVisibleTraceBlock["kind"]): string | undefined => {
         const statusContainer = candidate.closest<HTMLElement>("[data-streaming-response-status]");

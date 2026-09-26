@@ -437,8 +437,8 @@ class BrowserHost {
     this.boundsReady = false;
     this.bounds = { x: 0, y: 0, width: 1, height: 1 };
     this.state = {
-      status: "idle",
-      message: "No active task",
+      status: "loading",
+      message: "Checking saved ChatGPT session",
       url: "about:blank",
       title: "ChatGPT",
       authenticated: false,

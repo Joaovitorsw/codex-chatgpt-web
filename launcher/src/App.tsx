@@ -866,6 +866,9 @@ function BrowserSurface({
     && operation?.name === "passkey-login"
     && operation.status === "running"
     && browser?.authenticated !== true;
+  const checkingSavedSession = !manualInteraction
+    && browser?.authenticated !== true
+    && browser?.status === "loading";
   useEffect(() => {
     if (!passkeyWaiting) setPasskeyContinuationRequested(false);
   }, [passkeyWaiting]);
@@ -1037,7 +1040,9 @@ function BrowserSurface({
               ? copy.activeTaskHidden
               : manualInteraction
                 ? copy.browserReady
-                : browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
+                : browser?.authenticated
+                  ? copy.noActiveTask
+                  : checkingSavedSession ? copy.checkingSignIn : copy.stepAccount}</h1>
             <p>{activeBrowserTurn
               ? copy.activeTaskHiddenBody
               : manualInteraction
@@ -1046,8 +1051,10 @@ function BrowserSurface({
                   ? copy.noActiveTaskBody
                   : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
-                {manualInteraction || browser?.authenticated ? copy.openChatgpt : copy.signIn}
+              <PrimaryButton disabled={passkeyWaiting || checkingSavedSession} onClick={() => void toggle()}>
+                {manualInteraction || browser?.authenticated
+                  ? copy.openChatgpt
+                  : checkingSavedSession ? copy.checkingSignIn : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (
                 <SecondaryButton

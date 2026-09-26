@@ -1856,6 +1856,10 @@ export class ChatGptVisibleTraceTracker {
 
   observe(blocks: ChatGptVisibleTraceBlock[], completionActionVisible: boolean, now = Date.now()): ChatGptVisibleTraceEvent[] {
     const output: ChatGptVisibleTraceEvent[] = [];
+    const commentaryTexts = new Set(blocks
+      .filter(block => block.kind === "commentary")
+      .map(block => block.text.replace(/\s+/g, " ").trim())
+      .filter(Boolean));
     let statusSlot = 0;
     let commentarySlot = 0;
     for (const block of blocks) {
@@ -1873,6 +1877,10 @@ export class ChatGptVisibleTraceTracker {
         .trim();
       const text = block.kind === "status" ? stripped.replace(/\s+/g, " ") : stripped;
       if (!text) continue;
+      // ChatGPT sometimes exposes the same white Markdown paragraph again through its enclosing
+      // gray status wrapper. Preserve the richer commentary item and suppress only that exact
+      // duplicate; genuine action labels remain separate reasoning summaries.
+      if (block.kind === "status" && commentaryTexts.has(text)) continue;
       let candidate = this.traceCandidates.get(slot);
       if (!candidate || candidate.text !== text) {
         const pendingSince = block.kind === "commentary" && candidate && text.startsWith(candidate.text)

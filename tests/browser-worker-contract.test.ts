@@ -3651,6 +3651,18 @@ test("visible DOM trace does not duplicate a phase after a transient DOM disappe
   expect(tracker.observe([{ kind: "status", text: "Thinking" }], false, 1_300)).toEqual([]);
 });
 
+test("visible DOM trace prefers white commentary over an identical gray status wrapper", () => {
+  const tracker = new ChatGptVisibleTraceTracker(0);
+  expect(tracker.observe([
+    { kind: "commentary", text: "Build concluída com sucesso." },
+    { kind: "status", text: "Build concluída com sucesso." },
+    { kind: "status", text: "Validated production artifacts" },
+  ], false, 1_000)).toEqual([
+    { kind: "commentary", text: "Build concluída com sucesso." },
+    { kind: "reasoning", text: "@ Validated production artifacts" },
+  ]);
+});
+
 test("streaming commentary resumes by delta after a transient DOM disappearance", () => {
   const tracker = new ChatGptVisibleTraceTracker(0);
   expect(tracker.observe([{ kind: "commentary", text: "Checking sources" }], false, 1_000)).toEqual([

@@ -7,7 +7,7 @@ import { createContext, runInContext } from "node:vm";
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
 import { ChatGptOverthinkingRecoveryTracker } from "../src/adapters/chatgpt-web/browser-worker";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptComposerNeedsReload, chatGptExternalProgressSuppressesDomHealth, chatGptStoppedThinkingIsTerminal, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptMissingFinalAnswerSummary, chatGptToolFinalNeedsSummary, chatGptFinalIsOnlyProspectiveProgress, chatGptLatestNewTurnIdentity, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, retryChatGptTerminalError, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs, chatGptRateLimitBackoffMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, CHATGPT_LARGE_TASK_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptComposerNeedsReload, chatGptExternalProgressSuppressesDomHealth, chatGptStoppedThinkingIsTerminal, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptMissingFinalAnswerSummary, chatGptToolFinalNeedsSummary, chatGptFinalIsOnlyProspectiveProgress, chatGptLatestNewTurnIdentity, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, retryChatGptConversationLoad, retryChatGptTerminalError, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs, chatGptRateLimitBackoffMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -2746,6 +2746,7 @@ function dialogPage(text: string, buttonText = "Got it", errorActionVisible = fa
     page: {
       locator: () => createDialog(),
       getByText: (hasText: string | RegExp) => createDialog().filter({ hasText }),
+      getByRole: (_role: string, options?: { name?: string | RegExp }) => createDialog().getByRole(_role, options),
       getByTestId: (testId: string) => {
         const action = {
           last: () => action,
@@ -2949,6 +2950,24 @@ test("the current response error action can be retried once in the same conversa
     });
     await throwIfChatGptTerminalErrorAlert(dialogPage(text, "Retry", false).page);
   }
+});
+
+test("a retained conversation load error retries the same ChatGPT conversation", async () => {
+  const fixture = dialogPage("Could not load this ChatGPT conversation", "Retry");
+
+  await expect(retryChatGptConversationLoad(fixture.page)).resolves.toBe(true);
+  expect(fixture.pressed).toEqual(["Enter"]);
+});
+
+test("a retained conversation load error without Retry remains a retryable upstream failure", async () => {
+  const fixture = dialogPage("Could not load this ChatGPT conversation", "Dismiss");
+
+  await expect(retryChatGptConversationLoad(fixture.page)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 503,
+    code: "chatgpt_conversation_unavailable",
+    retryable: true,
+  });
 });
 
 test("the overthinking notice must remain stagnant and cannot override any live tool evidence", () => {

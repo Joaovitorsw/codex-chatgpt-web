@@ -836,6 +836,29 @@ const chatGptExpiredSessionAlert = (page: Page): Locator => page
   .filter({ hasText: /Your session has expired|你的工作階段已過期|您的工作階段已過期|你的会话已过期|您的会话已过期/i })
   .last();
 
+const chatGptConversationUnavailable = (page: Page): Locator => page
+  .getByText(/Could not load this ChatGPT conversation|Não foi possível carregar esta conversa do ChatGPT/i)
+  .last();
+
+/**
+ * A retained conversation occasionally lands on ChatGPT's recoverable load-error view while the
+ * account remains authenticated. Retry that exact page once before treating the saved chat as
+ * unusable; replacing it with a new chat here would lose the active task context.
+ */
+export async function retryChatGptConversationLoad(page: Page): Promise<boolean> {
+  const unavailable = chatGptConversationUnavailable(page);
+  if (!await unavailable.isVisible().catch(() => false)) return false;
+  const retry = page.getByRole("button", { name: /^(Retry|Tentar novamente)$/i }).last();
+  if (!await retry.isVisible().catch(() => false)) {
+    throw new ChatGptWebAdapterError(
+      "ChatGPT could not load the saved conversation and did not expose its Retry action.",
+      { status: 503, errorType: "server_error", code: "chatgpt_conversation_unavailable", retryable: true },
+    );
+  }
+  await retry.press("Enter", { timeout: 5_000 });
+  return true;
+}
+
 export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<void> {
   if (await chatGptExpiredSessionAlert(page).isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
@@ -5733,6 +5756,13 @@ export class ChatGptBrowserWorker {
       // Reconcile the live control before every submission, including retained continuations.
       let modelControlRecoveryAvailable = true;
       const selectStagingMode = async () => {
+        if (await retryChatGptConversationLoad(page)) {
+          // The Retry action reloads this same saved conversation. Wait for its composer before
+          // touching the model selector so we never mistake the error view for a missing picker.
+          await diagnostics.capture(page, "saved-conversation-retry-requested");
+          await this.activeComposer(page, 30_000, turn.abortSignal);
+          await diagnostics.capture(page, "saved-conversation-retry-ready");
+        }
         try {
           return await this.selectModelAndEffort(
             page,

@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { estimateChatGptWebInputTokens, resolveBiggerContextMultipartParts } from "../src/adapters/chatgpt-web/usage";
+import {
+  CHATGPT_RESILIENT_MULTIPART_TOKEN_THRESHOLD,
+  estimateChatGptWebInputTokens,
+  resolveBiggerContextMultipartParts,
+  resolveResilientMultipartParts,
+} from "../src/adapters/chatgpt-web/usage";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
@@ -54,6 +59,31 @@ test("multipart selection accounts for whole-record and composer fit before subm
     "gpt-5.6-sol", capabilities, estimateTokens(proMessages[0]!), proMessages[0]!.length,
   ).effort).toBe("max");
 }, 60_000);
+
+test("large image-rich context automatically uses multipart without Bigger Context", () => {
+  const parsed = request("Continue from the attached product images.");
+  parsed.context.messages = [{
+    role: "user",
+    content: [
+      { type: "text", text: "Inspect the six product images and continue the task. " + "context ".repeat(8_000) },
+      ...Array.from({ length: 6 }, (_, index) => ({
+        type: "image" as const,
+        imageUrl: `data:image/png;base64,automatic-multipart-${index}`,
+        detail: "original" as const,
+      })),
+    ],
+    timestamp: 1,
+  }];
+
+  const inline = compileChatGptWebPrompt(parsed, capabilities);
+  expect(estimateCompiledChatGptWebInputTokens(inline, parsed.modelId))
+    .toBeGreaterThanOrEqual(CHATGPT_RESILIENT_MULTIPART_TOKEN_THRESHOLD);
+  expect(resolveResilientMultipartParts(parsed, capabilities, false)).toBe(2);
+
+  const multipart = compileChatGptWebPrompt(parsed, capabilities, undefined, { experimentalMultipartParts: 2 });
+  expect(multipart.multipart).toBeDefined();
+  expect(multipart.images).toHaveLength(6);
+});
 
 test("Bigger Context compaction selects six parts before the legacy inline byte budget", () => {
   const parsed = request("x".repeat(160_000));

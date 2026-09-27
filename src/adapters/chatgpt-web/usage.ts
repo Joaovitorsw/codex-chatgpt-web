@@ -25,6 +25,13 @@ import type { BrokerToolRequest } from "./turn-broker";
 // estimates differ slightly between the prepared browser prompt and later Codex tool rounds.
 const ESTIMATE_TURN_TOKEN = "turn_00000000000000000000000000000000";
 
+/**
+ * A few rich attachments can remain under the model context window yet be fragile as one
+ * physical ChatGPT submission. This safety boundary keeps ordinary turns inline while staging
+ * 40k+ contexts before the browser has a chance to stall without creating a response DOM.
+ */
+export const CHATGPT_RESILIENT_MULTIPART_TOKEN_THRESHOLD = 40_000;
+
 export interface ChatGptWebRoundEvidence {
   answer?: string;
   reasoning?: string[];
@@ -112,6 +119,36 @@ export function resolveBiggerContextMultipartParts(
   };
   if (initialParts === undefined && fits(inline)) return undefined;
   return fits(compile(2)) ? 2 : CHATGPT_BIGGER_CONTEXT_PARTS;
+}
+
+/**
+ * Select multipart transport for a browser request large enough to be unreliable as one
+ * submission even when Bigger Context was not manually enabled. The explicit preference keeps
+ * its current behaviour (including six parts where required); the automatic path is a narrow
+ * two-part transport safeguard rather than a new account-level context mode.
+ */
+export function resolveResilientMultipartParts(
+  parsed: CodexParsedRequest,
+  capabilities: ChatGptWebCapabilities,
+  experimentalBiggerContext: boolean,
+  experimentalSkillAttachments = false,
+): ChatGptWebMultipartPartCount | undefined {
+  if (experimentalBiggerContext) {
+    return resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments);
+  }
+  if (isChatGptWebZeroRiskBackendModel(parsed.modelId) || parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+    return undefined;
+  }
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  const inline = compileChatGptWebPrompt(
+    parsed,
+    capabilities,
+    mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
+    { experimentalSkillAttachments },
+  );
+  return estimateCompiledChatGptWebInputTokens(inline, parsed.modelId) >= CHATGPT_RESILIENT_MULTIPART_TOKEN_THRESHOLD
+    ? 2
+    : undefined;
 }
 
 export function biggerContextPartCount(

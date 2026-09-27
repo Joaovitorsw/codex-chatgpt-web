@@ -4874,22 +4874,39 @@ export class ChatGptBrowserWorker {
         // cannot become a response or destabilize its text fingerprint.
         // Ordinary code blocks, surrounding prose and the original observed DOM remain intact.
         const trustedGeneratedImage = (image: HTMLImageElement): boolean => {
+          const source = image.getAttribute("src")?.trim() ?? "";
+          // The browser always has URL, but the serializer also runs against detached/minimal DOM
+          // test environments. First-party generated URLs are absolute, so this fallback stays
+          // strict without needing a page-global URL constructor.
+          const trustedAbsoluteSource = /^https:\/\/(?:[^/]+\.)?(?:chatgpt\.com|openai\.com|oaiusercontent\.com)(?:\/|$)/i;
           try {
-            const url = new URL(image.getAttribute("src") ?? "", location.href);
+            // Generated result URLs are absolute. Avoid depending on the page-global `location`
+            // while serializing a detached clone: that made a valid image disappear in renderer
+            // test environments and made this preservation path unnecessarily fragile.
+            const url = new URL(source);
             if (url.protocol !== "https:") return false;
             const host = url.hostname.toLowerCase();
             return host === "chatgpt.com" || host.endsWith(".chatgpt.com")
               || host === "openai.com" || host.endsWith(".openai.com")
               || host === "oaiusercontent.com" || host.endsWith(".oaiusercontent.com");
           } catch {
-            return false;
+            return trustedAbsoluteSource.test(source);
           }
         };
         for (const image of Array.from(content.querySelectorAll<HTMLImageElement>("img"))) {
           if (!trustedGeneratedImage(image)) image.remove();
         }
+        // The image renderer commonly wraps a generated result in PICTURE/SOURCE for responsive
+        // delivery. PICTURE is presentation chrome, but deleting the wrapper wholesale also
+        // deleted the already-approved IMG and left only the surrounding answer sentence.
+        for (const picture of Array.from(content.querySelectorAll<HTMLElement>("picture"))) {
+          const image = Array.from(picture.querySelectorAll<HTMLImageElement>("img"))
+            .find(trustedGeneratedImage);
+          if (image) picture.replaceWith(image);
+          else picture.remove();
+        }
         for (const widget of Array.from(content.querySelectorAll(
-          ".chart-widget-container, [data-code-block-preview-pane], script, style, svg, picture, source",
+          ".chart-widget-container, [data-code-block-preview-pane], script, style, svg, source",
         ))) widget.remove();
         for (const button of Array.from(content.querySelectorAll("button"))) {
           if (button.matches('[data-testid="chatgpt-library-file-citation"]')
@@ -5050,7 +5067,9 @@ export class ChatGptBrowserWorker {
           const shell = document.createElement("span");
           nodes.forEach(node => shell.append(node.cloneNode(true)));
           const text = markdownText(shell);
-          if (text) {
+          // A final generated image is semantically non-empty even though its accessible text
+          // is empty. Keep its own segment so Turndown can emit Markdown into the Codex answer.
+          if (text || shell.querySelector("img")) {
             const rangedElements = nodes.flatMap(node => node instanceof Element
               ? [node, ...node.querySelectorAll<HTMLElement>("[data-start][data-end]")]
               : []);

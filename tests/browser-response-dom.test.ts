@@ -158,6 +158,28 @@ test("captured DIL smoke response reaches Markdown delivery and stable completio
   }
 });
 
+test("a generated apple in the final assistant response reaches Codex Markdown, not only activity", async () => {
+  const response = await snapshot(`
+    <section id="turn">
+      <div data-content-search-unit-key="apple-answer">
+        <div data-conversation-role="assistant"></div>
+        <div data-markdown-text-style="assistant-message">
+          <p>Aqui está a maçã gerada.</p>
+          <picture><source srcset="https://files.oaiusercontent.com/file-apple/generated-apple.webp">
+            <img alt="Maçã gerada" src="https://files.oaiusercontent.com/file-apple/generated-apple.png"></picture>
+        </div>
+      </div>
+      <button data-testid="copy-turn-action-button"></button>
+    </section>
+  `);
+  const buffer = new ChatGptMarkdownBuffer();
+  buffer.observe(response.markdownSegments, 0);
+  const final = buffer.finish().markdown;
+  expect(final).toContain("Aqui está a maçã gerada.");
+  expect(final).toContain("![Maçã gerada](https://files.oaiusercontent.com/file-apple/generated-apple.png)");
+  expect(response.traceBlocks.map(block => block.kind)).toEqual(["answer"]);
+});
+
 test("converts a native weather widget into a stable Markdown card", async () => {
   const response = await snapshot(`
     <section id="turn">

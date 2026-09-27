@@ -699,6 +699,7 @@ export function compileChatGptWebPrompt(
         ? "Each image_attachment in the staged context refers to the correspondingly named image attached to this commit message; inspect it directly."
         : "Each image_attachment in the context refers to the correspondingly named image attached to this ChatGPT message; inspect it directly.",
     "If a ChatGPT-native capability renders a rich card, widget, chart, or other non-text result, also provide the relevant result as ordinary Markdown in the final answer. A private ChatGPT UI widget never replaces the Markdown answer returned to Codex.",
+    "When a ChatGPT-native image generation result is already visible in this ChatGPT turn, do not call a local Codex view_image tool merely to show that same result again. Finish the response with the generated image and its concise user-facing conclusion; the bridge carries that final media to Codex. Use local image inspection only for a distinct workspace file that is not already rendered here.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
   ];

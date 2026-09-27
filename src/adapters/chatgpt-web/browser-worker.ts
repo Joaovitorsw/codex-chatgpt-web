@@ -140,6 +140,8 @@ export const CHATGPT_OVERTHINKING_STALL_MS = 120_000;
 // and retire the browser turn before the concluding text reached Codex. Require a full quiet
 // window; every text or HTML mutation resets this clock through ChatGptCompletionTracker.
 export const CHATGPT_COMPLETION_SETTLE_MS = 10_000;
+// A first-party image in the completed response is a concrete final result, not merely progress.
+export const CHATGPT_FINAL_MEDIA_SETTLE_MS = 1_500;
 // A tool-capable turn needs a wider quiet window than a read-only response. ChatGPT may briefly
 // remove its stop control while it is opening the connector and before the MCP claim reaches the
 // broker. Retiring the token inside that gap makes the connector report that the local execution
@@ -846,6 +848,10 @@ const chatGptConversationUnavailable = (page: Page): Locator => page
  * unusable; replacing it with a new chat here would lose the active task context.
  */
 export async function retryChatGptConversationLoad(page: Page): Promise<boolean> {
+  // Lightweight transport fixtures and non-page adapters deliberately expose only the locator
+  // primitives they use. A real Playwright Page always has getByText; without it there is no
+  // recoverable conversation-load surface to inspect.
+  if (typeof (page as unknown as { getByText?: unknown }).getByText !== "function") return false;
   const unavailable = chatGptConversationUnavailable(page);
   if (!await unavailable.isVisible().catch(() => false)) return false;
   const retry = page.getByRole("button", { name: /^(Retry|Tentar novamente)$/i }).last();
@@ -1641,6 +1647,7 @@ export class ChatGptCompletionTracker {
   update(
     state: Parameters<typeof chatGptTurnIsComplete>[0] & {
       externalToolCallsInFlight?: boolean;
+      hasFinalMedia?: boolean;
     },
     now = Date.now(),
   ): boolean {
@@ -1653,7 +1660,9 @@ export class ChatGptCompletionTracker {
       this.missingPostToolAnswerSince = undefined;
       return false;
     }
-    if (this.postToolAnswerBaselineText === state.currentText) {
+    // Image generation can preserve the explanatory sentence while replacing its result area
+    // with the actual image. That is fresh final evidence, unlike stale pre-tool prose.
+    if (this.postToolAnswerBaselineText === state.currentText && !state.hasFinalMedia) {
       this.candidate = undefined;
       if (!chatGptTurnIsComplete(state)) {
         this.missingPostToolAnswerSince = undefined;
@@ -1677,7 +1686,9 @@ export class ChatGptCompletionTracker {
       this.candidate = { signature, since: now };
       return false;
     }
-    const settleMs = state.completionActionVisible ? this.stableMs : this.missingActionStableMs;
+    const settleMs = state.hasFinalMedia
+      ? Math.min(this.stableMs, CHATGPT_FINAL_MEDIA_SETTLE_MS)
+      : state.completionActionVisible ? this.stableMs : this.missingActionStableMs;
     return now - this.candidate.since >= settleMs;
   }
 }
@@ -1868,6 +1879,7 @@ interface ChatGptResponseDomSnapshot {
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
   completionActionVisible: boolean;
+  hasFinalMedia: boolean;
   stoppedThinkingVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
 }
@@ -1885,6 +1897,7 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   fullHtml: "",
   markdownSegments: [],
   completionActionVisible: false,
+  hasFinalMedia: false,
   stoppedThinkingVisible: false,
   traceBlocks: [],
 });
@@ -5045,7 +5058,9 @@ export class ChatGptBrowserWorker {
           });
         });
       };
-      renderedRoots.map(chatGptMarkdownContent).forEach((markdownRoot) => {
+      const renderedMarkdownRoots = renderedRoots.map(chatGptMarkdownContent);
+      const hasFinalMedia = renderedMarkdownRoots.some(markdownRoot => markdownRoot.querySelector("img") !== null);
+      renderedMarkdownRoots.forEach((markdownRoot) => {
         const children = [...markdownRoot.children] as HTMLElement[];
         const hasBlockChildren = children.some(child => blockMarkdownTags.has(child.tagName.toLowerCase()));
         if (!hasBlockChildren) {
@@ -5338,6 +5353,7 @@ export class ChatGptBrowserWorker {
           fullHtml: answerContentRoots.map(candidate => candidate.innerHTML).join(""),
           markdownSegments,
           completionActionVisible: completionAction !== undefined,
+          hasFinalMedia,
           stoppedThinkingVisible,
           traceBlocks,
         },
@@ -6355,6 +6371,7 @@ export class ChatGptBrowserWorker {
             currentText: snapshot.visibleText,
             currentHtml: snapshot.fullHtml,
             completionActionVisible: snapshot.completionActionVisible,
+            hasFinalMedia: snapshot.hasFinalMedia,
             externalToolCallsInFlight,
           });
           if (!completionReady) completionFenceRevision = undefined;

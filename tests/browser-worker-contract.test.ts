@@ -4626,6 +4626,24 @@ test("Full mode fails closed when ChatGPT exposes completion without a post-tool
     .toThrow("completed without producing a final answer after its last Codex tool call");
 });
 
+test("a rendered final image settles a completed tool turn without a text-only replacement", () => {
+  const tracker = new ChatGptCompletionTracker(10_000, 60_000, 5_000);
+  const imageResult = {
+    responsePresent: true,
+    running: false,
+    currentText: "A imagem foi enviada para renderização direta no chat.",
+    currentHtml: '<p>A imagem foi enviada para renderização direta no chat.</p><img src="https://files.oaiusercontent.com/apple.png">',
+    completionActionVisible: false,
+    hasFinalMedia: true,
+    externalToolCallsInFlight: false,
+  };
+  // The text can match the pre-tool status copy; the rendered image is the new result.
+  expect(tracker.observeToolBatch(1, imageResult.currentText)).toBeTrue();
+  expect(tracker.update(imageResult, 1_000)).toBeFalse();
+  expect(tracker.update(imageResult, 2_499)).toBeFalse();
+  expect(tracker.update(imageResult, 2_500)).toBeTrue();
+});
+
 test("a future progress timestamp is not treated as liveness", () => {
   const base = {
     revision: 2,

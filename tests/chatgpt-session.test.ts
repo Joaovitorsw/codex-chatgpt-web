@@ -306,7 +306,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; transientSliderReads?: number; loseSelectionOnClose?: boolean; compactLabel?: boolean; power?: boolean; menuOwned?: boolean; proOption?: boolean; disabled?: string; staleAttributeMax?: string; maxAfterClose?: string; locksAfterClose?: Array<string | null> } = {}) {
+function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; transientSliderReads?: number; loseSelectionOnClose?: boolean; compactLabel?: boolean; power?: boolean; menuOwned?: boolean; proOption?: boolean; proDisabled?: boolean; disabled?: string; staleAttributeMax?: string; maxAfterClose?: string; locksAfterClose?: Array<string | null> } = {}) {
   let value = 0;
   let opened = true;
   let closedOnce = false;
@@ -376,7 +376,9 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
   const proOption = {
     filter() { return this; },
     count: async () => (options.proOption ?? Number(max()) === 4) ? 1 : 0,
-    getAttribute: async (name: string) => name === "aria-checked" ? String(selectedPro) : null,
+    getAttribute: async (name: string) => name === "aria-checked" ? String(selectedPro)
+      : name === "aria-disabled" ? String(options.proDisabled ?? false)
+        : name === "data-disabled" && options.proDisabled ? "" : null,
     click: async () => { selectedPro = true; opened = false; },
   };
   const familyOption = {
@@ -523,6 +525,12 @@ test("power picker omission of lock attributes requires its enabled structural o
     .rejects.toThrow("availability");
   await expect(detectChatGptAccountCapabilities(reasoningPicker({
     power: true, max: "3", locks: Array(4).fill(null), proOption: true,
+  }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+});
+
+test("a temporarily disabled exact Pro row remains installed as GPT-6 Pro entitlement", async () => {
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({
+    max: "3", proOption: true, proDisabled: true,
   }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
 });
 

@@ -441,11 +441,12 @@ export async function detectChatGptAccountCapabilities(
     }
     const { available } = await readChatGptEffortSnapshot(sliderContainer);
     const proOption = menu.getByRole("menuitemradio", { name: /^Pro$/i, exact: true }).filter({ visible: true });
-    const proDataDisabled = await proOption.count() === 1
-      ? await proOption.getAttribute("data-disabled") : null;
-    const proAvailable = await proOption.count() === 1
-      && await proOption.getAttribute("aria-disabled") !== "true"
-      && (proDataDisabled === null || proDataDisabled === "false");
+    // The exact Pro row is account-entitlement evidence. ChatGPT can temporarily render that
+    // row disabled while the picker hydrates or while the current conversation surface cannot
+    // switch modes. Do not erase GPT-6 Pro from Codex's installed catalog because of that
+    // transient UI state; selectModelAndEffort still fails closed if Pro is not selectable when
+    // an actual turn starts.
+    const proAvailable = await proOption.count() === 1;
     return { solAvailable: true, extraHighAvailable: available[3] === true, proAvailable };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});

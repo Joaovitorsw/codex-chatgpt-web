@@ -407,7 +407,12 @@ export function parseRequest(body: unknown): CodexParsedRequest {
             const kinds = msg.internal_chat_message_metadata_passthrough?.content_item_kinds;
             const selectedSkill = msg.role === "user" && kinds?.length === 1
               && kinds[0] === "skills.selected_skill_instructions";
-            messages.push({ role: msg.role, content, timestamp: now, ...(selectedSkill ? { origin: "codex_skill" as const } : {}) });
+            const activeGoal = msg.role === "user" && kinds?.length === 1
+              && kinds[0] === "goal.internal_context";
+            const origin = selectedSkill ? "codex_skill" as const
+              : activeGoal ? "codex_goal" as const
+              : undefined;
+            messages.push({ role: msg.role, content, timestamp: now, ...(origin ? { origin } : {}) });
             break;
           }
           case "assistant": {

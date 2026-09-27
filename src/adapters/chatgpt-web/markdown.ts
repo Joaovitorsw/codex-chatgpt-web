@@ -13,8 +13,37 @@ const turndown = new TurndownService({
 
 turndown.use(gfm);
 turndown.remove(["button", "script", "style"]);
-turndown.addRule("removeImages", {
-  filter: node => ["IMG", "PICTURE", "SOURCE"].includes(node.nodeName),
+function trustedChatGptImageSource(value: string | null): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return undefined;
+    const host = url.hostname.toLowerCase();
+    // Generated ChatGPT media is served from these first-party domains. Keeping this allowlist
+    // prevents decorative/browser-owned images and arbitrary remote content from becoming part
+    // of a Codex response while preserving a real generated result in the final Markdown.
+    if (host === "chatgpt.com" || host.endsWith(".chatgpt.com")
+      || host === "openai.com" || host.endsWith(".openai.com")
+      || host === "oaiusercontent.com" || host.endsWith(".oaiusercontent.com")) return url.href;
+  } catch {
+    // A malformed DOM URL is UI noise, never response content.
+  }
+  return undefined;
+}
+
+turndown.addRule("chatGptGeneratedImage", {
+  filter: node => node.nodeName === "IMG",
+  replacement: (_content, node) => {
+    const image = node as HTMLImageElement;
+    const source = trustedChatGptImageSource(image.getAttribute("src"));
+    if (!source) return "";
+    const alt = (image.getAttribute("alt") ?? "Imagem gerada no ChatGPT")
+      .replace(/[\[\]]/g, "").trim() || "Imagem gerada no ChatGPT";
+    return `\n\n![${alt}](${source})\n\n`;
+  },
+});
+turndown.addRule("removeImageContainers", {
+  filter: node => ["PICTURE", "SOURCE"].includes(node.nodeName),
   replacement: () => "",
 });
 turndown.addRule("removeSvg", {

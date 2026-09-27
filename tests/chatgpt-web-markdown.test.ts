@@ -78,6 +78,14 @@ test("does not nest a generated file link inside an existing link", () => {
   )).toBe("Open [`src/example.ts`](https://example.com/source).");
 });
 
+test("preserves first-party generated ChatGPT images but drops arbitrary image chrome", () => {
+  expect(chatGptHtmlToMarkdown([
+    '<p>Resultado:</p>',
+    '<img alt="Maçã" src="https://files.oaiusercontent.com/file-123/apple.png">',
+    '<img alt="avatar" src="https://example.invalid/avatar.png">',
+  ].join(""))).toBe("Resultado:\n\n![Maçã](https://files.oaiusercontent.com/file-123/apple.png)");
+});
+
 test("converts Obsidian aliases and headings but preserves code examples and embeds", () => {
   const html = [
     "<p>Open [[Notes/weekly-review|review]] and [[Projects/sample#Status]].</p>",

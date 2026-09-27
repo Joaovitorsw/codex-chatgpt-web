@@ -1298,7 +1298,7 @@ test("plain-text editing command fails closed when the focused composer rejects 
     .rejects.toThrow("rejected the plain-text editing command");
 });
 
-test("compaction prompt attachment retries once only before submission evidence", async () => {
+test("prompt attachment retries once only before submission evidence without changing the conversation", async () => {
   const attachWithRetry = (ChatGptBrowserWorker.prototype as unknown as {
     attachPromptWithCompactionRetry(
       page: unknown,
@@ -1343,18 +1343,22 @@ test("compaction prompt attachment retries once only before submission evidence"
     currentSubmissionEvidence: async () => "user_turn",
     resetCompactionComposerForRetry: async () => { throw new Error("must not reset"); },
   }, {}, "compact prompt", false, true, baseline)).rejects.toThrow(
-    "ChatGPT changed while the compaction prompt was being prepared",
+    "mudou esta conversa durante a recuperação automática",
   );
   expect(duplicateAttempts).toBe(1);
 
   let normalAttempts = 0;
-  await expect(attachWithRetry.call({
+  let normalResets = 0;
+  await attachWithRetry.call({
     attachPrompt: async () => {
       normalAttempts += 1;
-      throw new ChatGptPromptAttachmentIntegrityError("composer cleared");
+      if (normalAttempts === 1) throw new ChatGptPromptAttachmentIntegrityError("composer cleared");
     },
-  }, {}, "normal prompt", false, false, baseline)).rejects.toThrow("composer cleared");
-  expect(normalAttempts).toBe(1);
+    currentSubmissionEvidence: async () => undefined,
+    resetCompactionComposerForRetry: async () => { normalResets += 1; },
+  }, {}, "normal prompt", false, false, baseline);
+  expect(normalAttempts).toBe(2);
+  expect(normalResets).toBe(1);
 });
 
 test("prompt insertion stops before touching the composer when its stage is already aborted", async () => {
@@ -2919,8 +2923,11 @@ test("effort readback rejects a changed selection or surface before activating S
   const page = { url: () => state.url };
   const mode = { selection };
   await worker.assertSelectedEffort(page, mode);
-  for (const change of [{ label: "Medio" }, { url: "https://chatgpt.com/" }, { expanded: "true" },
-    { editable: false }, { count: 2 }]) {
+  // Model labels are localized and presentation-only; semantic state still has to remain stable.
+  Object.assign(state, { url: selection.url, label: "Raciocinando", expanded: "false", editable: true, count: 1 });
+  await expect(worker.assertSelectedEffort(page, mode)).resolves.toBeUndefined();
+  for (const change of [{ url: "https://chatgpt.com/" }, { expanded: "true" },
+    { editable: false }]) {
     Object.assign(state, { url: selection.url, label: "Alto", expanded: "false", editable: true, count: 1 }, change);
     await expect(worker.assertSelectedEffort(page, mode)).rejects.toMatchObject({
       code: "chatgpt_model_control_unavailable", retryable: false,
@@ -3061,8 +3068,8 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
   };
   const composerForm = { locator: () => effortControl };
   const composer = { locator: () => composerForm };
-  const effortChoice = { waitFor: async () => await neverVisible };
-  const effortChoices = { nth: () => effortChoice, count: async () => 3, last() { return this; } };
+  const effortChoice = { waitFor: async () => await neverVisible, getAttribute: async () => null };
+  const effortChoices = { filter() { return this; }, nth: () => effortChoice, count: async () => 3, last() { return this; } };
   const effortMenu = {
     filter() { return this; },
     last() { return this; },
@@ -3108,6 +3115,7 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
       if (selector.includes('[role="dialog"]')) return hiddenDialog;
       return effortMenu;
     },
+    keyboard: { press: async () => {} },
   }, "gpt-5.6-sol", "high", {
     localToolsEnabled: true,
     solAvailable: true,

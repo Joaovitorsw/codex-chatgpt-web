@@ -47,6 +47,11 @@ export function friendlyErrorMessage(value: unknown, language = "en"): string {
       ? "Os controles de modelo do ChatGPT não estão disponíveis nesta tela. Recarregue o navegador integrado e tente novamente."
       : "ChatGPT model controls are unavailable on this screen. Reload the integrated browser and try again.";
   }
+  if (/Não foi possível confirmar os controles de modelo/i.test(message)) {
+    return pt
+      ? "O ChatGPT não terminou de carregar o seletor de modelo mesmo após uma tentativa automática de recuperação. Nada foi enviado: mantenha o chat aberto, recarregue o navegador integrado e use Continuar."
+      : "ChatGPT did not finish loading its model selector after one automatic recovery attempt. Nothing was sent: keep the chat open, reload the integrated browser, then continue.";
+  }
   if (/unexpected idle surface/i.test(message)) {
     return pt
       ? "O navegador integrado ficou em uma tela inesperada. Volte à página inicial do ChatGPT e tente novamente."
@@ -71,6 +76,11 @@ export function friendlyErrorMessage(value: unknown, language = "en"): string {
     return pt
       ? "O envio foi bloqueado porque havia texto residual no ChatGPT, evitando duplicação. Abra uma conversa limpa e tente novamente."
       : "Sending was blocked because ChatGPT contained residual text, preventing a duplicate submission. Open a clean conversation and try again.";
+  }
+  if (/alterou ou duplicou o texto antes do envio|não pôde ser limpo com segurança/i.test(message)) {
+    return pt
+      ? "O ChatGPT duplicou ou reteve parte do texto antes do envio. A aplicação tentou limpar e reenviar uma vez sem trocar de conversa; como não foi seguro, nenhum envio adicional foi feito. Abra o chat integrado e use Continuar."
+      : "ChatGPT duplicated or retained part of the text before sending. The app tried one clean same-conversation retry; because it was not safe, no extra submission was made. Open the integrated chat and continue.";
   }
 
   if (/\b(?:launcher|daemon|runtime|ipc|atomic|webcontentsview)\b/i.test(message)) {

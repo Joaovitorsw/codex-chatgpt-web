@@ -1847,6 +1847,30 @@ class RuntimeSupervisor {
     }
   }
 
+  // Establish an atomic no-new-turns fence before a voluntary launcher exit. This is deliberately
+  // separate from shutdown: route restoration can fail, in which case the caller resumes the
+  // daemon and leaves every existing Codex connection untouched.
+  async drainForVoluntaryExit() {
+    const config = this.readConfig();
+    const daemon = this.daemon;
+    if (!config || !daemon || daemon.exitCode !== null || daemon.signalCode !== null) {
+      return { drained: false };
+    }
+    if (!Number.isInteger(daemon.pid) || !await this.proxyHealth(config, 2_000, daemon.pid, true)) {
+      throw new Error("launcher-owned runtime did not provide matching health evidence before exit");
+    }
+    await this.acquireDrain(config);
+    return { drained: true, config };
+  }
+
+  async resumeAfterVoluntaryExitDrain(drain) {
+    if (!drain?.drained || !drain.config) return;
+    const resumed = await this.control(drain.config, "resume");
+    if (resumed.status !== "ok" || resumed.accepting_turns !== true) {
+      throw new Error("launcher-owned runtime did not resume after a cancelled exit");
+    }
+  }
+
   async cancelActiveTurns() {
     const config = this.readConfig();
     const daemon = this.daemon;

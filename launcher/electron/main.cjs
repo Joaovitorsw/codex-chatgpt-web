@@ -1258,16 +1258,20 @@ async function requestQuit() {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
   shutdownInProgress = true;
+  let exitDrain;
   try {
     const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
-    // Codex routes every model request through the local bridge while the launcher is
-    // active. Restore the user's previous route before stopping that bridge so an
-    // intentional launcher exit cannot strand existing Codex tasks in reconnect loops.
+    // Atomically stop accepting new turns and prove idleness before changing the Codex route.
+    // An ordinary close is already a hide/minimize; this protects an explicit Quit as well.
+    // Most importantly, we never cancel an in-flight turn merely because the launcher UI exits.
+    exitDrain = await runtimeSupervisor?.drainForVoluntaryExit();
+    // Codex routes every model request through the local bridge while the launcher is active.
+    // The drain above proves there is no active connection before route restoration.
     await runtimeHost?.restoreBridgeRoute("launcher-quit");
-    await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    await runtimeSupervisor?.shutdown({ cancelActiveTurns: false, force: false });
     if (pendingPreferenceTimer) clearInterval(pendingPreferenceTimer);
     pendingPreferenceTimer = null;
     stopCatalogVerificationMonitor();
@@ -1280,7 +1284,25 @@ async function requestQuit() {
     return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    try {
+      await runtimeSupervisor?.resumeAfterVoluntaryExitDrain(exitDrain);
+    } catch (resumeError) {
+      publishOperation({
+        name: "launcher-quit",
+        status: "failed",
+        message: `${message}; o runtime também não retomou o aceite de novas tarefas: ${resumeError instanceof Error ? resumeError.message : String(resumeError)}`,
+      });
+      return { ok: false, message };
+    }
     quitting = false;
+    // A non-idle runtime is healthy work in progress, not an error to be recovered by killing
+    // the bridge. Keep it running in the background so native and Web Codex turns stay alive.
+    if (/active HTTP turn\(s\)|active browser turn\(s\)/i.test(message)) {
+      mainWindow?.hide();
+      const waitingMessage = "Há tarefas do Codex em andamento. O Codex Web GPT continuará em segundo plano até elas terminarem; nenhum chat foi interrompido.";
+      publishOperation({ name: "launcher-quit", status: "waiting", message: waitingMessage });
+      return { ok: false, message: waitingMessage };
+    }
     showMainWindow();
     publishOperation({ name: "launcher-quit", status: "failed", message });
     return { ok: false, message };

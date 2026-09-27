@@ -89,7 +89,7 @@ test("a foreground launch request survives hidden startup until the launcher win
 test("normal shutdown persists the ChatGPT session before closing browser views", () => {
   assert.match(
     electronMain,
-    /runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/,
+    /runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: false, force: false \}\)/,
   );
   const persist = electronMain.indexOf("await browserHost?.persistSession()");
   const destroy = electronMain.indexOf("browserHost?.destroy()", persist);
@@ -257,7 +257,7 @@ test("startup feedback appears before runtime verification while browser surface
 test("DEV launcher exposes its profile and supervises only its Full-mode MCP runtime", () => {
   assert.match(electronMain, /profile:\s*LAUNCHER_PROFILE\.kind/);
   assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void \(async \(\) => \{/);
-  assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
+  assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: false, force: false \}\)/);
   assert.match(electronMain, /packaged:\s*app\.isPackaged && !IS_DEV_PROFILE/);
   assert.match(electronMain, /IS_DEV_PROFILE && !stateStore\.read\(\)\.onboardingComplete/);
   assert.match(electronMain, /onboardingComplete:\s*true,[\s\S]*?autoStart:\s*false/);
@@ -269,16 +269,20 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.doesNotMatch(electronMain, /IS_DEV_PROFILE && key === "experimentalBiggerContext"/);
 });
 
-test("a real launcher quit restores the native Codex route before stopping the bridge", () => {
+test("a real launcher quit drains active work before restoring the native Codex route", () => {
   const requestQuit = electronMain.slice(
     electronMain.indexOf("async function requestQuit()"),
     electronMain.indexOf("async function start()"),
   );
   const restore = requestQuit.indexOf('await runtimeHost?.restoreBridgeRoute("launcher-quit")');
   const shutdown = requestQuit.indexOf("await runtimeSupervisor?.shutdown");
+  const drain = requestQuit.indexOf("await runtimeSupervisor?.drainForVoluntaryExit()");
 
+  assert.ok(drain >= 0, "quit must atomically stop new turns before touching the Codex route");
   assert.ok(restore >= 0, "quit must restore the previous Codex route");
+  assert.ok(restore > drain, "route restoration must happen only after the idle drain");
   assert.ok(shutdown > restore, "the local bridge must remain alive until route restoration completes");
+  assert.doesNotMatch(requestQuit, /shutdown\(\{ cancelActiveTurns: true/);
 });
 
 test("macOS passkey sign-in is additive to the unchanged embedded login action", () => {

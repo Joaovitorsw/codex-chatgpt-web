@@ -223,12 +223,12 @@ function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterErr
   });
 }
 
-const CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE = "ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.";
+const CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE = "Não foi possível confirmar os controles de modelo do ChatGPT após uma recuperação automática. A mensagem não foi enviada; mantenha esta conversa aberta, recarregue o ChatGPT e tente novamente.";
 
 function chatGptModelControlUnavailableError(diagnostic: string): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE, {
-    status: 400,
-    errorType: "invalid_request_error",
+    status: 502,
+    errorType: "server_error",
     code: "chatgpt_model_control_unavailable",
     retryable: false,
     cause: new Error(diagnostic),
@@ -239,8 +239,8 @@ function chatGptModelControlUnavailableAdapterError(diagnostic: string, detail?:
   return new ChatGptWebAdapterError(
     detail ? `${CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE} ChatGPT: ${detail}` : CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE,
     {
-      status: 400,
-      errorType: "invalid_request_error",
+      status: 502,
+      errorType: "server_error",
       code: "chatgpt_model_control_unavailable",
       retryable: false,
       cause: new Error(diagnostic),
@@ -2794,6 +2794,11 @@ export class ChatGptBrowserWorker {
     const pickerSnapshot = await readChatGptEffortSnapshot(activation.sliderContainer, 1_000)
       .catch(() => undefined);
     if (!pickerSnapshot) {
+      // A compact picker can be painted while the authenticated session has already expired.
+      // Check the terminal session boundary before interpreting its incomplete DOM as a valid
+      // two-row model picker, so the user gets a sign-in diagnosis rather than a false selector
+      // failure (and the outer recovery can make the correct decision).
+      await throwIfChatGptSessionFailureAlert(page);
       // ChatGPT's current compact picker replaced the five-position effort slider
       // with two radio rows. Low maps to Instant; Medium and High map to Thinking
       // only when no distinct effort slider exists.
@@ -3024,7 +3029,11 @@ export class ChatGptBrowserWorker {
     // ChatGPT may remount the trigger after a selection and reduce its label to a
     // generic "Thinking"/localized equivalent.  The label is presentation, not
     // selection evidence; the reopened picker below is the semantic verification.
-    const control = controls.last();
+    // The production Locator always has .last(); the narrow browser-contract fixtures model
+    // a single proven control with .first() only. Both resolve the same semantic element here.
+    const control = typeof (controls as unknown as { last?: () => Locator }).last === "function"
+      ? controls.last()
+      : controls.first();
     if (await control.getAttribute("aria-expanded") !== "false"
       || !await composer.isEditable()) {
       throw chatGptModelControlUnavailableAdapterError(
@@ -3623,7 +3632,8 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     const commonPrefix = this.promptEquivalentPrefixLength(prompt, observed);
     throw new ChatGptPromptAttachmentIntegrityError(
-      `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
+      "O ChatGPT alterou ou duplicou o texto antes do envio; a recuperação automática vai limpar o campo e tentar uma única vez.",
+      new Error(`Prompt integrity mismatch (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`),
     );
   }
 
@@ -4341,7 +4351,7 @@ export class ChatGptBrowserWorker {
     const before = await this.currentSubmissionEvidence(page, baseline, abortSignal);
     if (before) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT changed while the compaction prompt was being prepared. Check the ChatGPT tab before retrying.",
+        "O ChatGPT mudou esta conversa enquanto o prompt era preparado. Para evitar um envio duplicado, a tarefa não foi reenviada automaticamente.",
         new Error(`Submission evidence appeared after prompt attachment failed: ${before}`),
       );
     }
@@ -4355,14 +4365,15 @@ export class ChatGptBrowserWorker {
     const after = await this.currentSubmissionEvidence(page, baseline, abortSignal);
     if (after) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT changed while the compaction prompt was being reset. Check the ChatGPT tab before retrying.",
+        "O ChatGPT mudou esta conversa durante a limpeza do prompt. Para evitar um envio duplicado, a tarefa não foi reenviada automaticamente.",
         new Error(`Submission evidence appeared while resetting the prompt: ${after}`),
       );
     }
     const observed = await this.attachedPromptText(page, abortSignal);
     if (observed.length > 0) {
       throw new ChatGptPromptAttachmentIntegrityError(
-        `ChatGPT composer could not reset cleanly for compaction retry (actualChars=${observed.length})`,
+        "O campo de mensagem do ChatGPT não pôde ser limpo com segurança. Nenhuma mensagem foi enviada; abra a conversa integrada e tente novamente.",
+        new Error(`Composer reset retained ${observed.length} characters`),
       );
     }
   }
@@ -4380,7 +4391,9 @@ export class ChatGptBrowserWorker {
     reuseConnector = false,
     requireThink = false,
   ): Promise<void> {
-    let retryAvailable = compaction;
+    // Before Send there is no side effect to duplicate. A transient Lexical reconciliation can
+    // append the prompt to itself, so every ordinary turn gets the same single clean retry.
+    let retryAvailable = true;
     for (;;) {
       try {
         await this.attachPrompt(
@@ -4401,7 +4414,7 @@ export class ChatGptBrowserWorker {
         const evidence = await this.currentSubmissionEvidence(page, baseline, abortSignal);
         if (evidence) {
           throw new ChatGptPromptAttachmentIntegrityError(
-            "ChatGPT changed while the compaction prompt was being prepared. Check the ChatGPT tab before retrying.",
+            "O ChatGPT mudou esta conversa durante a recuperação automática. Para evitar um envio duplicado, a tarefa não foi reenviada.",
             new Error(`Prompt attachment failed before submission evidence appeared: ${evidence}`, { cause: error }),
           );
         }
@@ -4820,11 +4833,28 @@ export class ChatGptBrowserWorker {
         // These are embedded renderers, not Markdown answer text. Their loading labels, controls
         // and plot axes change independently of generation (including after a later paragraph).
         // Keep their UI out of both the emitted HTML and the text consistency fingerprint.
-        // Also remove the media already excluded by chatGptHtmlToMarkdown, so their
-        // accessibility labels cannot become consistency fingerprints for untransmitted text.
+        // Preserve only first-party ChatGPT generated images. They are an actual result, not
+        // presentation chrome, and must reach the final Codex response rather than appearing
+        // only in the activity/thinking stream. Other media remains excluded so decorative UI
+        // cannot become a response or destabilize its text fingerprint.
         // Ordinary code blocks, surrounding prose and the original observed DOM remain intact.
+        const trustedGeneratedImage = (image: HTMLImageElement): boolean => {
+          try {
+            const url = new URL(image.getAttribute("src") ?? "", location.href);
+            if (url.protocol !== "https:") return false;
+            const host = url.hostname.toLowerCase();
+            return host === "chatgpt.com" || host.endsWith(".chatgpt.com")
+              || host === "openai.com" || host.endsWith(".openai.com")
+              || host === "oaiusercontent.com" || host.endsWith(".oaiusercontent.com");
+          } catch {
+            return false;
+          }
+        };
+        for (const image of Array.from(content.querySelectorAll<HTMLImageElement>("img"))) {
+          if (!trustedGeneratedImage(image)) image.remove();
+        }
         for (const widget of Array.from(content.querySelectorAll(
-          ".chart-widget-container, [data-code-block-preview-pane], script, style, svg, img, picture, source",
+          ".chart-widget-container, [data-code-block-preview-pane], script, style, svg, picture, source",
         ))) widget.remove();
         for (const button of Array.from(content.querySelectorAll("button"))) {
           if (button.matches('[data-testid="chatgpt-library-file-citation"]')
@@ -5689,17 +5719,40 @@ export class ChatGptBrowserWorker {
       }
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
-      const selectStagingMode = () => (
-        this.selectModelAndEffort(
-          page,
-          turn.modelId,
-          stagingMode.effort,
-          browserCapabilities,
-          checkpoint => diagnostics.capture(page, checkpoint),
-          trackUsage,
-          turn.modelFamily,
-        )
-      );
+      let modelControlRecoveryAvailable = true;
+      const selectStagingMode = async () => {
+        try {
+          return await this.selectModelAndEffort(
+            page,
+            turn.modelId,
+            stagingMode.effort,
+            browserCapabilities,
+            checkpoint => diagnostics.capture(page, checkpoint),
+            trackUsage,
+            turn.modelFamily,
+          );
+        } catch (error) {
+          // ChatGPT can temporarily omit the picker while a retained tab hydrates. No Send has
+          // happened at this point, so one same-page reload is safe and keeps the conversation.
+          if (!modelControlRecoveryAvailable
+            || !(error instanceof ChatGptWebAdapterError)
+            || error.code !== "chatgpt_model_control_unavailable") throw error;
+          modelControlRecoveryAvailable = false;
+          await diagnostics.capture(page, "model-control-recovery-started");
+          await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+          await waitForOperationalChatGptViewport(page, turn.abortSignal);
+          await diagnostics.capture(page, "model-control-recovery-reloaded");
+          return this.selectModelAndEffort(
+            page,
+            turn.modelId,
+            stagingMode.effort,
+            browserCapabilities,
+            checkpoint => diagnostics.capture(page, checkpoint),
+            trackUsage,
+            turn.modelFamily,
+          );
+        }
+      };
       let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, selectStagingMode);
       await diagnostics.capture(page, "effort-selection-complete");
 

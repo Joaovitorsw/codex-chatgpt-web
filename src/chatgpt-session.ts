@@ -151,6 +151,23 @@ async function visibleEffortSurface(
   const state = await control.getAttribute("data-state").catch(() => null);
   if (expanded === "false" || state === "closed") return undefined;
   const menu = await chatGptEffortMenuForControl(page, control);
+  // Prefer the slider structurally owned by the menu referenced from
+  // aria-controls.  A ChatGPT tab can keep another picker mounted while it
+  // animates out; a page-wide last() lookup can otherwise bind the new model
+  // trigger to that stale slider.
+  const ownedSlider = (() => {
+    try { return menu.locator("[role=slider]").last(); }
+    catch { return undefined; }
+  })();
+  let ownedSliderCount = 0;
+  if (ownedSlider && typeof (ownedSlider as unknown as { count?: unknown }).count === "function") {
+    ownedSliderCount = await ownedSlider.count().catch(() => 0);
+  }
+  if (await menu.isVisible().catch(() => false)
+    && ownedSlider
+    && ownedSliderCount === 1) {
+    return { menu, sliderContainer: menu, slider: ownedSlider };
+  }
   const surface = chatGptEffortSlider(page);
   if (await menu.isVisible().catch(() => false) || await surface.sliderContainer.isVisible().catch(() => false)) {
     return { menu, ...surface };

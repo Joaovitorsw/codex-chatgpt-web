@@ -1,4 +1,4 @@
-import type { Page } from "playwright-core";
+import type { Locator, Page } from "playwright-core";
 import { activateChatGptEffortMenu, parseChatGptEffortSliderState } from "../../chatgpt-session";
 import type { ChatGptWebAdapterEffort, ChatGptWebModelFamily } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
@@ -7,7 +7,7 @@ type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
 
 function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
-    `ChatGPT model ${family} could not be selected and verified. The pending message was not sent. Check the model in the browser; if ChatGPT uses an unsupported language, select English in Settings → General → Language and reload it.`,
+    `ChatGPT model ${family} could not be selected and verified from the current browser structure. The pending message was not sent; reload ChatGPT and retry the task.`,
     { status: 400, errorType: "invalid_request_error", code: "model_version_unavailable", retryable: false, cause },
   );
 }
@@ -22,6 +22,24 @@ function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
   });
 }
 
+/**
+ * The model picker keeps an outgoing advanced panel in the DOM during its
+ * animation.  Prefer its one visible radio when that happens; its hidden
+ * duplicate is not evidence of an ambiguous model choice.
+ */
+async function currentFamilyOption(
+  menu: EffortMenu,
+  family: ChatGptWebModelFamily,
+): Promise<Locator> {
+  const option = familyOption(menu, family);
+  if (await option.count() <= 1) return option;
+  const maybeFilter = option as unknown as { filter?: (options: { visible: boolean }) => Locator };
+  if (typeof maybeFilter.filter !== "function") return option;
+  const visible = maybeFilter.filter({ visible: true });
+  if (await visible.count() === 1) return visible;
+  return option;
+}
+
 /** Model and effort are separate browser controls; a generic Pro label proves neither family. */
 export async function selectChatGptModelFamily(
   page: Page,
@@ -30,7 +48,7 @@ export async function selectChatGptModelFamily(
   reopen: () => Promise<EffortMenu>,
 ): Promise<EffortMenu> {
   try {
-    const option = familyOption(menu, family);
+    const option = await currentFamilyOption(menu, family);
     if (await option.count() > 1) throw familyError(family);
     if (await option.count() === 1 && await option.getAttribute("aria-checked") === "true") return menu;
     // The attached radio rows are inert while this composer-owned advanced view is collapsed.
@@ -53,7 +71,7 @@ export async function selectChatGptModelFamily(
     const selected = await reopen();
     const deadline = Date.now() + 1_000;
     do {
-      const current = familyOption(selected, family);
+      const current = await currentFamilyOption(selected, family);
       if (await current.count() > 1) throw familyError(family);
       if (await current.count() === 1 && await current.getAttribute("aria-checked") === "true") return selected;
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -92,7 +110,7 @@ export async function assertChatGptModelFamily(
 ): Promise<void> {
   const deadline = Date.now() + settleMs;
   do {
-    const option = familyOption(menu, family);
+    const option = await currentFamilyOption(menu, family);
     const checked = await option.count() === 1 && await option.getAttribute("aria-checked") === "true";
     const state = parseChatGptEffortSliderState(
       await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),

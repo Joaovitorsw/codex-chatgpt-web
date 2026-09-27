@@ -20,6 +20,27 @@ test("model selection recognizes Latest in the launcher languages without accept
   }
 });
 
+test("model selection ignores an outgoing hidden duplicate while the picker animates", async () => {
+  const visible = {
+    count: async () => 1,
+    getAttribute: async () => "true",
+  };
+  const duplicate = {
+    count: async () => 2,
+    filter: (options: { visible: boolean }) => {
+      expect(options).toEqual({ visible: true });
+      return visible;
+    },
+    getAttribute: async () => "false",
+  };
+  const menu = { menu: {
+    getByRole: () => duplicate,
+  } } as unknown as Parameters<typeof selectChatGptModelFamily>[1];
+  await expect(selectChatGptModelFamily(
+    {} as Parameters<typeof selectChatGptModelFamily>[0], menu, "5.6", async () => menu,
+  )).resolves.toBe(menu);
+});
+
 test("family confirmation separates Latest staging from the actual Pro response", () => {
   expect(chatGptModelFamilyMatches(["5.6 High, 3 of 5."], "5.6", "high")).toBe(true);
   expect(chatGptModelFamilyMatches(["5.6 Extra High, 4 of 5."], "6", "xhigh")).toBe(true);

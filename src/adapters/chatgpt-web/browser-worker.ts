@@ -2786,15 +2786,14 @@ export class ChatGptBrowserWorker {
     // The same compact trigger can expose either a full effort slider or the newer
     // two-row Instant/Thinking surface. Inspect the opened surface instead of
     // inferring its capabilities from the trigger's accessible label.
-    const compactPicker = await currentEffort.getAttribute("aria-label") === "Select ChatGPT model";
     let activation = await activateChatGptEffortMenu(page, currentEffort);
-    const compactHasSlider = compactPicker
-      && await activation.sliderContainer.isVisible().catch(() => false)
-      // The semantic slider is an attached zero-size node; the visible ticks live
-      // in its container. Requiring the ARIA node itself to be visible incorrectly
-      // downgrades a full five-step picker to the two-row compact fallback.
-      && await activation.slider.count().catch(() => 0) === 1;
-    if (compactPicker && !compactHasSlider) {
+    // Do not infer the picker implementation from its translated trigger label.
+    // The current compact trigger can contain both model-family rows and a hidden
+    // semantic slider.  Prove the slider and its selectable ticks atomically;
+    // otherwise a stale surface could turn "Instant" into a click on "Latest".
+    const pickerSnapshot = await readChatGptEffortSnapshot(activation.sliderContainer, 1_000)
+      .catch(() => undefined);
+    if (!pickerSnapshot) {
       // ChatGPT's current compact picker replaced the five-position effort slider
       // with two radio rows. Low maps to Instant; Medium and High map to Thinking
       // only when no distinct effort slider exists.
@@ -2822,7 +2821,16 @@ export class ChatGptBrowserWorker {
         const item = items.nth(index);
         if (await item.getAttribute("aria-disabled") !== "true") enabledItems.push(item);
       }
-      const target = mode.effort === "low" ? enabledItems[0] : enabledItems.at(-1);
+      // The two-row fallback is valid only for a real Instant/Thinking surface.
+      // Any extra row is a model-family picker and must never be selected by
+      // ordinal: wait for its structural slider instead of silently choosing it.
+      if (enabledItems.length !== 2 || modelFamily) {
+        await page.keyboard.press("Escape").catch(() => {});
+        throw chatGptModelControlUnavailableAdapterError(
+          "ChatGPT exposed model-family rows without a verifiable effort slider; the message was not sent",
+        );
+      }
+      const target = mode.effort === "low" ? enabledItems[0] : enabledItems[1];
       if (!target) {
         await page.keyboard.press("Escape").catch(() => {});
         throw chatGptModelControlUnavailableAdapterError(

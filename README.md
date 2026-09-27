@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/readme/hero.svg" width="960" alt="Switch to web models. Stay in Codex. Your ChatGPT plan. Your workflow. Maximum capabilities.">
+  <img src="assets/readme/hero.svg" width="960" alt="Use modelos Web sem sair do Codex: seu plano do ChatGPT, seu fluxo de trabalho e todos os recursos disponíveis.">
 </p>
 
 <p align="center">
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.2/codex-web-gpt-6.1.2-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">All releases</a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.2/codex-web-gpt-6.1.2-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">Todas as versões</a>
 </p>
 
 <p align="center">
@@ -17,16 +17,29 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" width="960" alt="A live ChatGPT Web turn using the native Codex harness">
+  <img src="assets/demo.gif" width="960" alt="Um turno real do ChatGPT Web usando o harness nativo do Codex">
 </p>
 
 <p align="center">
   <a href="#get-started">Primeiros passos</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases">Novidades</a> · <a href="docs/architecture.md">Arquitetura</a> · <a href="TROUBLESHOOTING.md">Solução de problemas</a>
 </p>
 
+> **Fork mantido por [Joaovitorsw](https://github.com/Joaovitorsw/codex-chatgpt-web).** Ele parte do projeto de [miuuyy/codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) e preserva a compatibilidade com o upstream quando ela é segura.
+
+### O que este fork acrescenta
+
+- Descoberta estrutural do seletor do ChatGPT: vincula o menu aberto ao controle que o possui, confere o slider e as opções reais antes de enviar a tarefa e falha com segurança se a interface mudar.
+- Rotas Web de Instant, Medium, High, Extra High e Pro separadas, com validação do modelo e da força efetivamente selecionados.
+- Continuação mais resiliente: uma conversa salva permanece no mesmo chat do ChatGPT; ramificações do Codex iniciam uma sessão nova; compactação de contexto troca para uma conversa nova com um resumo operacional recente.
+- Retorno visual mais fiel no Codex, incluindo progresso parcial, ações/ferramentas e conclusão final, além de recuperação de reconexões e respostas incompletas.
+- Instalação e reparo que mantêm a configuração oficial do Codex isolada, com reversão segura da ponte Web, skills opcionais e diagnóstico local.
+- Interface, mensagens operacionais e esta documentação em português do Brasil, sem depender de rótulos fixos em inglês ou em português para reconhecer a página.
+
 Use no seletor nativo do Codex os modelos Web disponíveis na sua conta do ChatGPT, inclusive Pro, com os limites separados do ChatGPT Web e sem consumir a cota do Work ou do Codex. A interface, as tarefas, as imagens e o streaming continuam no Codex.
 
 O modo Full harness conecta o ChatGPT aos arquivos, terminal, ferramentas e aprovações da tarefa atual por MCP. As conversas permanecem vinculadas à tarefa do Codex conforme o contexto cresce.
+
+Quando a janela de contexto se aproxima do limite, o transporte inicia a compactação nativa antes do erro: encerra a conversa Web retida, envia somente o resumo operacional validado e o contexto mais recente para um chat novo e então continua a mesma tarefa do Codex. Ele não tenta copiar toda a conversa antiga para o novo chat.
 
 <div id="get-started"><a id="quick-start"></a></div>
 
@@ -193,6 +206,6 @@ bun run app:package
 
 ---
 
-[Solução de problemas](TROUBLESHOOTING.md) · [Segurança](SECURITY.md) · [Como contribuir](CONTRIBUTING.md) · [Licença MIT](LICENSE) · [CI](https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml)
+[Solução de problemas](TROUBLESHOOTING.md) · [Segurança](SECURITY.md) · [Como contribuir](CONTRIBUTING.md) · [Licença MIT](LICENSE) · [Integração contínua](https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml)
 
 Também do autor original: <img src="assets/readme/persona-voice.svg" width="20" height="20" alt=""> [ChatGPT Persona Voice](https://github.com/miuuyy/ChatGPT-Persona-Voice) — vozes personalizadas locais, quase em tempo real, para ChatGPT e Codex.

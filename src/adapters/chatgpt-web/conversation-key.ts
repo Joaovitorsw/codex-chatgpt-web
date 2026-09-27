@@ -36,6 +36,11 @@ export function chatGptConversationKey(
   return createHash("sha256").update(JSON.stringify({
     namespace,
     threadId: identity.threadId,
+    // A native branch is intentionally a separate ChatGPT conversation even
+    // when it inherits the parent's repository context. Keeping the lineage
+    // in the durable key makes that boundary explicit and prevents an older
+    // retained tab from being adopted if a client ever reuses a thread id.
+    branchParentThreadId: identity.parentThreadId ?? null,
     // A saved ChatGPT conversation belongs to the native Codex task, not to the model picker
     // state of one turn. The browser worker re-proves model family and effort immediately before
     // every Send, including retained continuations, so changing Medium/High/Pro must not allocate

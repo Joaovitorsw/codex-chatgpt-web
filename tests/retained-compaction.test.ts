@@ -133,6 +133,26 @@ test("one browser conversation spans native turns and rotates only at compaction
     }),
   };
   expect(chatGptConversationKey(otherThread, "provider")).not.toBe(chatGptConversationKey(before, "provider"));
+  const branch = structuredClone(before);
+  (branch._rawBody as { client_metadata: Record<string, unknown> }).client_metadata = {
+    "x-codex-turn-metadata": JSON.stringify({
+      thread_id: "thread_branch",
+      parent_thread_id: "thread_retained_compaction",
+      turn_id: "turn_branch_first",
+    }),
+  };
+  const branchFollowUp = structuredClone(branch);
+  (branchFollowUp._rawBody as { client_metadata: Record<string, unknown> }).client_metadata = {
+    "x-codex-turn-metadata": JSON.stringify({
+      thread_id: "thread_branch",
+      parent_thread_id: "thread_retained_compaction",
+      turn_id: "turn_branch_next",
+    }),
+  };
+  // A branch begins in a new browser conversation, while its own follow-ups
+  // retain that new conversation instead of allocating a tab per turn.
+  expect(chatGptConversationKey(branch, "provider")).not.toBe(chatGptConversationKey(before, "provider"));
+  expect(chatGptConversationKey(branchFollowUp, "provider")).toBe(chatGptConversationKey(branch, "provider"));
   expect(retainedConversationResumeRequest(before)?.context.messages).toEqual([
     { role: "user", content: "Continue with the next step", timestamp: 3 },
   ]);

@@ -2772,7 +2772,11 @@ describe("ChatGPT outer-native harness v4", () => {
         justification: "May the local fixture command run outside the sandbox?",
         prefix_rule: ["pwd"],
       })))).toBe(true);
-      expect(execRequests.some(request => request.input?.includes(JSON.stringify({ cmd: "git status --short", workdir: tempRoot })))).toBe(true);
+      expect(execRequests.some(request => request.input?.includes(JSON.stringify({
+        cmd: "git status --short",
+        workdir: tempRoot,
+        yield_time_ms: 30_000,
+      })))).toBe(true);
       for (const request of execRequests) {
         expect(request.input).toContain("ALL_TOOLS");
         expect(request.input).toContain('"exec_command"');
@@ -2816,6 +2820,19 @@ describe("ChatGPT outer-native harness v4", () => {
       }
       expect((await firstExec).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
       expect((await secondExec).structuredContent).toEqual({ output: "clean", exit_code: 0 });
+
+      const boundedGenericExec = call("codex_tool_call", {
+        turn_token: token,
+        wire_name: "exec_command",
+        arguments: { cmd: "git status --short", yield_time_ms: 300_000 },
+      });
+      const [boundedRequest] = await broker.nextToolBatch(token);
+      expect(boundedRequest).toMatchObject({
+        wireName: "exec_command",
+        arguments: { cmd: "git status --short", yield_time_ms: 30_000 },
+      });
+      broker.completeTool(token, boundedRequest!.callId, toolResult({ output: "bounded", exit_code: 0 }));
+      expect((await boundedGenericExec).structuredContent).toEqual({ output: "bounded", exit_code: 0 });
 
       const inventoryThroughGateway = async (
         query: string,

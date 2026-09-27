@@ -41,6 +41,10 @@ const turnTokenSchema = z.string().min(20).max(256);
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 30_000;
+// A browser turn has a hard upstream response deadline. Commands that may outlive a normal
+// tool response must yield a session id promptly, so ChatGPT can poll them instead of holding
+// the only MCP invocation open until the entire turn is aborted.
+export const CHATGPT_WEB_EXEC_DEFAULT_YIELD_MS = 30_000;
 const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly ${CHATGPT_WEB_AGENT_WAIT_POLL_MS / 1_000} seconds per call, matching the Codex default, then release the MCP channel so spawned Web agents can use their own tools. A wait timeout is not task completion; check agent progress and wait again if needed. Keep the native tool's declared arguments.`;
 // The OpenAI tunnel currently owns a two-minute command-response deadline. Keep a small margin
 // for its response framing, but do not retire an otherwise healthy Codex tool call at 90 seconds:
@@ -266,6 +270,29 @@ function assertGatewayToolArguments(name: string, args: Record<string, unknown>)
       + " so the shared MCP channel remains available to spawned Web agents",
     );
   }
+}
+
+/**
+ * The generic tool gateway bypasses codex_exec, so it must receive the same bounded command
+ * behavior. Otherwise an agent can omit yield_time_ms and hold the browser's MCP request until
+ * the upstream transport deadline expires.
+ */
+function transportSafeToolArguments(name: string, args: Record<string, unknown>): Record<string, unknown> {
+  if (name === "exec_command") {
+    const requested = args.yield_time_ms;
+    const yieldTimeMs = typeof requested === "number"
+      ? Math.min(requested, CHATGPT_WEB_EXEC_DEFAULT_YIELD_MS)
+      : CHATGPT_WEB_EXEC_DEFAULT_YIELD_MS;
+    return { ...args, yield_time_ms: yieldTimeMs };
+  }
+  if (name === "shell_command") {
+    const requested = args.timeout_ms;
+    const timeoutMs = typeof requested === "number"
+      ? Math.min(requested, CHATGPT_WEB_EXEC_DEFAULT_YIELD_MS)
+      : CHATGPT_WEB_EXEC_DEFAULT_YIELD_MS;
+    return { ...args, timeout_ms: timeoutMs };
+  }
+  return args;
 }
 
 export function chatGptMcpInvocationTimeout(
@@ -700,6 +727,7 @@ export async function runChatGptMcpServer(options: {
       extra,
       async claimed => {
         const { cmd, workdir, yield_time_ms, max_output_tokens, tty, sandbox_permissions, justification, prefix_rule } = input;
+        const boundedYieldMs = yield_time_ms ?? CHATGPT_WEB_EXEC_DEFAULT_YIELD_MS;
         const bound = claimed.environment;
         const permissions = {
           ...(sandbox_permissions !== undefined ? { sandbox_permissions } : {}),
@@ -709,7 +737,7 @@ export async function runChatGptMcpServer(options: {
         const execCommandArguments = {
           cmd,
           ...(workdir ? { workdir } : {}),
-          ...(yield_time_ms !== undefined ? { yield_time_ms } : {}),
+          yield_time_ms: boundedYieldMs,
           ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
           ...(tty !== undefined ? { tty } : {}),
           ...permissions,
@@ -717,7 +745,7 @@ export async function runChatGptMcpServer(options: {
         const shellCommandArguments = {
           command: cmd,
           ...(workdir ? { workdir } : {}),
-          ...(yield_time_ms !== undefined ? { timeout_ms: yield_time_ms } : {}),
+          timeout_ms: boundedYieldMs,
           ...permissions,
         };
         const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
@@ -1024,7 +1052,7 @@ export async function runChatGptMcpServer(options: {
           if (isGatewayAgentWaitTool(wire_name) && input !== undefined) {
             throw new Error(`ChatGPT Web wait_agent requires structured arguments and timeout_ms=${CHATGPT_WEB_AGENT_WAIT_POLL_MS}`);
           }
-          const invocationArguments = args ?? {};
+          const invocationArguments = transportSafeToolArguments(wire_name, args ?? {});
           assertGatewayToolArguments(wire_name, invocationArguments);
           return invoke(claimed.bindingId, bound, gateway, {
             input: execGatewayProgram(wire_name, input !== undefined, {
@@ -1040,7 +1068,7 @@ export async function runChatGptMcpServer(options: {
           }, extra.signal);
         }
         if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
-        const invocationArguments = args ?? {};
+        const invocationArguments = transportSafeToolArguments(wire_name, args ?? {});
         assertBrowserToolArguments(tool, invocationArguments);
         return invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
       });

@@ -2828,9 +2828,10 @@ describe("ChatGPT outer-native harness v4", () => {
       });
       const [boundedRequest] = await broker.nextToolBatch(token);
       expect(boundedRequest).toMatchObject({
-        wireName: "exec_command",
-        arguments: { cmd: "git status --short", yield_time_ms: 30_000 },
+        wireName: "exec",
+        freeform: true,
       });
+      expect(boundedRequest!.input).toContain('"yield_time_ms":30000');
       broker.completeTool(token, boundedRequest!.callId, toolResult({ output: "bounded", exit_code: 0 }));
       expect((await boundedGenericExec).structuredContent).toEqual({ output: "bounded", exit_code: 0 });
 
@@ -3126,7 +3127,7 @@ describe("ChatGPT outer-native harness v4", () => {
         for (const request of batch) broker.completeTool(token, request.callId, toolResult({ output: "fixture", exit_code: 0 }));
         await ordinary;
         expect(batch).toHaveLength(1);
-        expect(batch[0]!.arguments).toEqual({ cmd: "pwd" });
+        expect(batch[0]!.arguments).toEqual({ cmd: "pwd", yield_time_ms: 30_000 });
       } finally { broker.revoke(token); }
     } finally {
       await client.close();
@@ -3350,7 +3351,7 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(execRequest?.input).toContain("ALL_TOOLS");
       expect(execRequest?.input).toContain('"exec_command"');
       expect(execRequest?.input).toContain('"shell_command"');
-      expect(execRequest?.input).toContain(JSON.stringify({ cmd: "pwd", workdir: tempRoot }));
+      expect(execRequest?.input).toContain(JSON.stringify({ cmd: "pwd", workdir: tempRoot, yield_time_ms: 30_000 }));
       broker.completeTool(token, execRequest!.callId, toolResult({ output: tempRoot, exit_code: 0 }));
       expect((await execPromise).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
     } finally {

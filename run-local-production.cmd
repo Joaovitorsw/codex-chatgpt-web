@@ -4,6 +4,13 @@ title Codex Web GPT - Local Production
 cd /d "%~dp0"
 set "CODEX_WEB_GPT_LOCAL_PRODUCTION=1"
 
+rem The desktop Codex process can export a workspace-scoped CODEX_CHATGPT_WEB_HOME.
+rem Do not inherit that transient source-tree profile: the local production launcher
+rem must use the same durable profile as the installed application. Otherwise its
+rem browser, tunnel MCP worker and Responses bridge can attach to different pipes.
+set "CODEX_CHATGPT_WEB_HOME=%USERPROFILE%\.codex-chatgpt-web"
+set "CODEX_HOME=%USERPROFILE%\.codex"
+
 rem Keep an explicitly supplied runtime, otherwise discover the installed Bun.
 if defined CODEX_WEB_GPT_BUN if exist "%CODEX_WEB_GPT_BUN%" goto bun_ready
 set "CODEX_WEB_GPT_BUN="

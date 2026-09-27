@@ -39,10 +39,22 @@ function linkTargets(source) {
   return [...new Set([...markdown, ...html])].sort();
 }
 
+function canonicalReadmeLinks(source) {
+  // This maintained fork intentionally identifies its own repository in the Portuguese
+  // README while translated upstream READMEs continue to identify the original project.
+  // Treat that repository identity as one semantic link; every operational link must
+  // still remain byte-for-byte equivalent across the localized documents.
+  return linkTargets(source)
+    .map(target => target.replace("https://github.com/Joaovitorsw/codex-chatgpt-web", "https://github.com/miuuyy/codex-chatgpt-web"))
+    .filter(target => target !== "https://github.com/miuuyy/codex-chatgpt-web")
+    .filter((target, index, all) => all.indexOf(target) === index)
+    .sort();
+}
+
 test("localized READMEs preserve every command block and link target from English", () => {
   for (const source of [chineseReadme, japaneseReadme, koreanReadme]) {
     assert.deepEqual(commandFences(source), commandFences(englishReadme));
-    assert.deepEqual(linkTargets(source), linkTargets(englishReadme));
+    assert.deepEqual(canonicalReadmeLinks(source), canonicalReadmeLinks(englishReadme));
   }
 });
 

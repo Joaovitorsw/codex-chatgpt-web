@@ -505,7 +505,13 @@ export function requireChatGptWebModelRoute(
   if (capabilities.browserInteractionMode === "manual" && capabilities.experimentalBiggerContext) {
     throw new Error("Zero Risk does not support Bigger Context");
   }
-  const route = routesBySlug.get(modelId);
+  // Newer Codex pickers can keep the generic Sol model selected while their
+  // reasoning slider is moved to Instant.  Instant is a separate ChatGPT
+  // product route (with its own limits), so normalize that unambiguous pair
+  // instead of failing the whole turn before the browser receives it.
+  const route = modelId === "chatgpt-web/gpt-5.6-sol" && reasoning === "low"
+    ? CHATGPT_WEB_MODEL_ROUTES[0]
+    : routesBySlug.get(modelId);
   if (!route) throw new Error(`ChatGPT web model is not enabled: ${modelId}`);
   if (capabilities.browserInteractionMode === "manual") {
     if (route.interactionMode !== "manual") {

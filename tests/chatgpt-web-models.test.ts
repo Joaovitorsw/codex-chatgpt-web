@@ -342,7 +342,12 @@ describe("fixed ChatGPT Web model routes", () => {
       expect(request.options.reasoning).toBe(effort);
       expect(request._chatgptModelFamily).toBe("5.6");
     }
-    for (const effort of ["low", "max", "ultra", "invented"]) {
+    const instantFallback = parsed("chatgpt-web/gpt-5.6-sol", "low");
+    expect(routeChatGptWebRequest(instantFallback, config).slug)
+      .toBe("chatgpt-web/gpt-5.6-sol-instant");
+    expect(instantFallback.options.reasoning).toBe("low");
+    expect(instantFallback._chatgptModelFamily).toBe("5.6");
+    for (const effort of ["max", "ultra", "invented"]) {
       expect(() => routeChatGptWebRequest(parsed("chatgpt-web/gpt-5.6-sol", effort), config)).toThrow("does not support effort");
     }
     expect(() => routeChatGptWebRequest(parsed("chatgpt-web/gpt-5.6-sol", "xhigh"), {

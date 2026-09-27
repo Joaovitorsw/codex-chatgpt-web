@@ -12,6 +12,7 @@ const {
   isLegacyConnectorName,
   requireCurrentRuntimeConnectorName,
   validateConnectorName,
+  validateConnectorNameSuffix,
 } = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
@@ -908,22 +909,62 @@ class RuntimeHost {
     if (!current.configured || current.mode !== "full") {
       throw new Error("The native MCP runtime is not configured");
     }
-    return this.launcherProfile === "development"
+    return this.launcherProfile === "development" && !current.config?.automaticAppName
       ? connectorNameForDevSetup(current.config?.appName)
       : requireCurrentRuntimeConnectorName(current.config?.appName);
   }
 
   browserConnectorName() {
     const current = this.runtimeConfigSnapshot();
-    if (this.launcherProfile === "development") {
+    if (this.launcherProfile === "development" && !current.config?.automaticAppName) {
       return connectorNameForDevSetup(current.config?.appName);
     }
-    if (!current.configured || current.mode !== "full") return CURRENT_CONNECTOR_NAME;
+    if (!current.configured) return CURRENT_CONNECTOR_NAME;
     return connectorNameForSetup(current.config?.appName);
   }
 
-  setupConnectorName() {
-    return this.launcherProfile === "development" ? DEV_CONNECTOR_NAME : CURRENT_CONNECTOR_NAME;
+  setupConnectorName(mode = "automatic") {
+    if (mode !== "automatic" && mode !== "manual") throw new Error("Invalid interaction mode");
+    const current = this.runtimeConfigSnapshot().config;
+    const defaultName = mode === "manual" ? "Codex Zero Risk"
+      : this.launcherProfile === "development" ? DEV_CONNECTOR_NAME : CURRENT_CONNECTOR_NAME;
+    const stored = mode === "manual" ? current?.manualAppName : current?.automaticAppName;
+    if (stored !== undefined) return isLegacyConnectorName(stored) ? defaultName : validateConnectorName(stored);
+    if (mode !== "manual" && current?.browserInteractionMode !== "manual" && current?.appName) {
+      return this.launcherProfile === "development" ? connectorNameForDevSetup(current.appName)
+        : connectorNameForSetup(current.appName);
+    }
+    return defaultName;
+  }
+
+  async setConnectorNameSuffix(value) {
+    const suffix = validateConnectorNameSuffix(value);
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) throw new Error("Set up the launcher before changing the plugin name");
+    const mode = this.browserInteractionMode();
+    const name = `Codex ${suffix}`;
+    if (name === this.setupConnectorName(mode)) return { changed: false };
+    if (name === this.setupConnectorName(mode === "manual" ? "automatic" : "manual")) {
+      throw new Error("Automatic and Zero Risk connector names must differ");
+    }
+    const args = [
+      ...(this.launcherProfile === "development" ? ["dev", "setup"] : ["setup"]),
+      current.mode === "full" ? "--full" : "--browser-only",
+      "--browser-host-descriptor", this.browserDescriptorPath,
+      ...this.browserInteractionArgs(),
+      "--connector-name-suffix", suffix,
+      "--acknowledge-unofficial",
+      ...(this.launcherProfile === "production" ? ["--replace-codex-route", "--restart-service"] : []),
+    ];
+    if (current.config?.autoApproveToolCalls === true) args.push("--auto-approve-tool-calls");
+    const options = {
+      message: "Changing the plugin name",
+      successMessage: "Plugin name changed; complete MCP setup with the new name",
+      timeoutMs: current.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
+    };
+    if (this.launcherProfile === "development") await this.runDevSetup("connector-name", args, options);
+    else await this.runSetup("connector-name", args, options);
+    return { changed: true };
   }
 
   cancelActiveTurns() {

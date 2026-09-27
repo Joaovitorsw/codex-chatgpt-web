@@ -22,8 +22,35 @@ import {
   waitForLauncherManualTerminal,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
+import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 
 const roots: string[] = [];
+
+test("a blocked sign-in replaces an opaque navigation abort with a non-retryable session error", async () => {
+  let needsSignIn: unknown = true;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const activity = await req.json() as { phase: string };
+    return Response.json(activity.phase === "start"
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      : { cancelledByUser: false, authenticationRequired: needsSignIn });
+  } });
+  try {
+    const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", browserHostDescriptorPath: descriptor },
+      runBrowserTurn: async () => { throw new Error("page.goto: net::ERR_ABORTED"); },
+    });
+    const turn = { traceId: "auth-redirect", capabilities: { localToolsEnabled: false } };
+    await expect(worker.runExclusive(turn)).rejects.toMatchObject({
+      status: 401, code: "chatgpt_sign_in_required", retryable: false,
+    });
+    needsSignIn = false;
+    await expect(worker.runExclusive(turn)).rejects.toThrow("page.goto: net::ERR_ABORTED");
+    needsSignIn = "true";
+    await expect(notifyLauncherTurn(descriptor, { phase: "end", traceId: "auth-redirect", helperPid: process.pid, status: "failed" }))
+      .rejects.toThrow("invalid authentication state");
+  } finally { server.stop(true); }
+});
 
 test("startup waits beyond five seconds and distinguishes its deadline from caller cancellation", async () => {
   let calls = 0;

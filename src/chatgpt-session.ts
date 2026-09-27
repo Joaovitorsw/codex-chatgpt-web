@@ -281,7 +281,7 @@ export async function readChatGptEffortAvailability(
   // The current Pro picker proves all five choices through the semantic ARIA range,
   // but no longer repeats data-locked="false" on each unlocked leaf. Missing lock
   // metadata remains invalid for shorter ranges, where the last row may be an upsell.
-  const normalized = expected === CHATGPT_EFFORT_SLIDER_MAX_OPTIONS && availability.trustedOwner
+  const normalized = availability.trustedOwner
     ? availability.locks.map(lock => lock ?? "false")
     : availability.locks;
   if (normalized.length !== expected
@@ -307,6 +307,7 @@ export async function readChatGptEffortSnapshot(
       const menuOwned = ["menu", "group"].includes(container.getAttribute("role") ?? "")
         || container.getAttribute("data-testid") === "composer-intelligence-picker-content";
       return {
+        sliderPresent: Boolean(slider),
         min: slider?.getAttribute("aria-valuemin") ?? null,
         max: slider?.getAttribute("aria-valuemax") ?? null,
         value: slider?.getAttribute("aria-valuenow") ?? null,
@@ -316,9 +317,21 @@ export async function readChatGptEffortSnapshot(
       };
     });
     const state = parseChatGptEffortSliderState(snapshot.min, snapshot.max, snapshot.value);
-    if (!state) throw new Error("ChatGPT effort slider exposed an invalid ARIA range");
+    // React replaces the semantic slider while switching model families and while
+    // committing an effort choice. Treat that brief missing node as hydration, not
+    // as a 30-second locator failure or a permanently invalid account capability.
+    if (!state) {
+      if (snapshot.sliderPresent) {
+        throw new Error("ChatGPT effort slider exposed an invalid ARIA range");
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("ChatGPT effort slider exposed an invalid ARIA range");
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+      continue;
+    }
     const expected = state.max - state.min + 1;
-    const locks = expected === CHATGPT_EFFORT_SLIDER_MAX_OPTIONS && snapshot.trustedOwner
+    const locks = snapshot.trustedOwner
       ? snapshot.locks.map(lock => lock ?? "false")
       : snapshot.locks;
     if (locks.some(lock => lock !== "true" && lock !== "false")) break;
@@ -406,13 +419,13 @@ export async function detectChatGptAccountCapabilities(
   const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
   if (!menuVisible && menuExpanded !== "true") await effortButton.press("Enter");
   try {
-    const { sliderContainer, slider } = chatGptEffortSlider(page);
+    const { sliderContainer } = chatGptEffortSlider(page);
     const timeout = options.selectorTimeoutMs ?? 70_000;
     try {
-      // Hydration can expose model rows before the authoritative effort slider. Wait for the
-      // slider first so a slow pt-BR/Pro surface is not cached as an Instant-only account.
+      // The container is stable; its semantic slider is replaced during hydration.
+      // readChatGptEffortSnapshot performs an atomic, bounded retry inside it.
       await sliderContainer.waitFor({ state: "visible", timeout });
-      await slider.waitFor({ state: "attached", timeout });
+      await readChatGptEffortSnapshot(sliderContainer);
     } catch (error) {
       const label = await effortButton.getAttribute("aria-label").catch(() => null);
       const structuralPicker = await effortButton.getAttribute("data-codex-intelligence-trigger").catch(() => null);
@@ -427,7 +440,13 @@ export async function detectChatGptAccountCapabilities(
       return { solAvailable: true, extraHighAvailable: false, proAvailable: false };
     }
     const { available } = await readChatGptEffortSnapshot(sliderContainer);
-    return { solAvailable: true, extraHighAvailable: available[3] === true, proAvailable: available[4] === true };
+    const proOption = menu.getByRole("menuitemradio", { name: /^Pro$/i, exact: true }).filter({ visible: true });
+    const proDataDisabled = await proOption.count() === 1
+      ? await proOption.getAttribute("data-disabled") : null;
+    const proAvailable = await proOption.count() === 1
+      && await proOption.getAttribute("aria-disabled") !== "true"
+      && (proDataDisabled === null || proDataDisabled === "false");
+    return { solAvailable: true, extraHighAvailable: available[3] === true, proAvailable };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }

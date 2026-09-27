@@ -58,7 +58,7 @@ test("inline Web context emits a distinct agent_message envelope", () => {
     content: "Continue from the agent report.",
   });
   expect(compiled.text).toContain("agent_message messages are inter-agent inputs");
-  expect(compiled.text).toContain("Exclude agent_message inputs");
+  expect(compiled.text).toContain("agent_message inputs, assistant replies");
 });
 
 test("multipart Web context emits the same agent_message envelope", () => {

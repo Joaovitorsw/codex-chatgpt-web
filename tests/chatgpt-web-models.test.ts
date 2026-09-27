@@ -40,6 +40,7 @@ describe("fixed ChatGPT Web model routes", () => {
   test("keeps the published legacy bindings while advertising named families", () => {
     expect(new Set(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug)).size).toBe(CHATGPT_WEB_MODEL_ROUTES.length);
     expect(CHATGPT_WEB_LEGACY_MODEL_ROUTES.map(route => [route.slug, route.codexEffort, route.adapterEffort])).toEqual([
+      ["chatgpt-web/gpt-5.6-pro", "max", "max"],
       ["chatgpt-web/light", "low", "low"],
       ["chatgpt-web/medium", "medium", "medium"],
       ["chatgpt-web/high", "high", "high"],
@@ -47,7 +48,7 @@ describe("fixed ChatGPT Web model routes", () => {
       ["chatgpt-web/pro", "ultra", "max"],
     ]);
     expect(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName)).toEqual([
-      "GPT-5.6 Sol Instant (Web)", "GPT-5.6 Sol (Web)", "GPT-5.6 Pro (Web)", "GPT-6 Pro (Web)",
+      "GPT-5.6 Sol Instant (Web)", "GPT-5.6 Sol (Web)", "GPT-6 Pro (Web)",
     ]);
     expect(CHATGPT_WEB_LUNA_MODEL_ROUTE.displayName).toBe("GPT-5.6 Luna (Web)");
   });

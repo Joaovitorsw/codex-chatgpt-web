@@ -1716,6 +1716,7 @@ test("connector verification preserves the host-refreshed catalog evidence", asy
     connectorMentionRowTitles: prototype.connectorMentionRowTitles,
     clearChatGptComposerState: async () => { await initialComposer.fill(); },
     selectedConnectorControl: () => selectedConnector,
+    verifyModernConnectorPresence: async () => false,
     selectConnector: prototype.selectConnector,
   };
 
@@ -1769,6 +1770,7 @@ for (const captureScreenshots of [false, true]) test(`connector failure persists
       prepareChatSurface: async (_page: unknown, capture: (checkpoint: string) => Promise<void>) => {
         await capture("composer-ready");
       },
+      verifyModernConnectorPresence: async () => false,
       selectConnector: async (_page: unknown, capture: (checkpoint: string) => Promise<void>) => {
         await capture("connector-mention-triggered");
         throw failure;
@@ -1825,6 +1827,7 @@ test("successful connector verification clears the proven selection before relea
         calls.push("prepare");
         await capture("composer-ready");
       },
+      verifyModernConnectorPresence: async () => false,
       selectConnector: async (_page: unknown, capture: (checkpoint: string) => Promise<void>) => {
         calls.push("select");
         await capture("connector-selected");
@@ -2920,7 +2923,7 @@ test("effort readback rejects a changed selection or surface before activating S
     { editable: false }, { count: 2 }]) {
     Object.assign(state, { url: selection.url, label: "Alto", expanded: "false", editable: true, count: 1 }, change);
     await expect(worker.assertSelectedEffort(page, mode)).rejects.toMatchObject({
-      code: "upstream_server_error", retryable: false,
+      code: "chatgpt_model_control_unavailable", retryable: false,
     });
   }
 });
@@ -3059,11 +3062,13 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
   const composerForm = { locator: () => effortControl };
   const composer = { locator: () => composerForm };
   const effortChoice = { waitFor: async () => await neverVisible };
-  const effortChoices = { nth: () => effortChoice, count: async () => 3 };
+  const effortChoices = { nth: () => effortChoice, count: async () => 3, last() { return this; } };
   const effortMenu = {
+    filter() { return this; },
     last() { return this; },
     isVisible: async () => true,
     locator: () => effortChoices,
+    getByRole: () => ({ count: async () => 0 }),
   };
   const effortSlider = {
     filter() { return this; },
@@ -3896,7 +3901,7 @@ test("visible DOM trace keeps a complete action phrase instead of a nested count
   expect(new ChatGptVisibleTraceTracker(0).observe([
     { kind: "status", text: "Searched\n5\nsites" },
   ], false)).toEqual([
-    { kind: "reasoning", text: "Searched 5 sites" },
+    { kind: "reasoning", text: "@ Searched 5 sites" },
   ]);
 });
 
@@ -3913,7 +3918,7 @@ test("visible DOM trace waits out animated Pro fragments and appends genuine gro
     { kind: "status", text: "I’m seeking a concrete stack to automate dump.cs → RVA → Ghidra → rewrite → Unity" },
   ], false, 1_200)).toEqual([{
     kind: "reasoning",
-    text: "I’m seeking a concrete stack to automate dump.cs → RVA → Ghidra → rewrite → Unity",
+    text: "@ I’m seeking a concrete stack to automate dump.cs → RVA → Ghidra → rewrite → Unity",
   }]);
 
   expect(tracker.observe([
@@ -4100,7 +4105,7 @@ test("both response loops defer Stopped thinking to proven MCP progress", () => 
   expect(chatGptStoppedThinkingIsTerminal(true, true, true)).toBeFalse();
   expect(chatGptStoppedThinkingIsTerminal(true, false, true)).toBeFalse();
   expect(chatGptStoppedThinkingIsTerminal(true, false, false)).toBeTrue();
-  expect((worker.match(/domHealthTracker\.clearMissingResponse\(\)/g) ?? []).length).toBe(2);
+  expect((worker.match(/domHealthTracker\.clearMissingResponse\(\)/g) ?? []).length).toBe(3);
 });
 
 test("proven MCP progress vetoes every terminal DOM conclusion, not just a missing response", () => {

@@ -35,21 +35,54 @@ export function legacyChatGptConnectorMigrationMessage(legacyName: string): stri
     + ` do not rename or refresh ${JSON.stringify(legacyName)}.`;
 }
 
+export function validateConnectorNameSuffix(value: unknown): string {
+  if (typeof value !== "string" || value.length > 74
+    || !/^[\p{L}\p{N}][\p{L}\p{N} _-]*$/u.test(value)
+    || value !== value.trim()) {
+    throw new Error("The part after Codex must contain 1–74 letters, numbers, spaces, hyphens or underscores");
+  }
+  if (value === "Native") throw new Error("Codex Native is retired; choose another plugin name");
+  return value;
+}
+
+function validateCurrentConnectorName(value: unknown): string {
+  if (typeof value !== "string" || !value.startsWith("Codex ")) {
+    throw new Error("Plugin names must start with Codex followed by a space");
+  }
+  validateConnectorNameSuffix(value.slice(6));
+  return value;
+}
+
 export interface InteractionConnectorIdentities {
   appName: string;
   automaticAppName: string;
-  manualAppName: typeof ZERO_RISK_CHATGPT_CONNECTOR_NAME;
+  manualAppName: string;
 }
 
 export function resolveInteractionConnectorIdentities(
   interactionMode: BrowserInteractionMode,
   profile: "production" | "development" = "production",
+  existing: Partial<InteractionConnectorIdentities> = {},
+  suffix?: string,
 ): InteractionConnectorIdentities {
-  const automaticAppName = profile === "development" ? DEV_CHATGPT_CONNECTOR_NAME : CHATGPT_CONNECTOR_NAME;
+  const defaultAutomatic = profile === "development" ? DEV_CHATGPT_CONNECTOR_NAME : CHATGPT_CONNECTOR_NAME;
+  let automaticAppName = existing.automaticAppName ?? defaultAutomatic;
+  let manualAppName = existing.manualAppName ?? ZERO_RISK_CHATGPT_CONNECTOR_NAME;
+  if (isLegacyChatGptConnectorName(automaticAppName)) automaticAppName = defaultAutomatic;
+  if (suffix !== undefined) {
+    const name = `Codex ${validateConnectorNameSuffix(suffix)}`;
+    if (interactionMode === "manual") manualAppName = name;
+    else automaticAppName = name;
+  }
+  validateCurrentConnectorName(automaticAppName);
+  validateCurrentConnectorName(manualAppName);
+  if (automaticAppName === manualAppName) {
+    throw new Error("Automatic and Zero Risk connector names must differ");
+  }
   return {
-    appName: interactionMode === "manual" ? ZERO_RISK_CHATGPT_CONNECTOR_NAME : automaticAppName,
+    appName: interactionMode === "manual" ? manualAppName : automaticAppName,
     automaticAppName,
-    manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+    manualAppName,
   };
 }
 
@@ -73,7 +106,7 @@ export interface AppConfig {
   contextWindow: number;
   appName: string;
   automaticAppName: string;
-  manualAppName: typeof ZERO_RISK_CHATGPT_CONNECTOR_NAME;
+  manualAppName: string;
   browserHost: BrowserHostMode;
   browserInteractionMode: BrowserInteractionMode;
   browserHostDescriptorPath?: string;
@@ -366,7 +399,8 @@ export function loadConfigForSetup(): AppConfig {
   const interactionMode = raw.browserInteractionMode ?? "automatic";
   const automaticName = raw.automaticAppName
     ?? (interactionMode === "automatic" ? raw.appName : CHATGPT_CONNECTOR_NAME);
-  if (automaticName === ZERO_RISK_CHATGPT_CONNECTOR_NAME) {
+  if (automaticName === ZERO_RISK_CHATGPT_CONNECTOR_NAME
+    && (raw.manualAppName ?? ZERO_RISK_CHATGPT_CONNECTOR_NAME) === ZERO_RISK_CHATGPT_CONNECTOR_NAME) {
     raw.automaticAppName = CHATGPT_CONNECTOR_NAME;
     if (interactionMode === "automatic") raw.appName = CHATGPT_CONNECTOR_NAME;
   }
@@ -421,9 +455,8 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (typeof automaticAppName !== "string" || !automaticAppName.trim() || automaticAppName.length > 80) {
     throw new Error(`Invalid automaticAppName in ${path}`);
   }
-  if (manualAppName !== ZERO_RISK_CHATGPT_CONNECTOR_NAME) {
-    throw new Error(`manualAppName must be ${JSON.stringify(ZERO_RISK_CHATGPT_CONNECTOR_NAME)} in ${path}`);
-  }
+  if (!isLegacyChatGptConnectorName(automaticAppName)) validateCurrentConnectorName(automaticAppName);
+  validateCurrentConnectorName(manualAppName);
   if (automaticAppName === manualAppName) {
     throw new Error(`Automatic and Zero Risk connector names must differ in ${path}; rerun setup`);
   }

@@ -339,6 +339,19 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
  */
 export const CHATGPT_WEB_LEGACY_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] = [
   {
+    slug: "chatgpt-web/gpt-5.6-pro",
+    displayName: "GPT-5.6 Pro (legacy Web route)",
+    description: "Compatibility route for tasks saved before ChatGPT moved Pro to the GPT-6 Latest family.",
+    interactionMode: "automatic",
+    backendModel: CHATGPT_WEB_BACKEND_MODEL,
+    modelFamily: "5.6",
+    codexEffort: "max",
+    adapterEffort: "max",
+    supportedCodexEfforts: ["max"],
+    requiresPro: true,
+    legacy: true,
+  },
+  {
     slug: "chatgpt-web/light",
     displayName: "ChatGPT Web — Instant",
     description: "ChatGPT Web Instant through the native Codex harness.",
@@ -421,18 +434,6 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     adapterEffort: "high",
     supportedCodexEfforts: ["medium", "high", "xhigh"],
     requiresPro: false,
-  },
-  {
-    slug: "chatgpt-web/gpt-5.6-pro",
-    displayName: "GPT-5.6 Pro (Web)",
-    description: "GPT-5.6 Pro through ChatGPT. The fixed Max effort selects Pro.",
-    interactionMode: "automatic",
-    backendModel: CHATGPT_WEB_BACKEND_MODEL,
-    modelFamily: "5.6",
-    codexEffort: "max",
-    adapterEffort: "max",
-    supportedCodexEfforts: ["max"],
-    requiresPro: true,
   },
   {
     slug: "chatgpt-web/gpt-6-pro",

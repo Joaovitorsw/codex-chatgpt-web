@@ -41,7 +41,8 @@ The bridge transports decisions; it does not add a second planner, semantic rout
 model. Every available effort uses the same MCP contract. An unavailable account route, missing
 connector, or missing outer tool fails explicitly instead of becoming an effort-specific exception.
 
-The direct turn-token MCP schema is attached only through the `Codex Native2` connector identity.
+The direct turn-token MCP schema is attached only through the exact configured connector name
+(default `Codex Native2`; the part after `Codex ` can be changed).
 The pre-v4 `Codex Native` connector is treated as legacy and is never selected as a fallback. This
 prevents a cached legacy schema from being mistaken for the current capability contract.
 

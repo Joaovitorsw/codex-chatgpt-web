@@ -218,8 +218,13 @@ for (const scenario of [
     await adapter.runTurn!(continuation, { headers: new Headers() }, event => final.push(event));
     expect(starts).toHaveLength(2);
     expect(starts[1]).not.toBe(starts[0]);
-    const expectedFinal = scenario.finalWins ? "Ordinary final answer before compaction" : "Final answer after compaction";
-    expect(final.some(event => event.type === "text_delta" && event.text === expectedFinal)).toBeTrue();
+    if (scenario.finalWins) {
+      // The ordinary answer was already delivered and committed before compaction. Reconnecting
+      // must not duplicate its text into a later native response.
+      expect(final.some(event => event.type === "text_delta")).toBeFalse();
+    } else {
+      expect(final.some(event => event.type === "text_delta" && event.text === "Final answer after compaction")).toBeTrue();
+    }
     const replay: AdapterEvent[] = [];
     await adapter.runTurn!(continuation, { headers: new Headers() }, event => replay.push(event));
     expect(starts).toHaveLength(2); // exact reconnect replays, it must not submit again
@@ -274,7 +279,7 @@ test("Zero Risk adapter never starts the automatic browser worker and completes 
     expect(events.some(event => event.type === "text_delta"
       && event.phase === "commentary"
       && event.text.startsWith("> **Action required in Zero Risk**")
-      && event.text.includes("select the `Codex Zero Risk` plugin")
+      && event.text.includes("select the plugin shown in the launcher")
       && event.text.includes("confirm it was sent in the launcher"))).toBeTrue();
     expect(events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => (
       event.type === "text_delta" && event.phase === "final_answer"

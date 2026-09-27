@@ -535,7 +535,8 @@ export async function runChatGptMcpServer(options: {
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
-          "Codex Native claim failed and its broker activity could not be retired",
+          `Codex Native claim failed: ${error instanceof Error ? error.message : String(error)}. Its broker activity could not be retired.`,
+          { cause: error },
         );
       }
       throw error;

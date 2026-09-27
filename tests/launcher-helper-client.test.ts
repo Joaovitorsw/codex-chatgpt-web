@@ -449,7 +449,7 @@ test("an older helper cannot silently drop selected skill files and releases the
       release() { released = true; },
     }),
     onTextDelta() {},
-  })).rejects.toThrow("does not support skill attachments");
+  })).rejects.toThrow("does not support file attachments");
   expect(sent).toEqual(["run", "abort"]);
   expect(released).toBe(true);
 });

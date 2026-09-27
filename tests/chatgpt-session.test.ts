@@ -306,13 +306,15 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; loseSelectionOnClose?: boolean; compactLabel?: boolean; power?: boolean; menuOwned?: boolean; disabled?: string; staleAttributeMax?: string; maxAfterClose?: string; locksAfterClose?: Array<string | null> } = {}) {
+function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; transientSliderReads?: number; loseSelectionOnClose?: boolean; compactLabel?: boolean; power?: boolean; menuOwned?: boolean; proOption?: boolean; disabled?: string; staleAttributeMax?: string; maxAfterClose?: string; locksAfterClose?: Array<string | null> } = {}) {
   let value = 0;
   let opened = true;
   let closedOnce = false;
+  let selectedPro = false;
   const max = () => closedOnce ? options.maxAfterClose ?? options.max ?? "4" : options.max ?? "4";
   const clicks: number[] = [];
   const keys: string[] = [];
+  let snapshotReads = 0;
   const hidden = {
     filter() { return this; }, last() { return this; }, getByText() { return this; },
     isVisible: async () => false,
@@ -342,6 +344,7 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
     filter() { return this; }, last() { return this; },
     locator: (selector: string) => selector === "[role=\"slider\"]" ? slider : ticks,
     evaluate: async (read: (element: Element) => unknown) => {
+      snapshotReads += 1;
       const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
       // Captured Plus DOM: the slider root and each tick have data-locked, but only
       // ticks have data-selected. Its fourth position is a locked Pro upsell.
@@ -350,7 +353,7 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
       const document = createDocument(`<div ${attribute}${options.menuOwned ? ' role="menu"' : ""}>
         <span data-locked="false" data-orientation="horizontal" aria-disabled="${options.disabled ?? "false"}"><span>${locks.map((lock, index) =>
           `<span data-selected="${index <= value}"${lock === null ? "" : ` data-locked="${lock}"`}></span>`).join("")}
-        </span><span role="slider" aria-valuemin="0" aria-valuemax="${max()}" aria-valuenow="${value}"></span></span></div>`);
+        </span>${snapshotReads <= (options.transientSliderReads ?? 0) ? "" : `<span role="slider" aria-valuemin="0" aria-valuemax="${max()}" aria-valuenow="${value}"></span>`}</span></div>`);
       return read(document.querySelector(`[${attribute}]`)!);
     },
     isVisible: async () => true,
@@ -364,13 +367,29 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
     first() { return this; }, filter() { return this; }, last() { return this; },
     count: async () => 1, waitFor: async () => {}, isVisible: async () => true,
     click: async () => { opened = true; },
-    innerText: async () => opened ? "Thinking effort" : ["Instant", "Medium", "High", "Extra High", "Pro"][value]!,
+    innerText: async () => opened ? "Thinking effort" : selectedPro ? "Pro" : ["Instant", "Medium", "High", "Extra High", "Pro"][value]!,
     getAttribute: async (name: string) => name === "aria-expanded" ? String(opened)
       : name === "aria-label" && options.compactLabel ? "Select ChatGPT model" : null,
   };
   const composer = { filter() { return this; }, last() { return this; }, count: async () => 1, isEditable: async () => true, locator: () => ({ count: async () => 1, locator: () => control }) };
   const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
-  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows };
+  const proOption = {
+    filter() { return this; },
+    count: async () => (options.proOption ?? Number(max()) === 4) ? 1 : 0,
+    getAttribute: async (name: string) => name === "aria-checked" ? String(selectedPro) : null,
+    click: async () => { selectedPro = true; opened = false; },
+  };
+  const familyOption = {
+    count: async () => 1,
+    getAttribute: async (name: string) => name === "aria-checked" ? "true" : null,
+    waitFor: async () => {},
+    click: async () => {},
+  };
+  const menu = {
+    filter() { return this; }, last() { return this; }, isVisible: async () => true,
+    locator: () => modelRows,
+    getByRole: (_role: string, args?: { name?: RegExp }) => args?.name?.source === "^Pro$" ? proOption : familyOption,
+  };
   const page = {
     url: () => "https://chatgpt.com/?temporary-chat=true",
     evaluate: async () => true,
@@ -411,6 +430,14 @@ test("an effort-control observation failure cannot become a Luna-only detection"
 test.each([0, 50])("capabilities wait for the visible container and read its hidden semantic input (delay=%s)", async delay => {
   const fixture = reasoningPicker({ delay });
   await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+});
+
+test("capabilities survive the semantic slider being replaced during picker hydration", async () => {
+  const fixture = reasoningPicker({ transientSliderReads: 2, power: true });
+  fixture.control.isVisible = async () => true;
+  await expect(detectChatGptAccountCapabilities(fixture.page as never, {
+    selectorTimeoutMs: 1_000,
+  })).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
 });
 
 test("compact model trigger still discovers the complete Pro effort slider", async () => {
@@ -471,7 +498,7 @@ test("capabilities exclude the observed locked Plus upsell and reject unknown lo
     max: "3", locks: ["false", "false", "false", "true"],
   }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false });
   await expect(detectChatGptAccountCapabilities(reasoningPicker({
-    locks: ["false", "false", "false", "false", "true"],
+    locks: ["false", "false", "false", "false", "true"], proOption: false,
   }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false });
   for (const locks of [[], ["false", "false", "false", null], ["false", "false", "false", "unknown"]]) {
     await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "3", locks }).page as never))
@@ -480,21 +507,23 @@ test("capabilities exclude the observed locked Plus upsell and reject unknown lo
 });
 
 test("the complete Pro range accepts unlocked leaf ticks without redundant lock metadata", async () => {
-  const fixture = reasoningPicker({ max: "4", locks: [null, null, null, null, null], menuOwned: true });
+  const fixture = reasoningPicker({ max: "4", locks: [null, null, null, null, null], menuOwned: true, proOption: true });
   await expect(detectChatGptAccountCapabilities(fixture.page as never))
     .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
 });
 
 test("power picker omission of lock attributes requires its enabled structural owner and complete ticks", async () => {
-  await expect(detectChatGptAccountCapabilities(reasoningPicker({ power: true, locks: Array(5).fill(null) }).page as never))
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ power: true, locks: Array(5).fill(null), proOption: true }).page as never))
     .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
-  await expect(detectChatGptAccountCapabilities(reasoningPicker({ power: true, locks: [null, null, null, "true", "true"] }).page as never))
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ power: true, locks: [null, null, null, "true", "true"], proOption: false }).page as never))
     .resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false });
   for (const options of [
     { power: false }, { power: true, disabled: "true" }, { power: true, disabled: "unknown" },
-    { power: true, max: "3" },
   ]) await expect(detectChatGptAccountCapabilities(reasoningPicker({ ...options, locks: Array(5).fill(null) }).page as never))
     .rejects.toThrow("availability");
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({
+    power: true, max: "3", locks: Array(4).fill(null), proOption: true,
+  }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
 });
 
 test("stale saved capabilities cannot activate a locked effort; High remains selectable", async () => {
@@ -516,9 +545,9 @@ test("stale saved capabilities cannot activate a locked effort; High remains sel
   }
 });
 
-test("Pro selection verifies the persisted hidden slider through its visible owner, never model rows", async () => {
+test("legacy five-step Pro selection verifies the persisted hidden slider through its visible owner", async () => {
   for (const loseSelectionOnClose of [false, true]) {
-    const fixture = reasoningPicker({ delay: 50, loseSelectionOnClose });
+    const fixture = reasoningPicker({ delay: 50, loseSelectionOnClose, proOption: false });
     const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
       activeComposer: async () => fixture.composer,
     }) as { selectModelAndEffort(...args: unknown[]): Promise<{ selection: { label: string } }> };
@@ -530,4 +559,17 @@ test("Pro selection verifies the persisted hidden slider through its visible own
     expect(fixture.clicks).toEqual([4]);
     expect(fixture.value()).toBe(loseSelectionOnClose ? 0 : 4);
   }
+});
+
+test("current separate Pro row selects and persists GPT-6 without waiting for a fifth slider tick", async () => {
+  const fixture = reasoningPicker({ max: "3", power: true, proOption: true, locks: Array(4).fill(null) });
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    activeComposer: async () => fixture.composer,
+  }) as { selectModelAndEffort(...args: unknown[]): Promise<{ selection: { label: string }; modelFamily?: string }> };
+  const selected = await worker.selectModelAndEffort(fixture.page, "gpt-5.6-sol", "max", {
+    localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  }, undefined, true, "6");
+  expect(selected.selection.label).toBe("Pro");
+  expect(selected.modelFamily).toBe("6");
+  expect(fixture.clicks).toEqual([]);
 });

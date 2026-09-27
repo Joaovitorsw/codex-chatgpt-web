@@ -7,6 +7,24 @@ import {
 } from "../src/chatgpt-web-models";
 import { modelsRequest } from "../src/server";
 
+test("catalog diagnostics preserve safe causes without attributing an upstream abort to the client", async () => {
+  for (const [error, code] of [
+    [new DOMException("internal cancellation", "AbortError"), "ABORT_ERR"],
+    [new DOMException("deadline", "TimeoutError"), "ETIMEDOUT"],
+    [new TypeError("private error message", { cause: { code: "ECONNRESET" } }), "ECONNRESET"],
+    [{ code: "ConnectionRefused" }, "ConnectionRefused"],
+    [{ code: "https://private.example/token", cause: { code: "/private/key" } }, undefined],
+  ] as const) {
+    const request = new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer fixture" } });
+    let failure: unknown;
+    const response = await modelsRequest(request, defaultConfig("browser-only"), async () => { throw error; },
+      undefined, result => { failure = result; });
+    expect(request.signal.aborted).toBeFalse();
+    expect(response.status).toBe(502);
+    expect(failure).toEqual({ stage: "transport", ...(code ? { code } : {}) });
+  }
+});
+
 test("proxies official /models auth and query, then appends grouped and legacy Web models", async () => {
   const request = new Request("http://127.0.0.1:17841/v1/models?client_version=1.2.3", {
     headers: { authorization: "Bearer codex-oauth-token", "if-none-match": "native-etag" },
@@ -56,8 +74,8 @@ test("proxies official /models auth and query, then appends grouped and legacy W
     "gpt-5.6-sol",
     "chatgpt-web/gpt-5.6-sol-instant",
     "chatgpt-web/gpt-5.6-sol",
-    "chatgpt-web/gpt-5.6-pro",
     "chatgpt-web/gpt-6-pro",
+    "chatgpt-web/gpt-5.6-pro",
     "chatgpt-web/light",
     "chatgpt-web/medium",
     "chatgpt-web/high",

@@ -983,6 +983,56 @@ test("authentication windows stay inside the launcher-owned browser partition", 
   assert.doesNotMatch(source, /loginWithSystemBrowser|captureSystemBrowserLogin|system_login_started/);
 });
 
+test("a turn sign-in redirect updates the launcher and survives stale session probes until login", async () => {
+  const contents = new EventEmitter();
+  contents.setWindowOpenHandler = handler => { contents.openWindow = handler; };
+  contents.isDestroyed = () => false;
+  contents.setBackgroundThrottling = () => {};
+  let probes = 0;
+  const tab = { id: "auth-tab", traceId: "auth-trace", helperPid: 77, status: "running", view: { webContents: contents } };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    state: { authenticated: true, status: "ready" },
+    authenticationRevision: 0, turnTabs: new Map([[tab.id, tab]]),
+    userCancelledTurnOwners: new Map(),
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+    snapshot() { return this.state; },
+    syncPowerSaveBlocker() {}, removeTurnTab() {},
+    view: { webContents: {
+      isDestroyed: () => false, getURL: () => "https://chatgpt.com/?temporary-chat=true",
+      executeJavaScript: async () => {
+        probes++;
+        return { sessionAuthenticated: true, composer: true, temporary: true, url: "https://chatgpt.com/?temporary-chat=true" };
+      },
+    } },
+    logger: { warn() {}, info() {} },
+  });
+  fixture.bindTurnContents(tab);
+  let prevented = 0;
+  const event = { preventDefault() { prevented++; } };
+  contents.emit("will-redirect", event, "https://chatgpt.com/c/current", false, true);
+  contents.emit("will-redirect", event, "https://auth.openai.com/authorize", false, false);
+  assert.equal(prevented, 0);
+  assert.equal(fixture.state.authenticated, true);
+  contents.emit("will-redirect", event, "https://auth.openai.com/authorize", false, true);
+  assert.equal(prevented, 1);
+  assert.equal(fixture.state.authenticated, false);
+  assert.equal(fixture.state.status, "signed-out");
+  assert.equal(fixture.authenticationRevision, 1);
+  await fixture.probeAuthentication();
+  await fixture.refreshAuthenticationFromSession();
+  assert.equal(probes, 0);
+  const release = await fixture.endTurn(tab.traceId, tab.helperPid, "failed", false);
+  assert.deepEqual(release, { cancelledByUser: false, authenticationRequired: true });
+  for (const operation of ["ChatGPT login", "ChatGPT passkey login"]) {
+    fixture.reauthenticationRequired = true;
+    fixture.manualOperation = operation;
+    await fixture.probeAuthentication();
+    assert.equal(fixture.state.authenticated, true);
+    assert.equal(fixture.reauthenticationRequired, false);
+  }
+  assert.equal(probes, 2);
+});
+
 test("concurrent authentication probes share the same navigation and allow the next refresh", async () => {
   let probes = 0;
   let navigations = 0;
@@ -3378,6 +3428,26 @@ test("manual Copy and Sent confirmation remain isolated across concurrent tabs",
   assert.equal(fixture.turnTabs.get(two.tabId).manualState, "awaiting-user");
   assert.deepEqual(clipboardWrites, ["first prompt", "second prompt", "first prompt"]);
   for (const tab of fixture.turnTabs.values()) clearTimeout(tab.manualDeadlineTimer);
+});
+
+test("manual recovery preserves the prompt until running and keeps repeated starts valid", () => {
+  const { fixture, clipboardWrites } = manualTurnFixture();
+  const lease = fixture.beginManualTurn("recover", process.pid, "same prompt");
+  const tab = fixture.turnTabs.get(lease.tabId);
+  tab.manualDeadlineAt = Date.now() + 1;
+  fixture.copyManualPrompt(tab.id);
+  assert.ok(tab.manualDeadlineAt > Date.now() + 50_000);
+  fixture.confirmManualSent(tab.id);
+  fixture.copyManualPrompt(tab.id);
+  assert.equal(tab.manualState, "sent");
+  assert.equal(tab.manualDeadlineAt, null);
+  assert.deepEqual(clipboardWrites, ["same prompt", "same prompt", "same prompt"]);
+  fixture.markManualTurnStarted("recover", process.pid);
+  assert.equal(tab.prompt, null);
+  assert.throws(() => fixture.copyManualPrompt(tab.id), /no longer available/);
+  assert.equal(fixture.beginManualTurn("recover", process.pid, "same prompt").state, "running");
+  assert.throws(() => fixture.beginManualTurn("recover", process.pid, "different prompt"), /different prompt/);
+  fixture.cancelManualTurn("recover", process.pid);
 });
 
 test("manual Sent timeout and explicit cancellation are terminal", async () => {

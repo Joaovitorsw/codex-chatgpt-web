@@ -3,17 +3,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/codex-web-gpt-6.1.1-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/codex-web-gpt-6.1.1-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/codex-web-gpt-6.1.1-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.2/codex-web-gpt-6.1.2-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.2/codex-web-gpt-6.1.2-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.2/codex-web-gpt-6.1.2-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/codex-web-gpt-6.1.1-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">All releases</a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.2/codex-web-gpt-6.1.2-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">All releases</a>
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
+  <a href="README.md">Português (Brasil)</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
 </p>
 
 <p align="center">
@@ -21,30 +21,30 @@
 </p>
 
 <p align="center">
-  <a href="#get-started">Get started</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases">What’s new</a> · <a href="docs/architecture.md">Architecture</a> · <a href="TROUBLESHOOTING.md">Troubleshooting</a>
+  <a href="#get-started">Primeiros passos</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases">Novidades</a> · <a href="docs/architecture.md">Arquitetura</a> · <a href="TROUBLESHOOTING.md">Solução de problemas</a>
 </p>
 
-Use the ChatGPT Web models available on your account, including Pro, from Codex’s native model picker—with ChatGPT Web’s separate usage limits, without spending your Work or Codex quota. Keep the same interface, tasks, images, and streaming.
+Use no seletor nativo do Codex os modelos Web disponíveis na sua conta do ChatGPT, inclusive Pro, com os limites separados do ChatGPT Web e sem consumir a cota do Work ou do Codex. A interface, as tarefas, as imagens e o streaming continuam no Codex.
 
-Full harness mode connects ChatGPT to the current task’s files, terminal, tools, and approvals through MCP. Conversations stay tied to your Codex task, so you can keep working as the context grows.
+O modo Full harness conecta o ChatGPT aos arquivos, terminal, ferramentas e aprovações da tarefa atual por MCP. As conversas permanecem vinculadas à tarefa do Codex conforme o contexto cresce.
 
 <div id="get-started"><a id="quick-start"></a></div>
 
-## Get started
+## Primeiros passos
 
-**Available models:** Free/Go → **Luna / Think**. Accounts with reasoning controls → **Instant–High**, plus **Extra High** and **Pro** when available. The launcher detects what your account can use.
+**Modelos disponíveis:** Free/Go → **Luna / Think**. Contas com controles de raciocínio → **Instant–High**, além de **Extra High** e **GPT-6 Pro** quando disponíveis. O launcher detecta automaticamente o que a conta pode usar.
 
-1. **Install the launcher** using the download for your system above.
-2. **Sign in to ChatGPT** in the embedded browser and run the browser smoke test.
-3. **Install models** and restart Codex once. In automatic mode, choose a model ending in **(Web)**. Pro versions have separate entries; Sol reasoning is selected through Effort. Zero Risk keeps its dedicated entry.
-4. **For coding with tools**, open **MCP** in the launcher and complete the Full harness setup below.
+1. **Instale o launcher** usando o download do seu sistema acima.
+2. **Entre no ChatGPT** pelo navegador integrado e execute o smoke test.
+3. **Instale os modelos** e reinicie o Codex uma vez. No modo automático, escolha um modelo terminado em **(Web)**. GPT-6 Pro tem uma entrada própria; o raciocínio do Sol é selecionado por Effort. Zero Risk mantém sua entrada dedicada.
+4. **Para programar com ferramentas**, abra **MCP** no launcher e conclua a configuração Full harness abaixo.
 
-The app includes its browser and runtime. No separate Chrome, Node, or Bun installation is needed.
+O aplicativo já inclui navegador e runtime. Não é necessário instalar Chrome, Node ou Bun separadamente.
 
 <details>
-<summary><strong>Terminal install, updates & repair</strong></summary>
+<summary><strong>Instalação, atualização e reparo pelo terminal</strong></summary>
 
-Quit the launcher before updating. These installers select the platform and architecture, verify the published checksums, and preserve your ChatGPT profile and launcher settings.
+Feche o launcher antes de atualizar. Os instaladores detectam plataforma e arquitetura, verificam os checksums publicados e preservam o perfil do ChatGPT e as configurações.
 
 **macOS / Linux**
 
@@ -61,66 +61,63 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 </details>
 
 <details>
-<summary><strong>Models, modes & MCP setup</strong></summary>
+<summary><strong>Modelos, modos e configuração MCP</strong></summary>
 
 <a id="modes"></a>
 
-Automatic modes offer Luna/Think when the account has no reasoning selector; otherwise Instant–High, with Extra High and Pro available independently when exposed by the account.
+Os modos automáticos oferecem Luna/Think quando a conta não possui seletor de raciocínio; caso contrário, oferecem Instant–High, com Extra High e GPT-6 Pro quando expostos pela conta.
 
-| Mode | Sending messages | Local Codex tools |
+| Modo | Envio de mensagens | Ferramentas locais do Codex |
 | --- | --- | --- |
-| **Browser-only** | Automatic | No |
-| **Full harness (With Automation)** | Automatic | Yes, through MCP |
-| **Zero Risk** | Paste and send manually | Yes, through a separate MCP connector |
+| **Somente navegador** | Automático | Não |
+| **Full harness (com automação)** | Automático | Sim, por MCP |
+| **Zero Risk** | Colar e enviar manualmente | Sim, por um conector MCP separado |
 
-Zero Risk does not read or operate the ChatGPT page. Choose the model and `Codex Zero Risk` connector yourself, paste and send the prepared prompt, then confirm **Sent** in the launcher. Automatic models ending in **(Web)** expose their supported Effort choices in Codex. Instant and each Pro version have separate entries to preserve their context budgets; older saved model entries keep their original fixed mode.
+Zero Risk não lê nem opera a página do ChatGPT. Selecione manualmente o modelo e o conector `Codex Zero Risk`, cole e envie o prompt preparado e confirme **Enviado** no launcher. Modelos automáticos terminados em **(Web)** expõem no Codex os níveis de Effort compatíveis. Instant e GPT-6 Pro têm entradas próprias para preservar seus orçamentos de contexto; tarefas antigas mantêm a rota original apenas por compatibilidade.
 
 <a id="full-harness"></a>
 
-### Full harness
+### Modo completo (Full harness)
 
-Full mode connects ChatGPT's tool calls back to the current Codex task through the official
-[OpenAI tunnel-client](https://github.com/openai/tunnel-client). The tunnel is outbound: it does
-not expose a public IP, open an inbound port, or require router forwarding.
+O modo Full conecta as chamadas de ferramentas do ChatGPT à tarefa atual do Codex pelo
+[OpenAI tunnel-client](https://github.com/openai/tunnel-client). O túnel é de saída: não expõe IP
+público, não abre porta de entrada e não exige redirecionamento no roteador.
 
-The launcher's **MCP** page guides the complete setup. For the exact clicks, see the
-[video walkthroughs](TROUBLESHOOTING.md).
+A página **MCP** do launcher orienta toda a configuração. Para ver os cliques exatos, consulte os
+[guias em vídeo](TROUBLESHOOTING.md).
 
-> **Limits**
+> **Limites**
 >
-> See [Limits](https://github.com/miuuyy/codex-chatgpt-web/discussions/309) for the current
-> ChatGPT message allowances for **GPT-5.6 Sol Pro** and **GPT-6 Astra**. Context limits depend on
-> the account type and selected effort. Plus Medium/High uses a measured 90,000-token window, or
-> up to 270,000 tokens with experimental **3× context** enabled, with native Codex compaction
-> supported throughout.
+> Consulte [Limites](https://github.com/miuuyy/codex-chatgpt-web/discussions/309) para ver as
+> franquias atuais de mensagens do ChatGPT. Os limites de contexto dependem do tipo de conta e do
+> esforço selecionado. Plus Medium/High usa uma janela medida de 90.000 tokens, ou até 270.000
+> tokens com o **contexto 3×** experimental, sempre com compactação nativa do Codex.
 
-1. Finish the required setup, open **MCP**, create the Tunnel and regular API key, then press
-   **Connect harness**.
-2. Enable ChatGPT **Developer Mode** and create a new Tunnel connector named exactly
-   **Codex Native2**, with **Authentication: None** and **Allow all actions**.
-3. Run **Verify runtime** to confirm that **Codex Native2** is attached and available.
+1. Conclua a configuração exigida, abra **MCP**, crie o túnel e a chave de API comum e pressione **Conectar harness**.
+2. Ative o **Modo de desenvolvedor** do ChatGPT e crie um conector Tunnel chamado exatamente **Codex Native2**, com **Autenticação: nenhuma** e **Permitir todas as ações**.
+3. Execute **Verificar runtime** para confirmar que **Codex Native2** está conectado e disponível.
 
-Write/modify actions also require the ChatGPT workspace and its administrator policy to permit
-them. See
-[developer mode and MCP apps](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
-Unexpected approval prompts fail closed unless `--auto-approve-tool-calls` is explicitly enabled;
-that option clicks **Allow once**, never a permanent grant.
+Ações de escrita e modificação também dependem da permissão do workspace do ChatGPT e da política
+do administrador. Consulte [modo de desenvolvedor e aplicativos MCP](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
+Pedidos inesperados de aprovação falham de forma segura, salvo quando `--auto-approve-tool-calls`
+está explicitamente ativado; essa opção clica apenas em **Permitir uma vez**, nunca em permissão permanente.
 
 </details>
 
 <details>
-<summary><strong>Diagnostics & subagents</strong></summary>
+<summary><strong>Diagnóstico e subagentes</strong></summary>
 
 <a id="operations"></a>
 
-Use **Activity** for safe local diagnostics and **Settings → Run doctor** for end-to-end health.
-Settings can also cancel a retained browser turn or remove the Codex integration before uninstall.
-**Save chats in ChatGPT** keeps task conversations in ChatGPT history. Off by default; independent of **New browser chat for each turn**.
-Set `CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS=1` only when every browser checkpoint needs a screenshot.
+Use **Atividade** para diagnósticos locais seguros e **Configurações → Executar doctor** para verificar
+o fluxo completo. Nas configurações também é possível cancelar um turno retido ou remover a integração
+do Codex antes da desinstalação. **Salvar chats no ChatGPT** mantém as conversas no histórico e vem
+desativado por padrão, independentemente de **Novo chat do navegador a cada turno**. Defina
+`CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS=1` apenas quando cada checkpoint precisar de captura de tela.
 
-New installs use **Compatibility V1** for cross-backend subagents. **Native** preserves Codex's own
-feature settings and enables plaintext Web-to-Web V2 delegation. Restart Codex and start a new task
-after changing the protocol:
+Novas instalações usam **Compatibilidade V1** para subagentes entre backends. **Nativo** preserva as
+configurações do próprio Codex e habilita delegação Web-to-Web V2 em texto simples. Reinicie o Codex
+e abra uma nova tarefa após trocar o protocolo:
 
 ```bash
 codex-chatgpt-web subagents status
@@ -131,46 +128,44 @@ codex-chatgpt-web subagents native
 </details>
 
 <details>
-<summary><strong>Requirements & security</strong></summary>
+<summary><strong>Requisitos e segurança</strong></summary>
 
 <a id="limitations-and-security"></a>
 
-- This is unofficial browser automation, not an OpenAI API. ChatGPT UI changes can break selectors;
-  drift fails explicitly instead of silently switching model or transport.
-- Browser state is a sensitive login artifact, and the loopback listener is reachable by processes
-  running as the same local user. Never share the launcher profile; use a trusted workstation.
-- Release packages currently target macOS 13+ (arm64/x64), Windows x64, and Linux x64. Runtime,
-  tests, and packaging are gated on all three in CI; account-bound browser and MCP flows use the
-  separate [release validation](docs/release-validation.md).
-- Builds are not yet platform-signed, so Gatekeeper or SmartScreen may warn. The installers verify
-  the published SHA-256 manifest before installation.
+- Esta é uma automação não oficial do navegador, não uma API da OpenAI. Mudanças na interface do
+  ChatGPT podem quebrar seletores; desvios geram erro explícito em vez de trocar modelo ou transporte silenciosamente.
+- O estado do navegador é um artefato sensível de login, e processos do mesmo usuário local podem
+  alcançar o listener de loopback. Nunca compartilhe o perfil do launcher; use uma máquina confiável.
+- Os pacotes atuais atendem macOS 13+ (arm64/x64), Windows x64 e Linux x64. Runtime, testes e empacotamento
+  são validados nos três sistemas pelo CI; fluxos vinculados à conta usam a [validação de release](docs/release-validation.md).
+- Os builds ainda não possuem assinatura de plataforma, então Gatekeeper ou SmartScreen podem alertar.
+  Os instaladores verificam o manifesto SHA-256 publicado antes da instalação.
 
-Read the complete [architecture](docs/architecture.md) and
-[security model](docs/security-model.md) before enabling full mode. Report vulnerabilities through
-[SECURITY.md](SECURITY.md).
+Leia a [arquitetura](docs/architecture.md) e o [modelo de segurança](docs/security-model.md) completos
+antes de habilitar o modo Full. Informe vulnerabilidades por [SECURITY.md](SECURITY.md).
 
-Temporary Chat is a [ChatGPT privacy mode](https://help.openai.com/en/articles/8914046-temporary-chat-faq); prompts are still processed by OpenAI.
+O Chat temporário é um [modo de privacidade do ChatGPT](https://help.openai.com/en/articles/8914046-temporary-chat-faq); os prompts ainda são processados pela OpenAI.
 
-Validation coverage: [release validation](docs/release-validation.md).
+Cobertura de validação: [validação de release](docs/release-validation.md).
 
-This is independent software and is not affiliated with or endorsed by OpenAI. Use it only with
-your own account and in accordance with applicable [Terms of Use](https://openai.com/policies/terms-of-use/)
-and workspace policies; it does not bypass authentication or access controls.
+Este é um software independente, sem afiliação ou endosso da OpenAI. Use-o somente com sua própria
+conta e de acordo com os [Termos de Uso](https://openai.com/policies/terms-of-use/) e as políticas do
+workspace; ele não contorna autenticação nem controles de acesso.
 
 </details>
 
 <details>
-<summary><strong>Run from source & develop</strong></summary>
+<summary><strong>Executar pelo código-fonte e desenvolver</strong></summary>
 
 <a id="development"></a>
 
 ```bash
-git clone https://github.com/miuuyy/codex-chatgpt-web.git && \
+git clone https://github.com/Joaovitorsw/codex-chatgpt-web.git && \
 cd codex-chatgpt-web && \
 bun run app
 ```
 
-This source path requires Bun 1.4.0. The command installs locked dependencies and opens the app.
+Esta execução pelo código-fonte requer Bun 1.4.0. O comando instala as dependências travadas e abre o aplicativo.
 
 ```bash
 bun run app
@@ -182,11 +177,11 @@ bun run smoke:subagents
 bun run app:package
 ```
 
-`dev:launcher` uses a separate profile and account under `~/.codex-chatgpt-web-dev`. `dev:chat` exercises the real browser and compaction paths with explicit simulated tool results, without changing your normal Codex route. See the [DEV chat harness](docs/dev-chat.md) for setup and commands.
+`dev:launcher` usa perfil e conta separados em `~/.codex-chatgpt-web-dev`. `dev:chat` exercita o navegador real e os fluxos de compactação com resultados simulados explícitos, sem alterar a rota normal do Codex. Consulte o [harness DEV do chat](docs/dev-chat.md) para configuração e comandos.
 
 </details>
 
-## Star History
+## Histórico de estrelas
 
 <a href="https://www.star-history.com/?repos=miuuyy%2Fcodex-chatgpt-web&type=date&legend=top-left">
   <picture>
@@ -198,6 +193,6 @@ bun run app:package
 
 ---
 
-[Troubleshooting](TROUBLESHOOTING.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE) · [CI](https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml)
+[Solução de problemas](TROUBLESHOOTING.md) · [Segurança](SECURITY.md) · [Como contribuir](CONTRIBUTING.md) · [Licença MIT](LICENSE) · [CI](https://github.com/miuuyy/codex-chatgpt-web/actions/workflows/ci.yml)
 
-Also by me: <img src="assets/readme/persona-voice.svg" width="20" height="20" alt=""> [ChatGPT Persona Voice](https://github.com/miuuyy/ChatGPT-Persona-Voice) — local, near-real-time custom voices for ChatGPT and Codex.
+Também do autor original: <img src="assets/readme/persona-voice.svg" width="20" height="20" alt=""> [ChatGPT Persona Voice](https://github.com/miuuyy/ChatGPT-Persona-Voice) — vozes personalizadas locais, quase em tempo real, para ChatGPT e Codex.

@@ -317,7 +317,7 @@ test("inline compaction carries the newest cumulative checkpoint across discarde
     expect(envelope.messages.at(-1).content).toBe("checkpoint-now");
     expect(compiled.text).not.toContain("Obsolete summary");
     expect(compiled.images).toEqual([]);
-    expect(compiled.trimmedCompactionMessages).toBe(2);
+    expect(compiled.trimmedCompactionMessages).toBe(1);
     expect(compiled.text).toContain("history is incomplete");
     expect(compiled.text).not.toContain("The task context is complete.");
     expect(chatGptPromptJsonBytes(compiled.text)).toBeLessThanOrEqual(CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET);

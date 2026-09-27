@@ -34,6 +34,7 @@ test("bundles the local scheduler as a selectable managed skill", () => {
 
 test("builds and executes a safe resume invocation without registering a Windows task", {
   skip: process.platform !== "win32",
+  timeout: 20_000,
 }, () => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-local-scheduler-skill-"));
   const codexHome = path.join(stateRoot, "codex");

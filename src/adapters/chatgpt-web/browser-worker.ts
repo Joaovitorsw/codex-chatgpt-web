@@ -1935,7 +1935,6 @@ export class ChatGptVisibleTraceTracker {
           ? `@ ${value}`
           : value
       );
-
       if (previous && text.startsWith(previous)) {
         output.push({ kind, text: text.slice(previous.length), continuation: true });
       } else {
@@ -2838,6 +2837,50 @@ export class ChatGptBrowserWorker {
     if (modelFamily) activation = await selectChatGptModelFamily(
       page, activation, modelFamily, () => activateChatGptEffortMenu(page, currentEffort),
     );
+    const separateProOption = activation.menu.getByRole("menuitemradio", { name: /^Pro$/i, exact: true });
+    if (mode.effort === "max" && await separateProOption.count() === 1) {
+      // Current ChatGPT removed Pro from the power slider. Pro is now a separate
+      // Latest-family row and selecting it switches the effective family to GPT-6.
+      if (modelFamily === "5.6") {
+        await page.keyboard.press("Escape").catch(() => {});
+        throw chatGptModelControlUnavailableAdapterError(
+          "ChatGPT now exposes Pro only through the GPT-6 Latest family; GPT-5.6 Pro is no longer selectable",
+        );
+      }
+      const proDataDisabled = await separateProOption.getAttribute("data-disabled");
+      if (await separateProOption.getAttribute("aria-disabled") === "true"
+        || (proDataDisabled !== null && proDataDisabled !== "false")) {
+        await page.keyboard.press("Escape").catch(() => {});
+        throw chatGptModelControlUnavailableAdapterError("ChatGPT's Pro option is currently unavailable");
+      }
+      if (await separateProOption.getAttribute("aria-checked") !== "true") {
+        await separateProOption.click({ force: true, timeout: 5_000 });
+      }
+      await settleChatGptUi();
+      if (await currentEffort.getAttribute("aria-expanded") === "true") {
+        await page.keyboard.press("Escape");
+        await settleChatGptUi();
+      }
+      const selectedMode: SelectedChatGptWebModelMode = {
+        ...mode,
+        ...(modelFamily ? { modelFamily } : {}),
+        selection: { url: page.url(), label: (await currentEffort.innerText()).trim() },
+        ...(trackUsage ? { usageModel: modelFamily === "6" ? "gpt-6-pro" as const : "pro-unknown" as const } : {}),
+      };
+      await this.assertSelectedEffort(page, selectedMode, false);
+      const confirmation = await activateChatGptEffortMenu(page, currentEffort);
+      try {
+        const confirmedPro = confirmation.menu.getByRole("menuitemradio", { name: /^Pro$/i, exact: true });
+        if (await confirmedPro.count() !== 1 || await confirmedPro.getAttribute("aria-checked") !== "true") {
+          throw chatGptModelControlUnavailableAdapterError("ChatGPT did not persist the Pro selection");
+        }
+      } finally {
+        await page.keyboard.press("Escape").catch(() => {});
+      }
+      await this.assertSelectedEffort(page, selectedMode, false);
+      await captureDiagnostic?.("separate-pro-selection-confirmed");
+      return selectedMode;
+    }
     if (activation.method === "pointerdown") {
       await captureDiagnostic?.("effort-menu-pointerdown-fallback");
     }
@@ -2848,7 +2891,7 @@ export class ChatGptBrowserWorker {
     try {
       const ready = await Promise.race([
         sliderContainer.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
-          .then(() => effortSlider.waitFor({ state: "attached", timeout: 70_000, signal: waitAbort.signal }))
+          .then(() => readChatGptEffortSnapshot(sliderContainer, 5_000))
           .then(() => "slider" as const),
         chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
         chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "session-expired" as const),
@@ -2927,7 +2970,8 @@ export class ChatGptBrowserWorker {
     };
     await this.assertSelectedEffort(page, selectedMode, false);
     const confirmation = await activateChatGptEffortMenu(page, currentEffort);
-    await confirmation.slider.waitFor({ state: "attached", timeout: 5_000 });
+    await readChatGptEffortSnapshot(confirmation.sliderContainer, 5_000)
+      .catch(error => { throw chatGptModelControlUnavailableAdapterError(String(error)); });
     const confirmedState = await readAvailableEffort(confirmation.sliderContainer, confirmation.menu);
     if (confirmedState.min !== initialMin || confirmedState.value !== targetValue) {
       throw chatGptModelControlUnavailableAdapterError("ChatGPT did not persist the requested effort after closing its menu");
@@ -2965,7 +3009,15 @@ export class ChatGptBrowserWorker {
     if (verifyFamily && mode.modelFamily && mode.uiEffortIndex !== null) {
       const menu = await activateChatGptEffortMenu(page, control);
       try {
-        await assertChatGptModelFamily(menu, mode.modelFamily, mode.effort, mode.uiEffortIndex);
+        if (mode.effort === "max") {
+          const proOption = menu.menu.getByRole("menuitemradio", { name: /^Pro$/i, exact: true });
+          if (mode.modelFamily !== "6" || await proOption.count() !== 1
+            || await proOption.getAttribute("aria-checked") !== "true") {
+            throw chatGptModelControlUnavailableAdapterError("ChatGPT no longer has the requested GPT-6 Pro selection");
+          }
+        } else {
+          await assertChatGptModelFamily(menu, mode.modelFamily, mode.effort, mode.uiEffortIndex);
+        }
       } finally {
         await page.keyboard.press("Escape");
       }
@@ -4724,12 +4776,15 @@ export class ChatGptBrowserWorker {
           if (!source) continue;
           const header = wrapper.querySelector<HTMLElement>('[data-markdown-copy="exclude"]')
             ?.textContent?.replace(/\s+/g, " ").trim().toLowerCase() ?? "";
+          const classLanguage = Array.from(source.classList)
+            .map(value => value.match(/^language-(.+)$/)?.[1] ?? "")
+            .find(Boolean) ?? "";
           const language = header === "plain text" || header === "plaintext" || header === "text"
             ? "text"
             : header === "javascript" || header === "js" ? "javascript"
               : header === "typescript" || header === "ts" ? "typescript"
                 : header === "powershell" || header === "shell" || header === "bash" ? header
-                  : "";
+                  : classLanguage;
           const pre = content.ownerDocument.createElement("pre");
           const code = content.ownerDocument.createElement("code");
           if (language) code.className = `language-${language}`;
@@ -4763,6 +4818,21 @@ export class ChatGptBrowserWorker {
           } else {
             button.remove();
           }
+        }
+        // The new renderer wraps code in DIVs, including a localized toolbar that can
+        // disappear on completion. Project only the code into PRE before fingerprinting
+        // and Markdown conversion; otherwise the toolbar changes the committed text and
+        // Turndown collapses code newlines as if they were ordinary inline whitespace.
+        const codeBlockSelector = 'pre, [data-markdown-copy="code-block"]';
+        for (const block of Array.from(content.querySelectorAll(codeBlockSelector))) {
+          if (block.parentElement?.closest(codeBlockSelector)) continue;
+          const codes = block.querySelectorAll("code");
+          if (codes.length !== 1) continue;
+          const code = codes[0]!.cloneNode(true);
+          const pre = block.tagName === "PRE" ? block : content.ownerDocument.createElement("pre");
+          block.textContent = "";
+          pre.appendChild(code);
+          if (pre !== block) block.appendChild(pre);
         }
         return content;
       };
@@ -5319,8 +5389,15 @@ export class ChatGptBrowserWorker {
             : {}),
         });
         if (release.cancelledByUser) throw chatGptBrowserTabClosedError();
+        if (release.authenticationRequired && terminal !== "aborted") {
+          throw new ChatGptWebAdapterError(
+            "ChatGPT requested sign-in. Open sign in in the launcher, then retry.",
+            { status: 401, errorType: "authentication_error", code: "chatgpt_sign_in_required", retryable: false },
+          );
+        }
       } catch (controlError) {
-        if (controlError instanceof ChatGptWebAdapterError && controlError.code === "client_cancelled") {
+        if (controlError instanceof ChatGptWebAdapterError
+          && ["client_cancelled", "chatgpt_sign_in_required"].includes(controlError.code)) {
           throw controlError;
         }
         if (!originalError) throw controlError;

@@ -33,6 +33,16 @@ import {
 
 const roots: string[] = [];
 
+function createTestSymlink(target: string, path: string): boolean {
+  try {
+    symlinkSync(target, path);
+    return true;
+  } catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") return false;
+    throw error;
+  }
+}
+
 function nativeConfig(mode: "browser-only" | "full") {
   const config = defaultConfig(mode);
   config.subagentProtocol = "native";
@@ -71,7 +81,7 @@ describe("reversible native Codex route integration", () => {
     const alias = join(codexHome, "config.toml");
     const original = 'model = "gpt-5.6-sol"\n\n[features]\ngoals = true\n';
     writeFileSync(target, original, { mode: 0o640 });
-    symlinkSync(join("..", "shared", "config.toml"), alias);
+    if (!createTestSymlink(join("..", "shared", "config.toml"), alias)) return;
     const link = readlinkSync(alias);
     const linkInode = lstatSync(alias).ino;
     const directoryMode = statSync(shared).mode & 0o777;
@@ -106,7 +116,7 @@ describe("reversible native Codex route integration", () => {
     writeFileSync(target, "original\n", { mode: 0o640 });
     writeFileSync(other, "other\n");
     mkdirSync(directory);
-    symlinkSync(target, alias);
+    if (!createTestSymlink(target, alias)) return;
     const inode = lstatSync(alias).ino;
     const mode = statSync(target).mode & 0o777;
     expect(() => writeFilesWithCompensation(

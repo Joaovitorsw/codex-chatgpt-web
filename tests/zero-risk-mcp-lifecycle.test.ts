@@ -296,6 +296,7 @@ describe("Zero Risk public MCP ABI", () => {
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
         "codex_apply_patch",
         "codex_exec",
+        "codex_generate_image_asset",
         "codex_tool_call",
         "codex_tool_inventory",
         "codex_turn_complete",

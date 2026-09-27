@@ -80,14 +80,20 @@ probe. The DEV launcher supervisor owns only the isolated MCP tunnel. Browser di
 state, thread authority, checkpoints, and named chat state live
 under `~/.codex-chatgpt-web-dev` by default.
 
-The ChatGPT connector name is also the public MCP ABI identity. The direct turn-token contract uses
-`Codex Native2`; the retired `Codex Native` identity is never selected or refreshed in place. Setup
-migrates known legacy local configuration to the new name, clears prior verification state, and
+The direct turn-token contract defaults to `Codex Native2`; the retired `Codex Native` identity is
+never selected or refreshed in place. Setup migrates known legacy local configuration to the new name, clears prior verification state, and
 requires the user to create the new connector. Browser verification accepts the exact new identity,
 reports a specific migration error when only the legacy identity is visible, and never falls back to
 the legacy connector. Future public schema changes require another explicit connector identity.
 Repository DEV mode uses `Codex Native2 DEV` so the same ChatGPT account can keep both production
 and development connectors installed without renaming, refreshing, or deleting either one.
+
+Settings fixes only the `Codex ` prefix and edits the rest of the selected mode's name: `Native2`
+by default in Automatic, `Zero Risk` in manual mode, and `Native2 DEV` in Automatic DEV. Mode names
+are stored independently and must differ. Setup preserves them across upgrades and mode changes.
+A name change uses the existing setup transaction, rejects active work, and clears MCP verification
+only after success. The user must create a new plugin with that exact name. Renaming a display
+label does not itself replace a remote connector's cached schema; legacy connectors are still never reused.
 
 ## Browser lifecycle
 
@@ -126,9 +132,10 @@ the installed catalog, and requires a Codex restart. Zero Risk never reads or mu
 For a new ChatGPT chat the adapter provides the complete compiled prompt; for an exactly retained
 chat it also provides an incremental prompt containing only the Codex suffix after the last assistant
 reply. The Launcher chooses between those two prompts from its own retained-tab ownership and writes
-the selected text to the system clipboard. The user has thirty seconds to paste, select the visible
+the selected text to the system clipboard. The user has sixty seconds to paste, select the visible
 ChatGPT model, effort, and Zero Risk connector, send, and confirm Sent; a manual compaction handoff
-allows two minutes. Sent ends that confirmation deadline. Waiting for the first MCP bind is part of
+allows two minutes. Copying the prompt again restarts this confirmation timer. Sent ends that
+confirmation deadline; the prompt remains available to copy until the plugin starts. Waiting for the first MCP bind is part of
 the live turn, which remains subject to explicit cancellation and runtime-owner cleanup.
 The pasted task carries one opaque `request_id` for routing concurrent requests. Start/completion
 sequencing lives in the Zero Risk MCP server metadata, not in user-authored imperative text; the

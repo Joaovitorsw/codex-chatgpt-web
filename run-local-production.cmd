@@ -45,6 +45,17 @@ if not exist "node_modules" (
     exit /b 1
   )
 )
+if not exist "launcher\node_modules\vite\package.json" (
+  echo Dependencias do launcher ausentes. Instalando com Bun...
+  "%CODEX_WEB_GPT_BUN%" install --cwd launcher
+  if errorlevel 1 (
+    echo.
+    echo [ERRO] A instalacao das dependencias do launcher falhou.
+    echo Verifique a conexao, proxy ou antivirus e copie a mensagem acima.
+    pause
+    exit /b 1
+  )
+)
 echo Starting Codex Web GPT from local source with the production profile...
 "%CODEX_WEB_GPT_BUN%" run launcher:dev
 set "EXIT_CODE=%ERRORLEVEL%"

@@ -1064,7 +1064,7 @@ test("failed terminal migration verifies the unchanged previous runtime instead 
   ]);
 });
 
-test("failed fresh-conversation setting restores every mutable setup file before restarting the previous runtime", async () => {
+test("failed fresh-conversation setting restores every mutable setup file before restarting the previous runtime", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-setup-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
@@ -1100,7 +1100,16 @@ test("failed fresh-conversation setting restores every mutable setup file before
   fs.writeFileSync(profilePath, "old profile\n", { mode: 0o600 });
   fs.mkdirSync(sharedDirectory, { mode: 0o750 });
   fs.writeFileSync(sharedConfigPath, "old codex config\n", { mode: 0o640 });
-  fs.symlinkSync(sharedConfigPath, codexConfigPath);
+  try {
+    fs.symlinkSync(sharedConfigPath, codexConfigPath);
+  } catch (error) {
+    if (process.platform === "win32" && error?.code === "EPERM") {
+      fs.rmSync(root, { recursive: true, force: true });
+      t.skip("Windows symbolic-link privilege is unavailable");
+      return;
+    }
+    throw error;
+  }
   const linkTarget = fs.readlinkSync(codexConfigPath);
   const linkInode = fs.lstatSync(codexConfigPath).ino;
   const directoryMode = fs.statSync(sharedDirectory).mode & 0o777;
@@ -1377,4 +1386,43 @@ test("fresh-conversation preference uses production and DEV setup without forcin
     await assert.rejects(() => fixture.host.setFreshConversationPerTurn("true"), /boolean/);
     assert.equal(fixture.invocation(), undefined);
   }
+});
+
+
+for (const development of [false, true]) test(`plugin renaming uses transactional ${development ? "DEV" : "production"} setup without changing credentials or refreshing models`, async () => {
+  const factory = development ? devHostFor : hostFor;
+  const fixture = factory({ mode: "full", appName: "Codex Work", automaticAppName: "Codex Work", manualAppName: "Codex Zero Risk" });
+  assert.equal(fixture.host.setupConnectorName("manual"), "Codex Zero Risk");
+  assert.equal(fixture.host.setupConnectorName("automatic"), "Codex Work");
+  assert.equal(fixture.host.browserConnectorName(), "Codex Work");
+  assert.equal(fixture.host.mcpConnectorName(), "Codex Work");
+  assert.deepEqual(await fixture.host.setConnectorNameSuffix("Work"), { changed: false });
+  assert.equal(fixture.invocation(), undefined);
+  await fixture.host.setConnectorNameSuffix("Home");
+  const args = fixture.invocation().args;
+  assert.equal(args[args.indexOf("--connector-name-suffix") + 1], "Home");
+  for (const unwanted of ["--refresh-account-capabilities", "--tunnel-id", "--runtime-key-file"]) assert.equal(args.includes(unwanted), false);
+  await assert.rejects(fixture.host.setConnectorNameSuffix(""), /part after Codex/);
+  await assert.rejects(fixture.host.setConnectorNameSuffix("Zero Risk"), /must differ/);
+  await assert.rejects(fixture.host.setConnectorNameSuffix("Native"), /retired/);
+  await assert.rejects(fixture.host.setConnectorNameSuffix("bad\nname"), /part after Codex/);
+});
+
+test("renaming rolls back the saved name if the new runtime fails", async () => {
+  const config = { mode: "full", browserHost: "launcher", appName: "Codex Old", automaticAppName: "Codex Old" };
+  const fixture = hostFor(config);
+  const host = fixture.host;
+  host.runSetup = RuntimeHost.prototype.runSetup;
+  host.captureSetupCheckpoint = () => structuredClone(config);
+  host.setupCheckpointChanged = () => true;
+  host.restoreSetupCheckpoint = checkpoint => { Object.assign(config, checkpoint); };
+  host.restorePreviousRuntime = async () => {};
+  host.run = async (_name, args) => {
+    if (!args.includes("--preflight-only")) Object.assign(config, { automaticAppName: "Codex New", appName: "Codex New" });
+    return { stdout: "" };
+  };
+  host.supervisor.startIfConfigured = async () => ({ status: "failed", detail: "fixture failure" });
+  await assert.rejects(host.setConnectorNameSuffix("New"), /fixture failure/);
+  assert.equal(config.automaticAppName, "Codex Old");
+  assert.equal(config.appName, "Codex Old");
 });

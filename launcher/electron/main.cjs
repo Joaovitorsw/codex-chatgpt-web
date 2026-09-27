@@ -228,8 +228,8 @@ function trayImage() {
   if (process.platform !== "darwin") {
     return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.1 3.4h6.4l3.4 3.4v7.8H7.5l-3.4-3.4V3.4Z" fill="none" stroke="white" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 7 2-2 2 2M7 11l2 2 2-2" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
+  const image = nativeImage.createFromPath(path.join(__dirname, "..", "assets", "trayTemplate.png"));
+  if (image.isEmpty()) throw new Error("The macOS menu-bar icon is missing or invalid");
   image.setTemplateImage(true);
   return image;
 }
@@ -263,6 +263,10 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
+    restore: "恢复",
+    restoreTitle: "恢复原生 Codex",
+    restoreMessage: "备份当前 Codex 配置并恢复原生 Codex 路由？",
+    restoreDetail: "不会停止活动任务或启动器运行时。身份验证和无关设置会保留；之后请重启一次 Codex。",
     retry: "重试",
     startupTitle: "Codex Web GPT 无法启动",
     startupDetail: "重试会重新启动应用，不会更改已保存的设置或 ChatGPT 登录配置。",
@@ -278,6 +282,10 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "從 Codex 中移除 ChatGPT Web 模型並還原先前的模型路由？",
     removeDetail: "啟動器中的 ChatGPT 登入設定檔會保留。Codex 需要重新啟動一次。",
+    restore: "還原",
+    restoreTitle: "還原原生 Codex",
+    restoreMessage: "備份目前的 Codex 設定並還原原生 Codex 路由？",
+    restoreDetail: "不會停止執行中的任務或啟動器執行階段。驗證和無關設定會保留；之後請重新啟動 Codex 一次。",
     retry: "重試",
     startupTitle: "Codex Web GPT 無法啟動",
     startupDetail: "重試會重新啟動應用程式，不會變更已儲存的設定或 ChatGPT 登入設定檔。",
@@ -293,6 +301,10 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Codex Web GPT を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
+    restore: "復元",
+    restoreTitle: "ネイティブ Codex を復元",
+    restoreMessage: "現在の Codex 設定をバックアップし、ネイティブ Codex のルートを復元しますか？",
+    restoreDetail: "実行中のタスクやランチャーのランタイムは停止しません。認証と無関係な設定は保持されます。その後 Codex を一度再起動してください。",
     retry: "再試行",
     startupTitle: "Codex Web GPT を起動できませんでした",
     startupDetail: "保存済みの設定と ChatGPT プロファイルを変更せずに、ランチャーを再起動します。",
@@ -308,6 +320,10 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Codex Web GPT 제거",
     removeMessage: "Codex에서 ChatGPT Web 모델을 제거하고 이전 모델 경로를 복원할까요?",
     removeDetail: "런처의 ChatGPT 로그인 프로필은 유지됩니다. Codex를 한 번 다시 시작해야 합니다.",
+    restore: "복원",
+    restoreTitle: "네이티브 Codex 복원",
+    restoreMessage: "현재 Codex 구성을 백업하고 네이티브 Codex 경로를 복원할까요?",
+    restoreDetail: "활성 작업이나 런처 런타임은 중지되지 않습니다. 인증과 관련 없는 설정은 유지되며, 이후 Codex를 한 번 다시 시작하세요.",
     retry: "다시 시도",
     startupTitle: "Codex Web GPT를 시작할 수 없습니다",
     startupDetail: "저장된 설정이나 ChatGPT 프로필을 변경하지 않고 런처를 다시 시작합니다.",
@@ -679,7 +695,7 @@ function registerIpc({ logger, stateStore }) {
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
       automatic: runtimeHost.setupConnectorName(),
-      manual: "Codex Zero Risk",
+      manual: runtimeHost.setupConnectorName("manual"),
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
     logs: logger.recent(),
@@ -1047,6 +1063,20 @@ function registerIpc({ logger, stateStore }) {
     if (interactionModeChange) send("launcher:browser-state", browserHost.snapshot());
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
     return { ok: true, stdout: result.stdout };
+  });
+  handle("launcher:connector-name", async (_event, suffix) => {
+    if (browserHost.activeTraceId || browserHost.currentOperation()) {
+      throw new Error("Finish active ChatGPT turns before changing the plugin name");
+    }
+    const result = await runtimeHost.setConnectorNameSuffix(suffix);
+    if (!result.changed) return stateStore.read();
+    const state = stateStore.update({ mcpSetupComplete: false, mcpGuideStep: 2 });
+    send("launcher:connector-names-changed", {
+      connectorName: runtimeHost.browserConnectorName(),
+      connectorNames: { automatic: runtimeHost.setupConnectorName(), manual: runtimeHost.setupConnectorName("manual") },
+    });
+    send("launcher:state-changed", state);
+    return state;
   });
   handle("launcher:set-mcp-step", (_event, step) => {
     if (!Number.isInteger(step) || step < 0 || step > 2) throw new Error("Invalid MCP guide step");

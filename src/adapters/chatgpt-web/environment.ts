@@ -256,12 +256,43 @@ export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unkn
   // A pre-turn compact may summarize an earlier user message before native Codex continues
   // under its new turn id without adding a new human message. Accept only our exact completed
   // checkpoint; an arbitrary older prompt is still not a new instruction or a valid handoff.
-  if (revision.turnId !== undefined && revision.turnId !== turnId
-    && (priorChatGptAbortedTurnIds(parsed).includes(revision.turnId)
-      || !isAcceptedCompactionContinuation(parsed, identity, revision))) {
-    throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
+  if (revision.turnId !== undefined && revision.turnId !== turnId) {
+    const acceptedCompaction = isAcceptedCompactionContinuation(parsed, identity, revision);
+    if (priorChatGptAbortedTurnIds(parsed).includes(revision.turnId)
+      || (!acceptedCompaction && !isTerminalDirectUserRevision(parsed, revision))) {
+      throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
+    }
   }
   return revision.content;
+}
+
+/**
+ * Desktop can reuse the visible current user item while assigning a fresh native
+ * turn_id after Retry/Resume.  The request-level metadata owns the execution
+ * identity; accepting only that final, direct user item avoids treating a stale
+ * delegation or a historical tool result as the new instruction.
+ */
+function isTerminalDirectUserRevision(
+  parsed: CodexParsedRequest,
+  revision: ChatGptTurnUserRevision,
+): boolean {
+  if (!revision.itemId) return false;
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const metadata = clientTurnMetadata(parsed);
+  const index = input.findLastIndex(value => record(value)?.id === revision.itemId);
+  if (index < 0) return false;
+  const item = record(input[index]);
+  if (item?.type !== "message" || item.role !== "user" || !isNativeInstruction(item, metadata)) return false;
+  // The last direct user message is the sole candidate for this retry. A later
+  // message, agent instruction or tool result makes it historical content, not
+  // a current user message whose provenance was simply retained by the desktop.
+  return !input.slice(index + 1).some(value => {
+    const later = record(value);
+    return later?.type === "message"
+      || later?.type === "agent_message"
+      || later?.type === "function_call_output";
+  });
 }
 
 function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnId?: string): ChatGptTurnUserRevision | undefined {

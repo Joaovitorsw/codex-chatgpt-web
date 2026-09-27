@@ -2807,13 +2807,28 @@ export class ChatGptBrowserWorker {
         }
       }
       const items = activation.menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR).filter({ visible: true });
-      if (await items.count() < 2) {
+      const itemCount = await items.count();
+      if (itemCount < 2) {
         await page.keyboard.press("Escape").catch(() => {});
         throw chatGptModelControlUnavailableAdapterError(
           "ChatGPT's compact model picker did not expose its Thinking option",
         );
       }
-      const target = items.nth(mode.effort === "low" ? 0 : 1);
+      // The compact picker has no distinct Medium/High control: its first row is
+      // Instant and its final enabled row is Thinking.  Do not assume that
+      // unrelated model-family rows are inserted at a particular ordinal.
+      const enabledItems: Locator[] = [];
+      for (let index = 0; index < itemCount; index += 1) {
+        const item = items.nth(index);
+        if (await item.getAttribute("aria-disabled") !== "true") enabledItems.push(item);
+      }
+      const target = mode.effort === "low" ? enabledItems[0] : enabledItems.at(-1);
+      if (!target) {
+        await page.keyboard.press("Escape").catch(() => {});
+        throw chatGptModelControlUnavailableAdapterError(
+          "ChatGPT's compact model picker has no enabled effort option",
+        );
+      }
       if (await target.getAttribute("aria-checked") !== "true") {
         await target.click({ force: true, timeout: 5_000 });
       }
@@ -2995,12 +3010,14 @@ export class ChatGptBrowserWorker {
     const composer = await this.activeComposer(page);
     const controls = composer.locator("xpath=ancestor::form[1]")
       .locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
-    if (page.url() !== mode.selection.url || !mode.selection.label || await controls.count() !== 1) {
+    if (page.url() !== mode.selection.url || await controls.count() < 1) {
       throw chatGptModelControlUnavailableAdapterError("ChatGPT changed the selected model's browser surface before submission");
     }
-    const control = controls.first();
-    if ((await control.innerText()).trim() !== mode.selection.label
-      || await control.getAttribute("aria-expanded") !== "false"
+    // ChatGPT may remount the trigger after a selection and reduce its label to a
+    // generic "Thinking"/localized equivalent.  The label is presentation, not
+    // selection evidence; the reopened picker below is the semantic verification.
+    const control = controls.last();
+    if (await control.getAttribute("aria-expanded") !== "false"
       || !await composer.isEditable()) {
       throw chatGptModelControlUnavailableAdapterError(
         "ChatGPT did not retain the selected effort in its ready composer; the message was not submitted",
@@ -3021,7 +3038,7 @@ export class ChatGptBrowserWorker {
       } finally {
         await page.keyboard.press("Escape");
       }
-      if (page.url() !== mode.selection.url || (await control.innerText()).trim() !== mode.selection.label
+      if (page.url() !== mode.selection.url
         || await control.getAttribute("aria-expanded") !== "false" || !await composer.isEditable()) {
         throw chatGptModelControlUnavailableAdapterError("ChatGPT changed the model while checking its family before submission");
       }

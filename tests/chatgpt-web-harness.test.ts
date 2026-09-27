@@ -334,13 +334,13 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(() => chatGptTurnExecutionKey(request)).not.toThrow();
   });
 
-  test("rejects canonical environment and user revision when an item conflicts with the current turn", () => {
+  test("uses request-level native identity when the terminal direct user message retains a stale turn id", () => {
     const request = canonicalCurrentWireRequest(environmentXml);
     const raw = request._rawBody as { input: Array<Record<string, unknown>> };
     raw.input[2]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_other" };
 
     expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
-    expect(() => chatGptTurnExecutionKey(request)).toThrow("conflicts with native Codex turn_id");
+    expect(() => chatGptTurnExecutionKey(request)).not.toThrow();
   });
 
   test("starts a tool-capable browser turn across a same-turn developer gap", async () => {

@@ -306,7 +306,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; transientSliderReads?: number; loseSelectionOnClose?: boolean; compactLabel?: boolean; power?: boolean; menuOwned?: boolean; proOption?: boolean; proDisabled?: boolean; disabled?: string; staleAttributeMax?: string; maxAfterClose?: string; locksAfterClose?: Array<string | null> } = {}) {
+function reasoningPicker(options: { max?: string; locks?: Array<string | null>; delay?: number; missing?: boolean; transientSliderReads?: number; loseSelectionOnClose?: boolean; compactLabel?: boolean; genericClosedLabel?: boolean; power?: boolean; menuOwned?: boolean; proOption?: boolean; proDisabled?: boolean; disabled?: string; staleAttributeMax?: string; maxAfterClose?: string; locksAfterClose?: Array<string | null> } = {}) {
   let value = 0;
   let opened = true;
   let closedOnce = false;
@@ -367,7 +367,7 @@ function reasoningPicker(options: { max?: string; locks?: Array<string | null>; 
     first() { return this; }, filter() { return this; }, last() { return this; },
     count: async () => 1, waitFor: async () => {}, isVisible: async () => true,
     click: async () => { opened = true; },
-    innerText: async () => opened ? "Thinking effort" : selectedPro ? "Pro" : ["Instant", "Medium", "High", "Extra High", "Pro"][value]!,
+    innerText: async () => opened || options.genericClosedLabel ? "Thinking effort" : selectedPro ? "Pro" : ["Instant", "Medium", "High", "Extra High", "Pro"][value]!,
     getAttribute: async (name: string) => name === "aria-expanded" ? String(opened)
       : name === "aria-label" && options.compactLabel ? "Select ChatGPT model" : null,
   };
@@ -567,6 +567,18 @@ test("legacy five-step Pro selection verifies the persisted hidden slider throug
     expect(fixture.clicks).toEqual([4]);
     expect(fixture.value()).toBe(loseSelectionOnClose ? 0 : 4);
   }
+});
+
+test("a generic Thinking trigger still submits a selected non-Extra-High effort", async () => {
+  const fixture = reasoningPicker({ genericClosedLabel: true });
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    activeComposer: async () => fixture.composer,
+  }) as { selectModelAndEffort(...args: unknown[]): Promise<{ selection: { label: string } }> };
+  const selected = await worker.selectModelAndEffort(fixture.page, "gpt-5.6-sol", "high", {
+    localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  });
+  expect(selected.selection.label).toBe("Thinking effort");
+  expect(fixture.clicks).toEqual([2]);
 });
 
 test("current separate Pro row selects and persists GPT-6 without waiting for a fifth slider tick", async () => {

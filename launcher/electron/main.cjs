@@ -34,8 +34,7 @@ const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
-const { runtimeBundlePaths, runtimeInvocation } = require("./runtime-command.cjs");
-const { startBridgeRouteFailsafe } = require("./bridge-route-failsafe.cjs");
+const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
 const {
   createStateStore,
@@ -116,7 +115,6 @@ let updateController = null;
 let limitsController = null;
 let pendingPreferenceTimer = null;
 let applyingPendingFreshConversation = false;
-let bridgeRouteFailsafe = null;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -1269,7 +1267,6 @@ async function requestQuit() {
     // active. Restore the user's previous route before stopping that bridge so an
     // intentional launcher exit cannot strand existing Codex tasks in reconnect loops.
     await runtimeHost?.restoreBridgeRoute("launcher-quit");
-    bridgeRouteFailsafe?.disarm();
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     if (pendingPreferenceTimer) clearInterval(pendingPreferenceTimer);
     pendingPreferenceTimer = null;
@@ -1455,10 +1452,6 @@ async function start() {
     publishOperation,
     supervisor: runtimeSupervisor,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
-  });
-  bridgeRouteFailsafe = startBridgeRouteFailsafe({
-    leasePath: path.join(launcherUserData, "bridge-route-failsafe.json"),
-    logger,
   });
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
   if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
@@ -1646,9 +1639,6 @@ async function start() {
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
     const route = await runtimeHost.connectBridgeRoute();
-    bridgeRouteFailsafe.arm({
-      runtime: runtimeInvocation({ app, sourceRoot: SOURCE_ROOT, installedRuntimeRoot, args: [] }),
-    });
     return { ...runtime, bridgeRouteChanged: route.changed === true };
   })().then(async (runtime) => {
     if (runtime.status === "ready") {

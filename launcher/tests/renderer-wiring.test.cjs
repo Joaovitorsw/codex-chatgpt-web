@@ -47,17 +47,6 @@ test("closing the launcher never shuts down active browser infrastructure", () =
   assert.match(appSource, /setPreference\("keepRunningOnClose", checked\)/);
 });
 
-test("a crash-safe route guardian is armed only after the bridge connects and disarmed after native restoration", () => {
-  assert.match(electronMain, /const \{ startBridgeRouteFailsafe \} = require\("\.\/bridge-route-failsafe\.cjs"\);/);
-  assert.match(electronMain, /bridgeRouteFailsafe = startBridgeRouteFailsafe\(\{/);
-  const connected = electronMain.indexOf("const route = await runtimeHost.connectBridgeRoute();");
-  const armed = electronMain.indexOf("bridgeRouteFailsafe.arm({", connected);
-  assert.ok(connected >= 0 && armed > connected, "the guardian must not protect an inactive route");
-  const restored = electronMain.indexOf('await runtimeHost?.restoreBridgeRoute("launcher-quit");');
-  const disarmed = electronMain.indexOf("bridgeRouteFailsafe?.disarm();", restored);
-  assert.ok(restored >= 0 && disarmed > restored, "normal shutdown must restore native Codex before disarming the guardian");
-});
-
 test("hidden launcher keeps its parent renderer active for background ChatGPT turns", () => {
   const createMainWindow = electronMain.slice(
     electronMain.indexOf("function createWindow("),

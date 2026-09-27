@@ -3573,6 +3573,18 @@ export class ChatGptBrowserWorker {
       withBrowserTurnAbort(binding.locator.count(), signal),
     );
     if (boundCount > 1) {
+      const outermostCount = await withChatGptBrowserObservationTimeout(
+        withBrowserTurnAbort(binding.locator.evaluateAll(nodes => nodes.filter(node =>
+          !nodes.some(other => other !== node && other.contains(node)),
+        ).length), signal),
+      );
+      // ChatGPT can briefly retain an inner renderer node with the exact same
+      // turn identity. Its outer container is still unambiguous and must stay
+      // bound so the completed answer reaches Codex. Separate sibling matches
+      // remain a true ambiguity and still fail closed below.
+      if (outermostCount === 1) {
+        return { ...binding, locator: binding.locator.first() };
+      }
       throw new Error(`ChatGPT exposed ${boundCount} DOM nodes for the bound assistant turn`);
     }
     if (boundCount === 1) return binding;

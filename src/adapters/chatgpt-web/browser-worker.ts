@@ -3339,35 +3339,36 @@ export class ChatGptBrowserWorker {
   private async preResponseActivityText(
     page: Page,
     _submittedText?: string,
-    initialTurnIdentities: readonly string[] = [],
+    _initialTurnIdentities: readonly string[] = [],
   ): Promise<string> {
-    return page.evaluate(knownIdentities => {
+    return page.evaluate(stopButtonSelector => {
       const text = (element: Element | null): string => (element as HTMLElement | null)?.innerText
         ?.replace(/\s+/g, " ")
         .trim() ?? "";
-      const known = new Set(knownIdentities);
-      const identity = (element: Element): string | null => element.getAttribute("data-turn-key")
-        ?? element.getAttribute("data-content-search-turn-key")
-        ?? element.getAttribute("data-chatgpt-search-unit-key")
-        ?? element.closest("[data-turn-key], [data-content-search-turn-key], [data-chatgpt-search-unit-key]")
-          ?.getAttribute("data-turn-key")
-        ?? element.closest("[data-turn-key], [data-content-search-turn-key], [data-chatgpt-search-unit-key]")
-          ?.getAttribute("data-content-search-turn-key")
-        ?? element.closest("[data-turn-key], [data-content-search-turn-key], [data-chatgpt-search-unit-key]")
-          ?.getAttribute("data-chatgpt-search-unit-key")
-        ?? null;
-      // A current turn is the only eligible source. This prevents a retained conversation's last
-      // completed answer from being replayed as fresh progress while the new Activity panel mounts.
-      const currentTurn = [...document.querySelectorAll("[data-turn-key], [data-content-search-turn-key]")]
-        .filter(element => {
-          const value = identity(element);
-          return value !== null && !known.has(value);
-        })
-        .at(-1);
+      const visible = (element: Element): boolean => {
+        const style = globalThis.getComputedStyle(element as HTMLElement);
+        const rect = (element as HTMLElement).getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      // ChatGPT currently puts public Activity rows inside a `fallback-turn-*` subtree. That
+      // fallback identity can already exist in the submission baseline, so identity-based
+      // filtering suppresses the live task. A visible Stop control is a stronger, temporal
+      // boundary: it proves this is an in-progress response. Within that boundary, the last
+      // visible activity header is the current public action, not retained answer content.
+      if (![...document.querySelectorAll(stopButtonSelector)].some(visible)) return "";
+      const activityHeaders = [...document.querySelectorAll('[class*="group/activity-header"]')]
+        .filter(visible);
+      const latestActivity = activityHeaders.at(-1);
+      if (latestActivity) return text(latestActivity).slice(-4_000);
+      const currentTurn = [...document.querySelectorAll("[data-turn-key], [data-content-search-turn-key]")].at(-1);
       if (!currentTurn) return "";
       const roots = [
         ...currentTurn.querySelectorAll("[data-chatgpt-agent-turn-start]"),
         ...currentTurn.querySelectorAll("[data-streaming-response-status]"),
+        // Activity-first Codex responses render these public rows before an assistant search unit
+        // or role marker is attached. They are exact visible status labels such as “Inspected …”
+        // and are therefore safe to expose as native progress during submission confirmation.
+        ...currentTurn.querySelectorAll('[class*="group/activity-header"]'),
         ...currentTurn.querySelectorAll("[data-chatgpt-search-unit-key]:not(:has([data-user-message-bubble]))"),
         ...currentTurn.querySelectorAll("[data-content-search-unit-key]:not(:has([data-user-message-bubble]))"),
       ];
@@ -3376,7 +3377,7 @@ export class ChatGptBrowserWorker {
         && !/<codex_(?:context_json|transport_resume)>/i.test(candidate)
         && !/You are Codex,|Codex requested low response verbosity/i.test(candidate));
       return (safe.at(-1) ?? "").slice(-4_000);
-    }, [...initialTurnIdentities]).catch(() => "");
+    }, CHATGPT_STOP_BUTTON_SELECTOR).catch(() => "");
   }
 
   private async submissionDomState(
@@ -6416,6 +6417,13 @@ export class ChatGptBrowserWorker {
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
+
+        // Once the response binding exists, ChatGPT can continue adding public Activity rows
+        // without changing the assistant Markdown root. Keep polling that live surface here;
+        // otherwise only the first "Thinking" row reaches Codex and later "Inspected/Edited"
+        // steps are stranded until the final answer.
+        const liveActivity = await this.preResponseActivityText(page);
+        if (liveActivity) publishPreResponseActivity(liveActivity);
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         if (!snapshot.responsePresent || snapshot.completionActionVisible) {

@@ -118,6 +118,7 @@ test("browser controls and turn ownership remain locale agnostic on the pt-BR su
   expect(Array.from(document.querySelectorAll(CHATGPT_COMPLETION_ACTION_SELECTOR)).map(element => element.id))
     .toContain("feedback-pt");
   expect(CHATGPT_ASSISTANT_TURN_SELECTOR).toContain('[data-conversation-role="assistant"]');
+  expect(CHATGPT_ASSISTANT_TURN_SELECTOR).toContain('[class*="group/activity-header"]');
   expect(CHATGPT_USER_TURN_SELECTOR).toContain("[data-user-message-bubble]");
 });
 

@@ -97,6 +97,10 @@ export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]:not([data-turn-key] *)',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"]):not([data-turn-key] *)',
   '[data-turn-key]:has([data-conversation-role="assistant"], [data-chatgpt-agent-turn-start])',
+  // The current Activity renderer mounts public tool/progress rows before it creates either the
+  // assistant role marker or agent-turn-start sentinel. The activity header is contained by the
+  // current data-turn-key and is the stable structural signal observed in the live Web DOM.
+  '[data-turn-key]:has([class*="group/activity-header"])',
   '[data-turn-key]:has(button[aria-label="Regenerate response"])',
   '[data-turn-key]:not(:has([data-user-message-bubble]))',
   '[data-chatgpt-search-unit-key]:has(> [data-conversation-role="assistant"])',

@@ -622,12 +622,8 @@ export function chatGptReadOnlyContextWarning(
     message.role === "toolResult"
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
   );
-  // Browser-only is the supported default: the native Codex tool round-trip can
-  // otherwise leave a Web-model turn waiting indefinitely after ChatGPT has
-  // requested a local command. Do not suggest turning that unstable path back
-  // on as an ordinary recovery step.
   const browserOnlyGuidance = !capabilities.localToolsEnabled
-    ? "\n>\n> **Launcher policy:** local Codex tools are disabled for ChatGPT Web turns. Text, reasoning, images, and ChatGPT-native capabilities continue to work; use a native Codex model for local file or terminal changes."
+    ? "\n>\n> **Action:** Open `MCP` in `Codex Web GPT` and connect the `Full` harness to give the selected ChatGPT Web model access to local tools."
     : "";
   if (hasLocalEvidence) {
     return `> **Local tools unavailable**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify local files further. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;

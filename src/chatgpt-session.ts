@@ -58,7 +58,16 @@ export const CHATGPT_EFFORT_SLIDER_SELECTOR = [
   '[role="group"] [role="slider"]',
 ].join(", ");
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
-export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], form[data-chatgpt-composer] button[type="button"][aria-label="Stop"]';
+// `data-testid` is preferred, but the launcher must also recognize the localized
+// accessible action while ChatGPT is hydrating/remounting the composer.  Missing that
+// active-state proof lets a later native prompt race the still-running web response.
+export const CHATGPT_STOP_BUTTON_SELECTOR = [
+  '[data-testid="stop-button"]',
+  'form[data-chatgpt-composer] button[type="button"][aria-label="Stop"]',
+  'form[data-chatgpt-composer] button[type="button"][aria-label="Parar"]',
+  'button[aria-label*="Stop" i]',
+  'button[aria-label*="Parar" i]',
+].join(", ");
 export const CHATGPT_SEND_BUTTON_SELECTOR = [
   '[data-testid="send-button"]',
   '[data-testid="composer-submit-button"]',
@@ -91,6 +100,11 @@ export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
   '[data-turn-key]:has(button[aria-label="Regenerate response"])',
   '[data-turn-key]:not(:has([data-user-message-bubble]))',
   '[data-chatgpt-search-unit-key]:has(> [data-conversation-role="assistant"])',
+  // Activity-first turns may exist before ChatGPT has minted a data-turn-key. This selector is
+  // intentionally restricted to an assistant-shaped content-search turn that is not nested in a
+  // legacy turn. Recent Activity cards no longer mount data-chatgpt-agent-turn-start until after
+  // their public progress rows have rendered, so excluding user bubbles is the stable role proof.
+  '[data-content-search-turn-key]:not([data-turn-key] [data-content-search-turn-key]):not(:has([data-user-message-bubble]))',
 ].join(", ");
 export const CHATGPT_USER_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="user"]:not([data-turn-key] *)',

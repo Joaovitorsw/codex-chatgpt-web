@@ -3748,19 +3748,19 @@ test("rate-limit retries use bounded progressive cooldowns", () => {
 
 test("in-progress commentary streams stable prefix growth instead of staying hidden in Codex", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);
-  const initial = [{ kind: "commentary", text: "Vou elevar essa versão", complete: false }] as const;
+  const initial = [{ kind: "commentary", text: "Vou elevar essa versão para uma página", complete: false }] as const;
   expect(tracker.observe([...initial], false, 1_000)).toEqual([]);
   expect(tracker.observe([...initial], false, 1_100)).toEqual([
-    { kind: "commentary", text: "Vou elevar essa versão" },
+    { kind: "commentary", text: "Vou elevar essa versão para uma página" },
   ]);
   const grown = [{
     kind: "commentary",
-    text: "Vou elevar essa versão para uma landing page profissional",
+    text: "Vou elevar essa versão para uma página de landing profissional",
     complete: false,
   }] as const;
   expect(tracker.observe([...grown], false, 1_150)).toEqual([]);
   expect(tracker.observe([...grown], false, 1_250)).toEqual([
-    { kind: "commentary", text: " para uma landing page profissional", continuation: true },
+    { kind: "commentary", text: " de landing profissional", continuation: true },
   ]);
 });
 
@@ -4015,6 +4015,10 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   expect(empty.update(terminal, 1_000)).toBeUndefined();
   expect(empty.update(terminal, 1_500)).toContain("completed without a final answer");
 
+  const imageOnly = new ChatGptTurnDomHealthTracker(1_000, 500);
+  expect(imageOnly.update({ ...terminal, hasFinalMedia: true }, 1_000)).toBeUndefined();
+  expect(imageOnly.update({ ...terminal, hasFinalMedia: true }, 9_000)).toBeUndefined();
+
   const missingCompletionAction = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
   const completedWithoutMarker = {
     ...terminal,
@@ -4205,6 +4209,28 @@ test("an accepted turn survives internal observation faults instead of being tor
 
   // Chain-of-thought containment is commentary regardless of document position.
   expect(worker).toContain('candidate.closest(\'[data-testid^="cot-v5"]\') !== null');
+});
+
+test("in-progress commentary does not publish an unstable word fragment as a Codex item", () => {
+  const tracker = new ChatGptVisibleTraceTracker(0, 0);
+  expect(tracker.observe([{
+    kind: "commentary", text: "A inspe", complete: false,
+  }], false, 1_000)).toEqual([]);
+  expect(tracker.observe([{
+    kind: "commentary", text: "A inspeção do projeto começou.", complete: false,
+  }], false, 1_100)).toEqual([{
+    kind: "commentary", text: "A inspeção do projeto começou.",
+  }]);
+});
+
+test("completed answer Markdown is not mirrored into commentary before final delivery", () => {
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+
+  // A generic root may be useful progress while mutable, but must stop flowing as commentary
+  // the moment the completion action makes it the final response payload.
+  expect(worker).toContain("const liveTraceBlocks = snapshot.completionActionVisible");
+  expect(worker).toContain('? snapshot.traceBlocks');
+  expect(worker).toContain('kind: "commentary" as const, complete: false');
 });
 
 test("stale MCP progress stops suppressing DOM health without penalising long active turns", () => {
@@ -4408,6 +4434,11 @@ test("current activity Markdown without a search-unit wrapper stays eligible for
   const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
   expect(worker).toContain("if (!unit) return true;");
   expect(worker).toContain('candidate.matches(".rich-text-user-turn")');
+  // The Activity marker's parent is the one card; its grandparent is the conversation column.
+  // Pulling the latter into a live trace mixes historic prose into the active turn and starves
+  // native Codex of stable deltas.
+  expect(worker).toContain(".map(marker => marker.parentElement!)");
+  expect(worker).not.toContain("marker.parentElement?.parentElement");
 });
 
 test("embedded chart hydration cannot replace Markdown answer content with renderer UI", () => {
@@ -4642,6 +4673,33 @@ test("a rendered final image settles a completed tool turn without a text-only r
   expect(tracker.update(imageResult, 1_000)).toBeFalse();
   expect(tracker.update(imageResult, 2_499)).toBeFalse();
   expect(tracker.update(imageResult, 2_500)).toBeTrue();
+});
+
+test("DOM health does not reject a completed image card without the text completion action", () => {
+  const health = new ChatGptTurnDomHealthTracker(1_000, 500, 500);
+  const imageResult = {
+    responsePresent: true,
+    running: false,
+    currentText: "Imagem da maçã",
+    completionActionVisible: false,
+    hasFinalMedia: true,
+  };
+  expect(health.update(imageResult, 1_000)).toBeUndefined();
+  expect(health.update(imageResult, 10_000)).toBeUndefined();
+});
+
+test("final media completion ignores harmless post-render DOM churn", () => {
+  const tracker = new ChatGptCompletionTracker(1_000, 60_000, 5_000);
+  const base = {
+    responsePresent: true,
+    running: false,
+    currentText: "Imagem pronta.",
+    completionActionVisible: true,
+    hasFinalMedia: true,
+    externalToolCallsInFlight: false,
+  };
+  expect(tracker.update({ ...base, currentHtml: '<img src="apple.png" data-state="loading">' }, 1_000)).toBeFalse();
+  expect(tracker.update({ ...base, currentHtml: '<img src="apple.png" data-state="decoded">' }, 2_000)).toBeTrue();
 });
 
 test("a future progress timestamp is not treated as liveness", () => {

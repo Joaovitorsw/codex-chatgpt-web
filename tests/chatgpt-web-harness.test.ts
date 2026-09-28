@@ -929,7 +929,7 @@ describe("ChatGPT outer-native harness v4", () => {
     sessions.clear();
   });
 
-  test("steering retires a browser waiting for an old tool result and rejects late older requests", async () => {
+  test("queues a newer native instruction until the active browser owner settles", async () => {
     const sessions = new ChatGptTurnSessions();
     const original = rawWireRequest(environmentXml);
     const originalInput = (original._rawBody as { input: Array<Record<string, unknown>> }).input;
@@ -942,42 +942,38 @@ describe("ChatGPT outer-native harness v4", () => {
     const oldKey = chatGptTurnExecutionKey(original);
     const newKey = chatGptTurnExecutionKey(steered);
     expect(newKey).not.toBe(oldKey);
-    let rejectOld!: (reason: Error) => void;
+    let finishOld!: (text: string) => void;
     let cleanup!: () => void;
     const cancellations: Error[] = [];
     sessions.getOrCreate(oldKey, () => ({
       mode: "read-only",
-      browser: new Promise<string>((_, reject) => { rejectOld = reject; }),
+      browser: new Promise<string>(resolve => { finishOld = resolve; }),
       physicalSettlement: new Promise<void>(resolve => { cleanup = resolve; }),
       trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(),
-      cancel: reason => { if (reason) { cancellations.push(reason); rejectOld(reason); } },
+      cancel: reason => { if (reason) cancellations.push(reason); },
     }), "old-trace", "thread", "native-turn", "native-thread", chatGptInstructionLineage(original).current);
     let starts = 0;
     let finishNew!: (text: string) => void;
+    let cleanupNew!: () => void;
     const replacement = () => {
       starts += 1;
       return { mode: "read-only" as const,
         browser: new Promise<string>(resolve => { finishNew = resolve; }),
-        physicalSettlement: new Promise<void>(() => {}),
+        physicalSettlement: new Promise<void>(resolve => { cleanupNew = resolve; }),
         trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), cancel: () => {} };
     };
     const next = sessions.getOrCreateAfterOwnerRetirement(newKey, "thread", replacement,
       "new-trace", undefined, "native-turn", "native-thread", chatGptInstructionLineage(steered));
-    expect(cancellations).toHaveLength(1);
+    await Bun.sleep(0);
+    expect(cancellations).toHaveLength(0);
     expect(starts).toBe(0);
-    expect(sessions.cancelledError("old-trace")).toMatchObject({ code: "client_cancelled" });
+    finishOld("old task completed");
     cleanup();
     const current = await next;
     expect(starts).toBe(1);
     expect(await sessions.getOrCreateAfterOwnerRetirement(newKey, "thread", replacement)).toBe(current);
-    await expect(sessions.getOrCreateAfterOwnerRetirement(oldKey, "thread", replacement))
-      .rejects.toMatchObject({ code: "client_cancelled" });
-    // An older request without a retained entry must not preempt the newer instruction either.
-    await expect(sessions.getOrCreateAfterOwnerRetirement("late-unknown-round", "thread", replacement,
-      "late-trace", undefined, "native-turn", "native-thread", chatGptInstructionLineage(original)))
-      .rejects.toMatchObject({ code: "client_cancelled" });
-    expect(starts).toBe(1);
     finishNew("done");
+    cleanupNew();
     await current.browserOutcome;
     sessions.clear();
   });
@@ -1455,7 +1451,7 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(replacementStarts).toBe(0);
     finishBrowser("stopped");
     expect(await Promise.all([firstRetirement, duplicateRetirement])).toEqual([true, true]);
-    expect(await original.browserOutcome).toEqual({ type: "final", answer: "stopped" });
+    expect(await original.browserOutcome).toEqual({ type: "final", answer: "stopped", mediaUrls: [] });
     expect(await replacement).not.toBe(original);
     expect(replacementStarts).toBe(1);
     sessions.clear();
@@ -2407,7 +2403,8 @@ describe("ChatGPT outer-native harness v4", () => {
       await adapter.runTurn!(firstRequest, { headers: new Headers() }, event => firstEvents.push(event));
       const callStart = firstEvents.find((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start");
       expect(callStart?.name).toBe("exec_command");
-      expect(firstEvents.filter(event => event.type === "assistant_boundary")).toHaveLength(2);
+      // The native tool card is a distinct visual block from the preceding Web progress prose.
+      expect(firstEvents.filter(event => event.type === "assistant_boundary")).toHaveLength(3);
       expect(firstEvents.filter(event => event.type === "thinking_delta")).toEqual([
         { type: "thinking_delta", thinking: "Mapped the repository surface" },
         { type: "thinking_delta", thinking: "Inspected the working directory" },
@@ -2419,8 +2416,12 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(Number.isFinite(firstDone.usage?.outputTokens)).toBe(true);
       const firstResponse = buildResponseJSON(firstEvents, "gpt-5.6-sol") as { output: Array<Record<string, unknown>>; usage: { total_tokens: number } };
       expect(firstResponse.usage.total_tokens).toBeGreaterThan(0);
-      expect(firstResponse.output.map(item => item.type)).toEqual(["reasoning", "reasoning", "function_call"]);
+      expect(firstResponse.output.map(item => item.type)).toEqual(["reasoning", "reasoning", "message", "function_call"]);
       expect(firstResponse.output[2]).toMatchObject({
+        type: "message",
+        role: "assistant",
+      });
+      expect(firstResponse.output[3]).toMatchObject({
         type: "function_call",
         call_id: callStart!.id,
         name: "exec_command",

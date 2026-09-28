@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { resolve } from "node:path";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import {
@@ -247,6 +248,20 @@ function brokerResult(message: CodexToolResultMessage): BrokerToolResult {
 
 function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
   for (const request of requests) {
+    // ChatGPT can execute an MCP call before it has rendered any public planning prose. Give
+    // Codex a compact, truthful progress milestone in that gap; the native tool card supplies
+    // the authoritative arguments and result immediately after this line.
+    const [namespace, name] = request.wireName.split("__", 2);
+    const label = name ?? namespace;
+    // A tool boundary is semantically different from the preceding public ChatGPT prose.
+    // Without it Codex appends "Executando ..." to the final word of that prose, hiding the
+    // gray action/card transition that remains visibly separate in the ChatGPT Activity UI.
+    emit({ type: "assistant_boundary" });
+    emit({
+      type: "text_delta",
+      text: `Executando ${namespace && name ? `${namespace} / ` : ""}${label}.`,
+      phase: "commentary",
+    });
     emit({ type: "tool_call_start", id: request.callId, name: request.wireName });
     emit({
       type: "tool_call_delta",
@@ -259,8 +274,99 @@ function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (
   emit({ type: "done", stopReason: "tool_use", endTurn: false, usage });
 }
 
-function emitBrowserCompletion(outcome: ChatGptBrowserOutcome, usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
+function existingThreadImageFallback(
+  parsed: CodexParsedRequest,
+  answer: string,
+  observedTurnText = answer,
+): string | undefined {
+  // Only recover an asset when ChatGPT explicitly emitted its image marker and the same native
+  // thread has exactly one already-generated local image. This is intentionally not a filesystem
+  // search: it cannot surface an unrelated asset from a different project or conversation.
+  // The image marker is sometimes exposed by ChatGPT as live commentary while the concise
+  // final answer contains only confirmation text.  Both sources belong to the same completed
+  // browser turn; inspecting both keeps the recovery scoped without guessing from user prose.
+  if (!/^!\s*imagem\b/im.test(observedTurnText)) return undefined;
+  const threadId = extractChatGptTurnIdentity(parsed).threadId;
+  const home = process.env.USERPROFILE?.trim();
+  if (!threadId || !home) return undefined;
+  const root = join(home, ".codex", "generated_images", threadId);
+  try {
+    const images = readdirSync(root)
+      .filter(name => /\.(?:png|jpe?g|webp|gif)$/i.test(name))
+      .map(name => join(root, name))
+      .filter(path => statSync(path).isFile())
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+    return images.length === 1 ? images[0] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A Windows path in Markdown can render on the desktop host yet is unreachable from a mobile
+ * Codex client.  Encode only the already-verified, thread-scoped local fallback so the bridge
+ * transports the same image to every client without starting a server or fetching remote media.
+ */
+function localImageBase64(path: string): string | undefined {
+  try {
+    const extension = path.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+    const mime = extension === "jpg" || extension === "jpeg"
+      ? "image/jpeg"
+      : extension === "webp"
+        ? "image/webp"
+        : extension === "gif"
+          ? "image/gif"
+          : extension === "png"
+            ? "image/png"
+            : undefined;
+    if (!mime) return undefined;
+    // Keep the MIME validation above even though Responses image-generation output carries raw
+    // Base64. It prevents a renamed non-image file from crossing the bridge as visual media.
+    return readFileSync(path).toString("base64");
+  } catch {
+    return undefined;
+  }
+}
+
+function emitBrowserCompletion(
+  outcome: ChatGptBrowserOutcome,
+  usage: CodexUsage,
+  emit: (event: AdapterEvent) => void,
+  existingLocalImage?: string,
+): void {
   if (outcome.type === "error") throw outcome.error;
+  // Preserve first-party media as a structured response event rather than leaving Codex to
+  // interpret an ordinary Markdown image link. Current image cards often omit the URL from
+  // their accessible Markdown, so use the browser-captured sources first.
+  const media = new Map<string, string>();
+  for (const url of outcome.mediaUrls ?? []) media.set(url, "Imagem gerada no ChatGPT");
+  for (const match of outcome.answer.matchAll(/!\[([^\]]*)\]\((https:\/\/[^)\s]+)\)/g)) {
+    const url = match[2]!;
+    media.set(url, match[1] || "Imagem gerada no ChatGPT");
+  }
+  for (const [url, alt] of media) {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      if (host === "chatgpt.com" || host.endsWith(".chatgpt.com") || host.endsWith(".openai.com") || host.endsWith(".oaiusercontent.com")) {
+        // `input_image` is a request-only Responses part. Emitting it as an assistant item made
+        // native Codex silently discard a valid ChatGPT image card. Markdown is the portable
+        // assistant-media representation understood by both the desktop client and the Web UI.
+        // Keep the source remote: do not download or re-host first-party media just to render it.
+        const label = (alt || "Imagem gerada pelo ChatGPT").replace(/[\[\]\n\r]/g, " ").trim();
+        emit({ type: "text_delta", text: `\n\n![${label}](${url})\n`, phase: "final_answer" });
+      }
+    } catch { /* untrusted Markdown URL: keep it as text only */ }
+  }
+  if (existingLocalImage) {
+    const result = localImageBase64(existingLocalImage);
+    if (result) {
+      // A generated-image output item is persisted by Codex but is not rendered by every native
+      // client when it originates from a routed provider.  Return the same verified bytes through
+      // the structured image-message channel used for native tool image results instead.  This is
+      // intentionally a data URL: a Windows file URL cannot reach the mobile Codex client.
+      emit({ type: "image_url", url: `data:image/png;base64,${result}`, alt: "Imagem já existente neste chat", phase: "final_answer" });
+    }
+  }
   emit({ type: "done", stopReason: "stop", endTurn: true, usage });
 }
 
@@ -312,7 +418,10 @@ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Erro
       status: 502,
       errorType: "server_error",
       code: ambiguous ? "chatgpt_submission_ambiguous" : "chatgpt_submitted_turn_failed",
-      retryable: false,
+      // The browser already proved an accepted ChatGPT submission. Treat a later observer/
+      // surface failure as recoverable: Codex can reconnect to the retained execution instead
+      // of turning a still-live ChatGPT response into a terminal native failure.
+      retryable: true,
       cause: normalized,
     },
   );
@@ -501,6 +610,7 @@ export function createChatGptWebAdapter(
     });
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
+    let finalMediaUrls: string[] = [];
     const observedCapabilityTokens = new Set<string>();
     const observeCapabilityRetirement = (
       turnToken: string,
@@ -538,7 +648,12 @@ export function createChatGptWebAdapter(
         // so Codex does not look frozen while the browser is actively generating.
         if (!parsed._compactionRequest && !submittedProgressAnnounced) {
           submittedProgressAnnounced = true;
-          trace.push({ kind: "reasoning", text: "Thinking" });
+          // This is transport state, not model reasoning. Emit it as commentary so Codex has a
+          // truthful visible milestone even when ChatGPT has not yet rendered public prose.
+          trace.push({
+            kind: "commentary",
+            text: "Solicitação enviada ao ChatGPT. Aguardando a primeira atualização.",
+          });
         }
         hooks.onCompactionProgress?.();
       },
@@ -693,6 +808,7 @@ export function createChatGptWebAdapter(
         physicalSettlement: browserTurn.physicalSettlement,
         trace,
         text,
+        get finalMediaUrls() { return finalMediaUrls; },
         usageInput: checkpointInput.parsed,
         manualControl: { surfaceNonce },
         ...(conversationKey ? { conversationKey } : {}),
@@ -734,6 +850,7 @@ export function createChatGptWebAdapter(
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
+        onFinalMediaUrls: urls => { finalMediaUrls = urls; },
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
@@ -745,6 +862,7 @@ export function createChatGptWebAdapter(
         physicalSettlement: browserTurn.physicalSettlement,
         trace,
         text,
+        get finalMediaUrls() { return finalMediaUrls; },
         usageInput: checkpointInput.parsed,
         submission,
         cancel: browserTurn.cancel,
@@ -799,6 +917,7 @@ export function createChatGptWebAdapter(
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
+      onFinalMediaUrls: urls => { finalMediaUrls = urls; },
       externalProgress,
       completionFence: {
         begin: async () => broker.beginCompletionFence(await token.promise),
@@ -823,6 +942,7 @@ export function createChatGptWebAdapter(
       physicalSettlement: browserTurn.physicalSettlement,
       trace,
       text,
+      get finalMediaUrls() { return finalMediaUrls; },
       usageInput: checkpointInput.parsed,
       ...(conversationKey ? { conversationKey } : {}),
       ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
@@ -1162,6 +1282,7 @@ export function createChatGptWebAdapter(
               { type: "final", answer: summary },
               estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
               emit,
+              existingThreadImageFallback(parsed, summary),
             );
             chatGptWebTurnRetryPolicy.clear(retryKey);
             return;
@@ -1190,11 +1311,15 @@ export function createChatGptWebAdapter(
           chatGptInstructionLineage(parsed),
         );
         const roundKey = chatGptTurnRoundKey(parsed);
+        let emittedCommentary = "";
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
           // Journal the complete synchronous event batch before touching the HTTP observer. If the
           // observer disconnects midway through emission, an exact reconnect can replay the entire
           // canonical batch instead of losing the already-drained tail.
           session.appendRoundEvents(roundKey, events);
+          for (const event of events) {
+            if (event.type === "text_delta" && event.phase === "commentary") emittedCommentary += event.text;
+          }
           for (const event of events) emit(event);
         };
         const emitRoundBatch = (
@@ -1209,16 +1334,33 @@ export function createChatGptWebAdapter(
           await session.runExclusive(async () => {
             const replay = session.roundEvents(roundKey);
             replayEvents(replay, emit);
+            emittedCommentary = replay
+              .filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => (
+                event.type === "text_delta" && event.phase === "commentary"
+              ))
+              .map(event => event.text)
+              .join("");
             let emittedFinalAnswer = replay
               .filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => (
                 event.type === "text_delta" && event.phase === "final_answer"
               ))
               .map(event => event.text)
               .join("");
+            const normalizedVisibleText = (value: string): string => value
+              .replace(/\\([*_`])/g, "$1")
+              .replace(/\s+/g, " ")
+              .trim();
             const emitFinalText = (deltas: string[]): void => {
               const visible = deltas.filter(delta => delta.length > 0);
               if (visible.length === 0 || bufferStructuredOutput) return;
               const authoritative = visible.join("");
+              // The browser can expose the completed answer as public commentary just before
+              // its terminal DOM state. Re-emitting byte-for-byte the same conclusion as a
+              // final assistant item makes Codex display duplicate paragraphs.
+              if (normalizedVisibleText(emittedCommentary) === normalizedVisibleText(authoritative)) {
+                emittedFinalAnswer = authoritative;
+                return;
+              }
               // A reconnect can replay an already journaled final item. Suppress only an exact
               // replay of the authoritative completed browser answer. A provisional Markdown
               // block or stale final-shaped fragment must never mask the actual terminal answer.
@@ -1280,6 +1422,7 @@ export function createChatGptWebAdapter(
                 settled,
                 estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
                 buffer,
+                existingThreadImageFallback(parsed, settled.answer, [...trace.map(event => event.text), settled.answer].join("\n")),
               ));
               session.completeRound(roundKey);
               chatGptWebTurnRetryPolicy.clear(retryKey);
@@ -1327,25 +1470,25 @@ export function createChatGptWebAdapter(
                 session.appendRoundReasoning(roundKey, trace.map(event => event.text));
                 emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
               };
-              const mirrorPendingTextAsThinking = () => {
+              const publishPendingTextAsCommentary = () => {
                 const deltas = session.runtime.text.drain().filter(delta => delta.length > 0);
                 if (deltas.length === 0) return;
-                // ChatGPT can write useful planning prose before opening its connector. Mirror those
-                // bytes as reasoning so Codex receives the same live feedback without turning the
-                // provisional DOM into a completed answer card. The authoritative full answer is
-                // still emitted once, after browser settlement and the broker completion fence.
+                // ChatGPT can write useful planning prose before opening its connector. Publish
+                // it as visible commentary immediately: users need the same live status they see
+                // in the Web tab, while the fenced authoritative answer remains a separate final
+                // item and is still emitted only after browser settlement.
                 roundReasoning.push(...deltas);
                 session.appendRoundReasoning(roundKey, deltas);
                 emitRoundBatch(buffer => {
                   buffer({ type: "assistant_boundary" });
-                  for (const text of deltas) buffer({ type: "thinking_delta", thinking: text });
+                  for (const text of deltas) buffer({ type: "text_delta", text, phase: "commentary" });
                 });
               };
               if (replay.length === 0 && !parsed._compactionRequest) {
                 emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
               }
               emitNewTrace(session.runtime.trace.drain());
-              mirrorPendingTextAsThinking();
+              publishPendingTextAsCommentary();
               const externalProgress = session.runtime.mode === "tools"
                 ? session.runtime.externalProgress
                 : undefined;
@@ -1381,7 +1524,7 @@ export function createChatGptWebAdapter(
                 // same broker transition. Drain once more so the accepted final answer cannot be
                 // overtaken by the terminal owner notification.
                 emitNewTrace(session.runtime.trace.drain());
-                mirrorPendingTextAsThinking();
+                publishPendingTextAsCommentary();
                 session.setFinalReasoning(roundReasoning);
                 session.setFinalEvents(session.roundEvents(roundKey));
                 if (turnToken) await broker.revoke(turnToken);
@@ -1399,6 +1542,7 @@ export function createChatGptWebAdapter(
                   completedOutcome,
                   estimateChatGptWebUsage(currentUsageInput(parsed), { answer: completedOutcome.answer, reasoning: roundReasoning }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
                   buffer,
+                  existingThreadImageFallback(parsed, completedOutcome.answer, [...roundReasoning, completedOutcome.answer].join("\n")),
                 ));
                 session.completeRound(roundKey);
                 chatGptWebTurnRetryPolicy.clear(retryKey);
@@ -1431,12 +1575,12 @@ export function createChatGptWebAdapter(
                   continue;
                 }
                 if (next.type === "text") {
-                  mirrorPendingTextAsThinking();
+                  publishPendingTextAsCommentary();
                   nextText = waitForText();
                   continue;
                 }
                 emitNewTrace(session.runtime.trace.drain());
-                mirrorPendingTextAsThinking();
+                publishPendingTextAsCommentary();
                 if (next.type === "browser") {
                   await finishBrowserOutcome(next.outcome);
                   return;

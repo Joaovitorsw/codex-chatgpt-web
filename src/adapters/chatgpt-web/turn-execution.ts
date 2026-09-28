@@ -37,7 +37,7 @@ function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
 }
 
 export type ChatGptBrowserOutcome =
-  | { type: "final"; answer: string }
+  | { type: "final"; answer: string; mediaUrls?: string[] }
   | { type: "error"; error: Error };
 
 export interface ChatGptTraceEvent {
@@ -57,6 +57,10 @@ export class ChatGptTraceFeed {
   private readonly queued: ChatGptTraceEvent[] = [];
   private readonly waiters = new Set<TraceWaiter>();
   private lastPushedSignature: string | undefined;
+  // DOM remounts can replay an older progress paragraph after unrelated status rows.  The
+  // immediate-signature guard alone cannot catch that, so retain every non-continuation block
+  // already delivered in this turn. Continuations remain append-only and are never coalesced.
+  private readonly deliveredStableSignatures = new Set<string>();
 
   push(event: ChatGptTraceEvent): void {
     const normalized = event.continuation ? event.text : event.text.trim();
@@ -64,7 +68,9 @@ export class ChatGptTraceFeed {
     const normalizedEvent = { ...event, text: normalized };
     const signature = `${normalizedEvent.kind}:${normalizedEvent.continuation === true ? "1" : "0"}:${normalizedEvent.text}`;
     if (signature === this.lastPushedSignature) return;
+    if (normalizedEvent.continuation !== true && this.deliveredStableSignatures.has(signature)) return;
     this.lastPushedSignature = signature;
+    if (normalizedEvent.continuation !== true) this.deliveredStableSignatures.add(signature);
     this.queued.push(normalizedEvent);
     const waiter = this.waiters.values().next().value as TraceWaiter | undefined;
     if (!waiter) return;
@@ -149,6 +155,8 @@ interface ChatGptTurnRuntimeBase {
   physicalSettlement: Promise<void>;
   trace: ChatGptTraceFeed;
   text: ChatGptTextFeed;
+  /** URLs captured from final first-party ChatGPT image cards. */
+  finalMediaUrls?: string[];
   usageInput?: CodexParsedRequest;
   conversationKey?: string;
   releaseRetainedConversation?: () => Promise<void>;
@@ -312,7 +320,7 @@ export class ChatGptTurnSession {
       },
     );
     this.browserOutcome = runtime.browser
-      .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
+      .then(answer => ({ type: "final", answer, mediaUrls: runtime.finalMediaUrls ?? [] }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
       .then(outcome => {
       this.settledBrowserOutcome = outcome;
@@ -575,22 +583,13 @@ export class ChatGptTurnSessions {
         ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
       ));
       if (activeOwner) {
-        const [ownedKey, ownedSession] = activeOwner;
-        if (ownedSession.isActive() && instruction && ownedSession.instruction
-          && instruction.current !== ownedSession.instruction) {
-          if (!instruction.predecessors.has(ownedSession.instruction)) throw chatGptTurnSupersededError();
-          // Native steering can return the old tool result and a new instruction in one request.
-          // Waiting for the old browser here deadlocks before that result can be consumed. Retire
-          // its capability and rebuild from the complete canonical history, including that result.
-          // Keep the old entry terminal so a delayed replay cannot restart superseded work.
-          const reason = chatGptTurnSupersededError();
-          ownedSession.supersededError = reason;
-          this.forgetConversationHead(ownedSession);
-          await awaitWithAbort(this.beginRetirement(ownedKey, ownedSession, reason), signal);
-          continue;
-        }
-        // A completed response may still be releasing its browser surface. Sequential work
-        // waits for that cleanup; preemption requires a proven newer canonical instruction.
+        const [, ownedSession] = activeOwner;
+        // One ChatGPT conversation has exactly one live browser turn. A later native request can
+        // arrive while that turn is visibly reasoning or awaiting a tool result; cancelling it
+        // splits the visible Web activity from the Codex observer and drops its live trace. Keep
+        // the owner bound until physical settlement, then start the newer canonical request.
+        // Explicit native abort metadata is handled above by retireAbortedOwnerTurns; it is the
+        // only authority that may interrupt an active owner turn.
         await awaitWithAbort(ownedSession.physicalSettlement, signal);
         continue;
       }

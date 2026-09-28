@@ -3380,6 +3380,36 @@ export class ChatGptBrowserWorker {
     }, CHATGPT_STOP_BUTTON_SELECTOR).catch(() => "");
   }
 
+  /**
+   * ChatGPT's visible phase notes live beside the Activity rows, not inside the mutable assistant
+   * Markdown root. Read only that public surface while a generation is demonstrably running so
+   * Codex can show meaningful progress before the final answer is fenced and delivered.
+   */
+  private async livePublicCommentaryText(page: Page): Promise<string> {
+    return page.evaluate(stopButtonSelector => {
+      const visible = (element: Element): boolean => {
+        const style = globalThis.getComputedStyle(element as HTMLElement);
+        const rect = (element as HTMLElement).getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      if (![...document.querySelectorAll(stopButtonSelector)].some(visible)) return "";
+      const text = (element: Element): string => (element as HTMLElement).innerText
+        .replace(/\s+/g, " ")
+        .trim();
+      // This is the current public note wrapper in the live ChatGPT surface. It intentionally
+      // excludes the composer, hidden reasoning and retained transport content.
+      const note = [...document.querySelectorAll(".pt-2.pb-1")]
+        .filter(visible)
+        .map(text)
+        .filter(candidate => candidate.length > 0
+          && candidate.length <= 12_000
+          && !/<codex_(?:context_json|transport_resume)>/i.test(candidate)
+          && !/You are Codex,|Codex requested low response verbosity/i.test(candidate))
+        .at(-1);
+      return (note ?? "").slice(-4_000);
+    }, CHATGPT_STOP_BUTTON_SELECTOR).catch(() => "");
+  }
+
   private async submissionDomState(
     page: Page,
     cache?: ChatGptSubmissionDomCache,
@@ -6255,6 +6285,19 @@ export class ChatGptBrowserWorker {
         }
         turn.onReasoningSummary?.(`@ ${text}`);
       };
+      let livePublicCommentary = "";
+      const publishLivePublicCommentary = (value: string): void => {
+        const text = value.replace(/\s+/g, " ").trim();
+        if (!text || text === livePublicCommentary) return;
+        const previous = livePublicCommentary;
+        livePublicCommentary = text;
+        if (previous && text.startsWith(previous)) {
+          const delta = text.slice(previous.length).trimStart();
+          if (delta) turn.onCommentary?.(delta, true);
+          return;
+        }
+        turn.onCommentary?.(text);
+      };
       const recordFinalUsage = await usageSubmission();
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
@@ -6424,6 +6467,8 @@ export class ChatGptBrowserWorker {
         // steps are stranded until the final answer.
         const liveActivity = await this.preResponseActivityText(page);
         if (liveActivity) publishPreResponseActivity(liveActivity);
+        const liveCommentary = await this.livePublicCommentaryText(page);
+        if (liveCommentary) publishLivePublicCommentary(liveCommentary);
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
         if (!snapshot.responsePresent || snapshot.completionActionVisible) {

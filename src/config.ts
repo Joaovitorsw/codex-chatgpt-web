@@ -643,7 +643,12 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
       headed: config.headed,
-      localToolsEnabled: config.mode === "full",
+      // The current native Codex function-call return path is not reliable
+      // enough for ChatGPT Web: a requested terminal call can strand an
+      // otherwise healthy browser turn. Keep Web models browser-only until
+      // that protocol is proven end-to-end; native Codex models retain their
+      // normal local tool access.
+      localToolsEnabled: false,
       solAvailable: manual ? false : config.solAvailable,
       extraHighAvailable: !manual && config.extraHighAvailable === true,
       proAvailable: manual ? false : config.proAvailable,

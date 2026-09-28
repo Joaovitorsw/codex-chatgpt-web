@@ -234,6 +234,7 @@ test("launcher browser ownership is explicit in provider configuration", () => {
   expect(providerConfig(config).chatgptWeb).toMatchObject({
     browserHost: "launcher",
     browserHostDescriptorPath: config.browserHostDescriptorPath,
+    localToolsEnabled: false,
     solAvailable: true,
     stallTimeoutSec: 900,
   });

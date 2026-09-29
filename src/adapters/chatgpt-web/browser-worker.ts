@@ -4220,22 +4220,43 @@ export class ChatGptBrowserWorker {
     const connectorMode = chatGptConnectorAttachmentMode(localTools, reuseConnector);
     let composerMutationStarted = false;
     try {
+      let restoredRetainedConnector = false;
+      let restoredComposer: Locator | undefined;
       if (connectorMode !== "mention") {
-        const composer = await this.activeComposer(page, 30_000, abortSignal);
-        // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
-        // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
-        // then transport the complete text through the browser's plain-text editing command.
-        composerMutationStarted = true;
-        await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
-        await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
-        if (requireThink) {
-          await setChatGptThinkMode(composer.locator("xpath=ancestor::form[1]"), true, captureDiagnostic, abortSignal);
+        let composer = await this.activeComposer(page, 30_000, abortSignal);
+        if (connectorMode === "retained" && !await this.connectorIsSelected(composer, abortSignal)) {
+          // A retained browser tab proves the conversation URL, not that ChatGPT kept the app
+          // chip through a reload, a stopped response, or a DOM remount.  Submitting without the
+          // chip turns the next local-tool call into an unbound connector request (missing
+          // turn_token).  Reattach the exact app before placing the continuation in the composer.
+          await captureDiagnostic?.("retained-connector-binding-missing");
+          composer = await this.selectConnector(
+            page,
+            captureDiagnostic,
+            catalogRefreshAvailable,
+            connectorAttemptBudget,
+            abortSignal,
+          );
+          restoredRetainedConnector = true;
+          restoredComposer = composer;
+          await captureDiagnostic?.("retained-connector-binding-restored");
         }
-        await this.insertPromptText(page, prompt, abortSignal);
-        await this.assertPromptAttached(page, prompt, abortSignal);
-        return;
+        if (!restoredRetainedConnector) {
+          // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
+          // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
+          // then transport the complete text through the browser's plain-text editing command.
+          composerMutationStarted = true;
+          await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+          await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+          if (requireThink) {
+            await setChatGptThinkMode(composer.locator("xpath=ancestor::form[1]"), true, captureDiagnostic, abortSignal);
+          }
+          await this.insertPromptText(page, prompt, abortSignal);
+          await this.assertPromptAttached(page, prompt, abortSignal);
+          return;
+        }
       }
-      const selectedComposer = await this.selectConnector(
+      const selectedComposer = restoredComposer ?? await this.selectConnector(
         page,
         captureDiagnostic,
         catalogRefreshAvailable,

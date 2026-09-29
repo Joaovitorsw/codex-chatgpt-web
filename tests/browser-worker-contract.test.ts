@@ -2360,7 +2360,7 @@ test("an abort while inserting a connector prompt clears the selected pill and p
   expect(connectorSelected).toBeFalse();
 });
 
-test("retained tool turns insert into the connector-bound composer without selecting it again", async () => {
+test("retained tool turns verify the connector-bound composer before inserting", async () => {
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
     attachPrompt(
       page: unknown,
@@ -2381,11 +2381,35 @@ test("retained tool turns insert into the connector-bound composer without selec
   };
   await attachPrompt.call({
     activeComposer: async () => composer,
+    connectorIsSelected: async () => true,
     selectConnector: async () => { throw new Error("retained connector must not be selected again"); },
     insertPromptText: async (_page: unknown, text: string) => { expect(text).toBe("retained context"); calls.push("insert"); },
     assertPromptAttached: async () => { calls.push("assert"); },
   }, dialogPage("").page, "retained context", true, undefined, undefined, false, undefined, true);
   expect(calls).toEqual(["fill", "focus", "insert", "assert"]);
+});
+
+test("retained tool turns restore a missing connector before inserting the continuation", async () => {
+  const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
+    attachPrompt(...args: unknown[]): Promise<void>;
+  }).attachPrompt;
+  const calls: string[] = [];
+  const initialComposer = { fill: async () => { calls.push("initial-fill"); }, focus: async () => { calls.push("initial-focus"); } };
+  const selectedComposer = {
+    fill: async () => { calls.push("fill"); },
+    focus: async () => { calls.push("focus"); },
+    press: async (key: string) => { expect(key).toBe(CHATGPT_COMPOSER_DOCUMENT_END_KEY); calls.push("end"); },
+    locator: () => ({}),
+  };
+  await attachPrompt.call({
+    activeComposer: async () => initialComposer,
+    connectorIsSelected: async () => false,
+    selectConnector: async () => { calls.push("select"); return selectedComposer; },
+    insertPromptText: async (_page: unknown, text: string) => { expect(text).toBe(" continue"); calls.push("insert"); },
+    assertPromptAttached: async () => { calls.push("assert"); },
+    clearChatGptComposerState: async () => { calls.push("clear"); },
+  }, dialogPage("").page, "continue", true, undefined, undefined, false, undefined, true);
+  expect(calls).toEqual(["select", "focus", "end", "insert", "assert"]);
 });
 
 test("attachment readiness waits for the visible filename and the enabled send button", async () => {

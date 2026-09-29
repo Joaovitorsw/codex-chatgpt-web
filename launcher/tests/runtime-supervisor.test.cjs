@@ -585,7 +585,7 @@ test("an explicit local readiness failure remains actionable tunnel evidence", a
   }
 });
 
-test("recent internal MCP transport failures override false-green tunnel readiness", async () => {
+test("an isolated MCP request failure does not evict a healthy tunnel", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-mcp-degraded-"));
   const health = await localHealthServer(
     () => 200,
@@ -616,10 +616,10 @@ test("recent internal MCP transport failures override false-green tunnel readine
   supervisor.tunnelHealthBaseUrl = health.baseUrl;
   try {
     const observation = await supervisor.readLocalTunnelHealth();
-    assert.equal(observation.ready, false);
+    assert.equal(observation.ready, true);
     assert.equal(observation.statusKnown, true);
-    assert.equal(observation.fatal, true);
-    assert.match(observation.detail, /MCP transport returned internal HTTP 502/);
+    assert.equal(observation.fatal, false);
+    assert.match(observation.detail, /ignoring isolated HTTP 502/);
   } finally {
     await health.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -881,7 +881,7 @@ if (args[1] === "connect") {
 });
 
 for (const existingReady of [true, false]) {
-  test(`a ${existingReady ? "previously running" : "newly connected"} tunnel cannot start monitoring before MCP verification`, async () => {
+  test(`a ${existingReady ? "previously running" : "newly connected"} tunnel keeps monitoring after an isolated MCP request failure`, async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-start-proof-"));
     const health = await localHealthServer(() => 200, pathname => pathname.startsWith("/api/logs")
       ? JSON.stringify({ events: [{ time: new Date().toISOString(),
@@ -908,10 +908,10 @@ for (const existingReady of [true, false]) {
     supervisor.waitForTunnelStopped = async () => { assert.equal(connected, false); };
     supervisor.startTunnelMonitor = () => { monitoring = true; };
     try {
-      await assert.rejects(supervisor.startTunnel(config), /MCP transport is unhealthy/);
-      assert.equal(monitoring, false);
-      assert.equal(connected, false, "failed startup must complete its existing cleanup");
-      assert.equal(supervisor.tunnel, null);
+      await supervisor.startTunnel(config);
+      assert.equal(monitoring, true);
+      assert.equal(connected, true);
+      assert.equal(supervisor.tunnel?.pid, null);
     } finally {
       await health.close();
       fs.rmSync(root, { recursive: true, force: true });

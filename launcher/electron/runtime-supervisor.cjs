@@ -763,7 +763,7 @@ class RuntimeSupervisor {
         throw new Error("response has no events array");
       }
       const cutoff = Date.now() - TUNNEL_MCP_FAILURE_RECENCY_MS;
-      const failure = body.events.findLast(event => {
+      const recentRequestFailure = body.events.findLast(event => {
         if (!event || typeof event !== "object") return false;
         const attrs = event.attrs && typeof event.attrs === "object" ? event.attrs : {};
         const occurredAt = Date.parse(event.time);
@@ -775,14 +775,20 @@ class RuntimeSupervisor {
           && attrs.upstream_response_received === false
           && ["initialize", "tools/call"].includes(attrs.rpc_method);
       });
-      if (!failure) {
+      if (!recentRequestFailure) {
         return { observed: true, ok: true, fatal: false, detail: "MCP transport has no recent internal failures" };
       }
+      // `/api/logs` records failures of individual MCP requests, not health of the tunnel
+      // process itself.  A long-running native tool can legitimately be cancelled or lose its
+      // caller and produce this 502 while /healthz and /readyz remain healthy.  Treating that
+      // log line as a fatal runtime failure made the monitor restart the tunnel underneath every
+      // active Codex turn after three polls.  Keep the failure visible in its owning turn, but
+      // never use historical request telemetry to evict a healthy tunnel.
       return {
         observed: true,
-        ok: false,
-        fatal: true,
-        detail: `MCP transport returned internal HTTP 502 for ${failure.attrs.rpc_method} at ${failure.time}`,
+        ok: true,
+        fatal: false,
+        detail: `MCP transport is reachable; ignoring isolated HTTP 502 for ${recentRequestFailure.attrs.rpc_method} at ${recentRequestFailure.time}`,
       };
     } catch (error) {
       return {

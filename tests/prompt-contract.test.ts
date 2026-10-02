@@ -72,6 +72,10 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(compiled.text).toContain("[retired turn handle]");
   expect(transportOnly).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
   expect(transportOnly).toContain("Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.");
+  expect(transportOnly).toContain("make the first focused Codex Native call after at most one concise progress paragraph");
+  expect(transportOnly).toContain("use the installed codex-local-scheduler skill and its Windows Task Scheduler workflow");
+  expect(transportOnly).toContain("do not call any native Codex scheduling/automation function");
+  expect(transportOnly).toContain("Never create, update, or rely on a ChatGPT scheduled task");
   expect(transportOnly).toContain("Use actual Codex Native results as evidence for local observations and effects.");
   expect(transportOnly).toContain("A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.");
   expect(transportOnly).toContain("After a deterministic tool failure, update the working hypothesis from that result");
@@ -91,6 +95,8 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(transportOnly).toContain("Group updates only when correctness genuinely requires an atomic operation");
   expect(transportOnly).toContain("small coherent batches when practical");
   expect(transportOnly).toContain("roughly 50 to 200 changed lines at a time");
+  expect(transportOnly).toContain("it is mandatory for edits to repository source");
+  expect(transportOnly).toContain("native Edited files card and per-file line counters");
   expect(transportOnly).toContain("Do not expose private chain-of-thought");
   expect(transportOnly).toContain("never emit visual toolbar labels such as Plain text or Copy");
   expect(transportOnly).toContain("Write the user-facing final answer only after the last required tool result has settled.");

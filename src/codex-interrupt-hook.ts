@@ -268,6 +268,12 @@ function locateCodexInterruptHook(text: string, installed: InstalledCodexInterru
   const expectedGroup = { hooks: [{ type: "command", command: installed.command, timeout: 3 }] };
   const expectedState = { trusted_hash: installed.trustedHash };
   const equal = (left: unknown, right: unknown) => JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
+  // Codex can persist its default hook values explicitly. They do not alter the
+  // bridge ownership and must not make a safe reinstall look like a route conflict.
+  const sameGroup = (value: unknown) => equal(value, expectedGroup)
+    || equal(value, { hooks: [{ ...expectedGroup.hooks[0], async: false }] });
+  const sameState = (value: unknown) => equal(value, expectedState)
+    || equal(value, { ...expectedState, enabled: true });
   try {
     const journal = parseHookDocument(installed.fragment);
     if (!equal(journal.hooks?.Interrupt, [expectedGroup])
@@ -280,13 +286,15 @@ function locateCodexInterruptHook(text: string, installed: InstalledCodexInterru
     throw changed();
   }
   const groups = document.hooks?.Interrupt;
-  if (!Array.isArray(groups) || !equal(groups[installed.groupIndex], expectedGroup)) {
-    if (Array.isArray(groups) && groups.some(group => equal(group, expectedGroup))) {
-      throw new Error("Codex interrupt lifecycle hook order changed after setup; refusing to overwrite it");
-    }
-    throw changed();
-  }
-  if (!equal(document.hooks?.state?.[installed.stateKey], expectedState)) throw changed();
+  // Codex may normalize or reorder the Interrupt array while keeping each command and its
+  // trust-state entry intact. The bridge owns one exact command/hash pair, not the ordinal slot;
+  // rejecting a benign reorder left the route permanently inconsistent on every launcher start.
+  const matchingGroupIndexes = Array.isArray(groups)
+    ? groups.flatMap((group, index) => sameGroup(group) ? [index] : [])
+    : [];
+  if (matchingGroupIndexes.length !== 1) throw changed();
+  const currentGroupIndex = matchingGroupIndexes[0]!;
+  if (!sameState(document.hooks?.state?.[installed.stateKey])) throw changed();
 
   const ranges: SourceRange[] = [];
   // A native config edit may discard comments. Authority comes from the exact journal, command,
@@ -306,7 +314,7 @@ function locateCodexInterruptHook(text: string, installed: InstalledCodexInterru
       ranges.push({ start, end: comment.range[1] });
     }
   }
-  const groupPath = ["hooks", "Interrupt", installed.groupIndex];
+  const groupPath = ["hooks", "Interrupt", currentGroupIndex];
   const statePath = ["hooks", "state", installed.stateKey];
   const startsWith = (path: (string | number)[], prefix: (string | number)[]) =>
     prefix.every((part, index) => path[index] === part);
@@ -384,7 +392,7 @@ function locateCodexInterruptHook(text: string, installed: InstalledCodexInterru
     } else merged.push({ ...range });
   }
   const expectedRestored = structuredClone(document);
-  expectedRestored.hooks!.Interrupt!.splice(installed.groupIndex, 1);
+  expectedRestored.hooks!.Interrupt!.splice(currentGroupIndex, 1);
   delete expectedRestored.hooks!.state![installed.stateKey];
   try {
     if (!equal(withoutEmptyHookContainers(parseHookDocument(removeRanges(text, merged))),

@@ -7,7 +7,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { packagedRuntimePaths } = require("../electron/runtime-command.cjs");
-const { linuxDesktopEntry, requireAutostartState } = require("../electron/autostart.cjs");
+const {
+  linuxDesktopEntry,
+  localProductionAutostartCommand,
+  localProductionStartupScript,
+  requireAutostartState,
+} = require("../electron/autostart.cjs");
 const {
   MAX_RESTARTS_PER_WINDOW,
   RuntimeSupervisor,
@@ -121,6 +126,15 @@ test("launcher autostart fails explicitly when the operating system rejects the 
     () => requireAutostartState({ supported: true, enabled: false }, true),
     /did not enable launcher autostart/,
   );
+});
+
+test("local Windows production autostart invokes the hidden source launcher", () => {
+  const app = { getAppPath: () => "D:\\Programação\\codex-chatgpt-web-src\\launcher" };
+  const script = localProductionStartupScript(app);
+  const command = localProductionAutostartCommand(app);
+  assert.equal(script, "D:\\Programação\\codex-chatgpt-web-src\\scripts\\start-local-production-silent.ps1");
+  assert.match(command, /-WindowStyle Hidden/);
+  assert.match(command, /start-local-production-silent\.ps1/);
 });
 
 test("launcher runtime ownership rejects a different browser descriptor", () => {

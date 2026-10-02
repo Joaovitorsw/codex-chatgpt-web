@@ -347,11 +347,21 @@ export function serializeJournal(journal: AnyCodexIntegrationJournal): string {
   return `${JSON.stringify(journal, null, 2)}\n`;
 }
 
+function assertWritableCodexConfig(configWrite: { path: string; data: string }): void {
+  try {
+    Bun.TOML.parse(configWrite.data.replace(/\r\n?/g, "\n"));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Refusing to write an invalid Codex config at ${configWrite.path}: ${detail}`);
+  }
+}
+
 export function writeIntegrationState(
   journal: AnyCodexIntegrationJournal,
   configWrite?: { path: string; data: string },
   removals: string[] = [],
 ): void {
+  if (configWrite) assertWritableCodexConfig(configWrite);
   const data = serializeJournal(journal);
   // The recovery copy records intent and the primary copy records commit. If the process stops
   // between those writes, the physical config unambiguously selects the completed state.

@@ -583,7 +583,22 @@ export class ChatGptTurnSessions {
         ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
       ));
       if (activeOwner) {
-        const [, ownedSession] = activeOwner;
+        const [ownedKey, ownedSession] = activeOwner;
+        const supersedesActiveInstruction = instruction?.predecessors.has(ownedSession.instruction ?? "") === true;
+        if (supersedesActiveInstruction) {
+          // A user direction is a newer instruction in the same native conversation, not a
+          // second independent task. ChatGPT cannot submit it while the preceding answer is
+          // generating, so stop only that superseded browser response and serialize the new
+          // submission behind its physical cleanup. Ordinary reconnects/tool-result rounds have
+          // no predecessor relationship and remain non-interrupting.
+          this.entries.delete(ownedKey);
+          this.forgetConversationHead(ownedSession);
+          await awaitWithAbort(
+            this.beginRetirement(ownedKey, ownedSession, chatGptTurnSupersededError()),
+            signal,
+          );
+          continue;
+        }
         // One ChatGPT conversation has exactly one live browser turn. A later native request can
         // arrive while that turn is visibly reasoning or awaiting a tool result; cancelling it
         // splits the visible Web activity from the Codex observer and drops its live trace. Keep

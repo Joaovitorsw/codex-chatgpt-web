@@ -26,8 +26,10 @@ test("installs every bundled skill without removing personal skills", () => {
   expect(existsSync(personal)).toBe(true);
   expect(readFileSync(personal, "utf8")).toBe("personal skill\n");
   expect(existsSync(join(root, "codex", "skills", "chatgpt-image-handoff", "scripts", "generate-image.ps1"))).toBe(true);
+  expect(existsSync(join(root, "codex", "skills", "codex-local-scheduler", "scripts", "manage-codex-schedule.ps1"))).toBe(true);
+  expect(existsSync(join(root, "codex", "skills", "codex-native-task-bridge", "scripts", "manage-native-codex-task.ps1"))).toBe(true);
   expect(readFileSync(join(root, "codex", "skills", "chatgpt-image-handoff", "SKILL.md"), "utf8"))
-    .toContain("without requiring the user to name this skill");
+    .toContain("Treat image creation as a child operation of the active task.");
   expect(existsSync(join(root, "codex", "skills", "code-task-presentation", "agents", "openai.yaml"))).toBe(true);
   expect(existsSync(join(root, "codex", "skills", "frontend-visual-qa", "agents", "openai.yaml"))).toBe(true);
   expect(readFileSync(join(root, "codex", "skills", "frontend-visual-qa", "SKILL.md"), "utf8"))

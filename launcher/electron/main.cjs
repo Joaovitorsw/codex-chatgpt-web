@@ -24,6 +24,7 @@ const { SOURCE_URL: LIMITS_SOURCE_URL } = require("./limits-store.cjs");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
 const { createRetainedConversationStore } = require("./retained-conversation-store.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
+const { configureWindowsTrust } = require("./windows-trust.cjs");
 const {
   createLogger,
   exportSanitizedLogs,
@@ -48,6 +49,7 @@ const {
 } = require("./window-state.cjs");
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+configureWindowsTrust();
 const SOURCE_ROOT = path.resolve(__dirname, "../..");
 const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
 const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
@@ -1444,6 +1446,7 @@ async function start() {
     getPreferences: () => syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
     limits: limitsController,
+    requestRuntimeRecovery: reason => runtimeHost.requestBridgeRecovery(reason),
   }).start();
   runtimeSupervisor = new RuntimeSupervisor({
     app,
@@ -1660,8 +1663,10 @@ async function start() {
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
-    const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    // Startup must not rewrite the user's global Codex configuration. The explicit
+    // setup/connect flows own route mutations; opening the launcher only verifies it.
+    const route = await runtimeHost.inspectBridgeRouteAtStartup();
+    return { ...runtime, bridgeRouteChanged: false, bridgeRouteActive: route.active === true };
   })().then(async (runtime) => {
     if (runtime.status === "ready") {
       const config = runtimeSupervisor.readConfig();

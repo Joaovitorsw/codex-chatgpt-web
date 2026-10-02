@@ -6,6 +6,9 @@ const SKILL_NAME = /^[a-z0-9-]{1,63}$/;
 const SKILL_DEPENDENCIES = new Map([
   ["codex-local-scheduler", ["codex-native-task-bridge"]],
 ]);
+// These two skills implement the local scheduling contract advertised by the Web bridge. They
+// cannot be optional while the bridge promises Windows-owned scheduling instead of ChatGPT Tasks.
+const REQUIRED_SKILLS = ["codex-local-scheduler", "codex-native-task-bridge"];
 
 function listBundledSkills(sourceRoot) {
   if (!fs.existsSync(sourceRoot)) return [];
@@ -29,6 +32,9 @@ function validateBundledSkillSelection(value, available) {
     for (const dependency of SKILL_DEPENDENCIES.get(skill) || []) {
       if (allowed.has(dependency) && !selected.includes(dependency)) selected.push(dependency);
     }
+  }
+  for (const skill of REQUIRED_SKILLS) {
+    if (allowed.has(skill) && !selected.includes(skill)) selected.push(skill);
   }
   return selected.sort();
 }

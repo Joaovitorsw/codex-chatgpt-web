@@ -50,12 +50,28 @@ export function chatGptConversationKey(
   })).digest("hex");
 }
 
-/** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
+/**
+ * Full history remains canonical; a retained epoch receives only the suffix after its last
+ * assistant reply. A restored native retry can end in an assistant item, even when its retained
+ * browser tab already contains the complete prior discussion. Replaying that whole native
+ * history would explode the browser input; use only the latest user request in that edge case.
+ */
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
 ): CodexParsedRequest | undefined {
   const lastAssistant = parsed.context.messages.findLastIndex(message => message.role === "assistant");
-  if (lastAssistant < 0 || lastAssistant === parsed.context.messages.length - 1) return undefined;
+  if (lastAssistant < 0) return parsed;
+  if (lastAssistant === parsed.context.messages.length - 1) {
+    const lastUser = parsed.context.messages.findLastIndex(message => message.role === "user");
+    if (lastUser < 0) return undefined;
+    return {
+      ...parsed,
+      context: {
+        ...parsed.context,
+        messages: [parsed.context.messages[lastUser]!],
+      },
+    };
+  }
   return {
     ...parsed,
     context: {

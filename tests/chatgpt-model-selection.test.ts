@@ -13,8 +13,8 @@ test("model selection recognizes Latest in the launcher languages without accept
         waitFor: async () => { throw new Error("Requested family is absent"); },
       }),
       locator: () => ({ count: async () => 1, getAttribute: async () => "true" }),
-    } } as unknown as Parameters<typeof selectChatGptModelFamily>[1];
-    const selection = selectChatGptModelFamily({} as Parameters<typeof selectChatGptModelFamily>[0], menu, "6", async () => menu);
+    } } as unknown as Parameters<typeof selectChatGptModelFamily>[0];
+    const selection = selectChatGptModelFamily(menu, "6", async () => menu);
     if (accepted) expect(await selection).toBe(menu);
     else await expect(selection).rejects.toThrow("could not be selected and verified");
   }
@@ -35,10 +35,20 @@ test("model selection ignores an outgoing hidden duplicate while the picker anim
   };
   const menu = { menu: {
     getByRole: () => duplicate,
-  } } as unknown as Parameters<typeof selectChatGptModelFamily>[1];
-  await expect(selectChatGptModelFamily(
-    {} as Parameters<typeof selectChatGptModelFamily>[0], menu, "5.6", async () => menu,
-  )).resolves.toBe(menu);
+  } } as unknown as Parameters<typeof selectChatGptModelFamily>[0];
+  await expect(selectChatGptModelFamily(menu, "5.6", async () => menu)).resolves.toBe(menu);
+});
+
+test("model selection accepts the current 5.6 labels with or without the GPT prefix", async () => {
+  for (const label of ["GPT-5.6 Sol", "5.6 Sol", "GPT 5.6", "5.6"] as const) {
+    const menu = { menu: {
+      getByRole: (_role: string, options: { name: RegExp }) => ({
+        count: async () => options.name.test(label) ? 1 : 0,
+        getAttribute: async () => "true",
+      }),
+    } } as unknown as Parameters<typeof selectChatGptModelFamily>[0];
+    await expect(selectChatGptModelFamily(menu, "5.6", async () => menu)).resolves.toBe(menu);
+  }
 });
 
 test("family confirmation separates Latest staging from the actual Pro response", () => {

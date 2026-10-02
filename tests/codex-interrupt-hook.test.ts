@@ -165,7 +165,9 @@ test("reconciles one valid orphaned hook but refuses modified or duplicated owne
     "",
     installed.text,
   ].join("\n");
-  expect(() => restoreCodexInterruptHook(reordered, installed.installed)).toThrow("order changed after setup");
+  // Codex can reorder hook groups when it rewrites config.toml. Preserve the foreign earlier
+  // hook and remove only the uniquely trusted bridge hook at its new position.
+  expect(restoreCodexInterruptHook(reordered, installed.installed)).toContain('command = "new-earlier-hook"');
   const reinstalled = installCodexInterruptHook(installed.text, "/Users/test/.codex/config.toml", {
     runtimeCommand: ["/opt/new-runtime"],
   });

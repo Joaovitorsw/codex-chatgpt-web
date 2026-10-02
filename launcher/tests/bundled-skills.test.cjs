@@ -41,7 +41,18 @@ test("selecting the local scheduler also installs its native task bridge", () =>
     validateBundledSkillSelection(["codex-local-scheduler"], available),
     ["codex-local-scheduler", "codex-native-task-bridge"],
   );
-  assert.deepEqual(validateBundledSkillSelection([], available), []);
+  assert.deepEqual(
+    validateBundledSkillSelection([], available),
+    ["codex-local-scheduler", "codex-native-task-bridge"],
+  );
+});
+
+test("local scheduling skills are restored when a saved selection predates them", () => {
+  const available = ["chatgpt-image-handoff", "codex-local-scheduler", "codex-native-task-bridge"];
+  assert.deepEqual(
+    migrateBundledSkillSelection(["chatgpt-image-handoff"], available, true),
+    ["chatgpt-image-handoff", "codex-local-scheduler", "codex-native-task-bridge"],
+  );
 });
 
 test("startup migration adds new dependencies without resetting a saved selection", () => {

@@ -13,6 +13,8 @@ import { getCodexHome } from "./codex-integration-shared";
 
 export const BUNDLED_CODEX_SKILLS = [
   "chatgpt-image-handoff",
+  "codex-local-scheduler",
+  "codex-native-task-bridge",
   "code-work-orchestrator",
   "code-task-presentation",
   "frontend-visual-qa",

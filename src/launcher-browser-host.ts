@@ -818,3 +818,29 @@ export async function releaseLauncherRetainedConversation(
     clearTimeout(timer);
   }
 }
+
+/**
+ * Ask the launcher to restart only its bridge runtime once no browser/HTTP turn is active.
+ * This deliberately never touches the native Codex process or its global configuration.
+ */
+export async function requestLauncherRuntimeRecovery(
+  descriptorPath: string,
+  reason: "native_connector_internal_error",
+): Promise<"queued" | "already_queued"> {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const response = await fetch(descriptor.control.endpoint + "/v1/runtime/recover", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer " + descriptor.control.token,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ reason }),
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (response.status !== 202 || body.ok !== true
+    || (body.status !== "queued" && body.status !== "already_queued")) {
+    const detail = typeof body.error === "string" ? ": " + body.error : "";
+    throw new Error("Launcher bridge recovery request failed (HTTP " + response.status + ")" + detail);
+  }
+  return body.status as "queued" | "already_queued";
+}

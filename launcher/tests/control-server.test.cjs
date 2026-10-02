@@ -139,6 +139,35 @@ test("native proxy resolution requires owner auth, restricts targets, and works 
   } finally { await server.close(); }
 });
 
+test("bridge recovery requests are authenticated, reason-scoped, and queue without inspecting the browser", async () => {
+  const reasons = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => { throw new Error("bridge recovery must not inspect browser contents"); },
+    getPreferences: () => { throw new Error("bridge recovery must not inspect preferences"); },
+    requestRuntimeRecovery: async reason => {
+      reasons.push(reason);
+      return { status: "queued" };
+    },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const post = (reason, authorization = token) => fetch(endpoint + "/v1/runtime/recover", {
+    method: "POST",
+    headers: { authorization: "Bearer " + authorization, "content-type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+  try {
+    assert.equal((await post("native_connector_internal_error", "wrong")).status, 401);
+    assert.equal((await post("other")).status, 400);
+    const response = await post("native_connector_internal_error");
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { ok: true, status: "queued" });
+    assert.deepEqual(reasons, ["native_connector_internal_error"]);
+  } finally {
+    await server.close();
+  }
+});
+
 test("browser control server authenticates and owns turn visibility", async () => {
   const calls = [];
   const logs = [];

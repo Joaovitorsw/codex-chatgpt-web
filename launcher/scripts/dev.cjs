@@ -9,6 +9,7 @@ const bun = process.env.CODEX_WEB_GPT_BUN || process.execPath;
 // Keep Vite local while exercising the same launcher profile, persistent browser
 // partition, and runtime paths used by an installed production build.
 const localProduction = process.env.CODEX_WEB_GPT_LOCAL_PRODUCTION === "1";
+const startHidden = process.env.CODEX_WEB_GPT_START_HIDDEN === "1";
 
 const helperBuild = spawnSync(bun, ["run", "scripts/build-browser-helper.ts"], {
   cwd: path.resolve(root, ".."),
@@ -47,7 +48,7 @@ const waitForVite = async () => {
 };
 
 void waitForVite().then(() => {
-  electron = spawn(electronBin, [root, ...(localProduction ? [] : ["--dev-profile"])], {
+  electron = spawn(electronBin, [root, ...(localProduction ? [] : ["--dev-profile"]), ...(startHidden ? ["--hidden"] : [])], {
     cwd: root,
     stdio: "inherit",
     env: {

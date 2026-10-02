@@ -414,12 +414,20 @@ test("saved ChatGPT authentication is refreshed before setup is presented", () =
   const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
-  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
+  const routeInspection = electronMain.indexOf("runtimeHost.inspectBridgeRouteAtStartup()", runtimeStart);
   assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
   assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
-  assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
+  assert.ok(routeInspection > runtimeStart, "Codex route must be inspected only after the runtime is healthy");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
+});
+
+test("silent local production passes the hidden argument to Electron", () => {
+  const devScript = fs.readFileSync(path.join(__dirname, "..", "scripts", "dev.cjs"), "utf8");
+  const silentScript = fs.readFileSync(path.join(__dirname, "..", "..", "scripts", "start-local-production-silent.ps1"), "utf8");
+  assert.match(devScript, /CODEX_WEB_GPT_START_HIDDEN === "1"/);
+  assert.match(devScript, /startHidden \? \["--hidden"\] : \[\]/);
+  assert.match(silentScript, /CODEX_WEB_GPT_START_HIDDEN = '1'/);
 });
 
 test("completed model setup remains a repeatable capability probe", () => {

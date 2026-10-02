@@ -11,7 +11,7 @@ import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePa
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE, extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision, priorChatGptAbortedTurnIds } from "../src/adapters/chatgpt-web/environment";
-import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter, emitTraceEvents } from "../src/adapters/chatgpt-web/index";
+import { CHATGPT_WEB_ADAPTER_HEARTBEAT_MS, chatGptCapabilityRetirementRequiresBrowserAbort, chatGptToolProgressLabel, chatGptWebExecutionNamespace, chatGptWebTraceId, createChatGptWebAdapter, emitTraceEvents } from "../src/adapters/chatgpt-web/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import {
@@ -33,6 +33,12 @@ const tempRoot = join(tmpdir(), `codex-chatgpt-web-harness-${process.pid}-${Date
 mkdirSync(tempRoot, { recursive: true });
 afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
 
+test("a retired capability does not abort an accepted browser response with no local call in flight", () => {
+  expect(chatGptCapabilityRetirementRequiresBrowserAbort(false, 0)).toBeTrue();
+  expect(chatGptCapabilityRetirementRequiresBrowserAbort(true, 1)).toBeTrue();
+  expect(chatGptCapabilityRetirementRequiresBrowserAbort(true, 0)).toBeFalse();
+});
+
 test("visible ChatGPT trace preserves white commentary and gray action summaries", () => {
   const events: AdapterEvent[] = [];
   emitTraceEvents([
@@ -46,6 +52,13 @@ test("visible ChatGPT trace preserves white commentary and gray action summaries
     { type: "assistant_boundary" },
     { type: "thinking_delta", thinking: "Built and verified the application" },
   ]);
+});
+
+test("native tool progress uses a human action label instead of its wire name", () => {
+  expect(chatGptToolProgressLabel("exec_command")).toBe("Executando comando local");
+  expect(chatGptToolProgressLabel("write_stdin")).toBe("Acompanhando processo local em execução");
+  expect(chatGptToolProgressLabel("apply_patch")).toBe("Aplicando alterações nos arquivos");
+  expect(chatGptToolProgressLabel("mcp__godot__inspect_scene")).toBe("Executando ferramenta local");
 });
 
 test("current-turn MCP progress tracks active calls without claiming completion", async () => {
@@ -929,7 +942,7 @@ describe("ChatGPT outer-native harness v4", () => {
     sessions.clear();
   });
 
-  test("queues a newer native instruction until the active browser owner settles", async () => {
+  test("supersedes an active browser response when a newer native instruction descends from it", async () => {
     const sessions = new ChatGptTurnSessions();
     const original = rawWireRequest(environmentXml);
     const originalInput = (original._rawBody as { input: Array<Record<string, unknown>> }).input;
@@ -965,9 +978,9 @@ describe("ChatGPT outer-native harness v4", () => {
     const next = sessions.getOrCreateAfterOwnerRetirement(newKey, "thread", replacement,
       "new-trace", undefined, "native-turn", "native-thread", chatGptInstructionLineage(steered));
     await Bun.sleep(0);
-    expect(cancellations).toHaveLength(0);
+    expect(cancellations).toHaveLength(1);
+    expect(cancellations[0]?.message).toContain("newer Codex instruction");
     expect(starts).toBe(0);
-    finishOld("old task completed");
     cleanup();
     const current = await next;
     expect(starts).toBe(1);
@@ -2829,10 +2842,10 @@ describe("ChatGPT outer-native harness v4", () => {
       });
       const [boundedRequest] = await broker.nextToolBatch(token);
       expect(boundedRequest).toMatchObject({
-        wireName: "exec",
-        freeform: true,
+        wireName: "exec_command",
+        freeform: false,
+        arguments: { cmd: "git status --short", yield_time_ms: 30_000 },
       });
-      expect(boundedRequest!.input).toContain('"yield_time_ms":30000');
       broker.completeTool(token, boundedRequest!.callId, toolResult({ output: "bounded", exit_code: 0 }));
       expect((await boundedGenericExec).structuredContent).toEqual({ output: "bounded", exit_code: 0 });
 

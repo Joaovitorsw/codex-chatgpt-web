@@ -38,12 +38,13 @@ function writeJson(response, status, body) {
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits, requestRuntimeRecovery }) {
     this.logger = logger;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
     this.resolveProxy = resolveProxy;
     this.limits = limits;
+    this.requestRuntimeRecovery = requestRuntimeRecovery;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
     this.server = createServer((request, response) => {
@@ -103,6 +104,7 @@ class BrowserControlServer {
     const isSessionInspect = request.url === "/v1/session/inspect";
     const isImageGeneration = request.url === "/v1/image/generate";
     const isProxyResolution = request.url === "/v1/network/resolve-proxy";
+    const isRuntimeRecovery = request.url === "/v1/runtime/recover";
     const manualAction = new Map([
       ["/v1/manual/start", "start"],
       ["/v1/manual/wait-sent", "wait-sent"],
@@ -111,7 +113,7 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isImageGeneration && !isProxyResolution && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isImageGeneration && !isProxyResolution && !isRuntimeRecovery && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -131,6 +133,18 @@ class BrowserControlServer {
         try { proxy = await this.resolveProxy(url.href); }
         catch { throw new Error("System proxy resolution failed"); }
         writeJson(response, 200, { proxy });
+        return;
+      }
+      if (isRuntimeRecovery) {
+        if (body?.reason !== "native_connector_internal_error") {
+          throw new Error("runtime recovery reason is invalid");
+        }
+        if (typeof this.requestRuntimeRecovery !== "function") {
+          throw new Error("runtime recovery is unavailable");
+        }
+        const result = await this.requestRuntimeRecovery(body.reason);
+        this.logger.warn("runtime.recovery_requested", { reason: body.reason, status: result?.status });
+        writeJson(response, 202, { ok: true, status: result?.status === "queued" ? "queued" : "already_queued" });
         return;
       }
       const preferences = this.getPreferences();

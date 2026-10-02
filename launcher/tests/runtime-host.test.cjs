@@ -60,6 +60,31 @@ function devHostFor(existingConfig, interactionMode = "automatic") {
   return { host, invocation: () => invocation };
 }
 
+test("bridge recovery is coalesced and rejects unsupported reasons", async () => {
+  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
+  let release;
+  fixture.host.recoverBridgeWhenIdle = () => new Promise(resolve => { release = resolve; });
+  try {
+    assert.throws(
+      () => fixture.host.requestBridgeRecovery("other"),
+      /Unsupported bridge recovery reason/,
+    );
+    assert.deepEqual(
+      fixture.host.requestBridgeRecovery("native_connector_internal_error"),
+      { status: "queued" },
+    );
+    assert.deepEqual(
+      fixture.host.requestBridgeRecovery("native_connector_internal_error"),
+      { status: "already_queued" },
+    );
+    release();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fixture.host.bridgeRecovery, null);
+  } finally {
+    release?.();
+  }
+});
+
 test("core setup preserves an existing full-harness installation", async () => {
   const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
   const result = await fixture.host.setupCore();
@@ -595,6 +620,13 @@ test("launcher leaves an already connected route unchanged", async () => {
   const fixture = bridgeFixture({ active: true });
   const result = await fixture.host.connectBridgeRoute();
   assert.equal(result.active, true);
+  assert.deepEqual(fixture.calls, ["route status"]);
+});
+
+test("startup route inspection never connects an inactive route", async () => {
+  const fixture = bridgeFixture({ active: false });
+  const result = await fixture.host.inspectBridgeRouteAtStartup();
+  assert.equal(result.active, false);
   assert.deepEqual(fixture.calls, ["route status"]);
 });
 

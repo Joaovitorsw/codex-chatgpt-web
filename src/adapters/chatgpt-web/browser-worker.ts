@@ -52,6 +52,7 @@ import {
   assertAuthenticatedChatGptPage,
   assertNewChatPage,
   chatGptNewChatUrl,
+  ensureChatGptChatMode,
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_APP_MENU_CONTROL_SELECTOR,
   CHATGPT_COMPLETION_ACTION_SELECTOR,
@@ -844,7 +845,7 @@ const chatGptConversationUnavailable = (page: Page): Locator => page
 
 /**
  * A retained conversation occasionally lands on ChatGPT's recoverable load-error view while the
- * account remains authenticated. Retry that exact page once before treating the saved chat as
+ * account remains authenticated. Retry that exact page before treating the saved chat as
  * unusable; replacing it with a new chat here would lose the active task context.
  */
 export async function retryChatGptConversationLoad(page: Page): Promise<boolean> {
@@ -861,7 +862,9 @@ export async function retryChatGptConversationLoad(page: Page): Promise<boolean>
       { status: 503, errorType: "server_error", code: "chatgpt_conversation_unavailable", retryable: true },
     );
   }
-  await retry.press("Enter", { timeout: 5_000 });
+  // This is a real button action, not keyboard input in the composer. Direct click avoids a
+  // browser state where Enter is accepted by the page but the Retry handler is never invoked.
+  await retry.click({ timeout: 5_000 });
   return true;
 }
 
@@ -1207,6 +1210,11 @@ export const browserStageTimeouts = {
   temporaryChatPreparation: 150_000,
   effortSelection: 120_000,
   promptAttachment: 60_000,
+  // A retained task can arrive while ChatGPT is still publishing the prior response.
+  // Rebinding its connector during that generation is not actionable and used to consume
+  // the mention retries before the menu could exist. This timeout applies only to that
+  // retained-rebind path; ordinary prompt attachment remains short and responsive.
+  retainedConnectorRebind: 30 * 60_000,
   fileAttachment: 120_000,
   send: 60_000,
   // A Bigger Context stage posts a much larger payload onto a conversation that already holds the
@@ -1220,6 +1228,11 @@ function chatGptTurnLocator(page: Page, identity: string): Locator {
   const selector = JSON.stringify(identity);
   return page.locator([
     `[data-turn-id=${selector}]`,
+    // submissionDomState can derive an assistant identity from the durable outer
+    // container when the renderer has not mounted a role-marked child yet. Keep
+    // the observer aligned with that same source; otherwise the DOM inventory
+    // proves a response exists while this locator observes zero nodes.
+    `[data-turn-id-container=${selector}]`,
     `[data-turn-key=${selector}]`,
     `[data-chatgpt-search-message-ids~=${selector}]`,
     `[data-content-search-turn-key=${selector}]`,
@@ -1485,7 +1498,11 @@ export function chatGptSubmissionEvidence(state: {
   responseIdentities: readonly string[];
   generationRunning: boolean;
 }): ChatGptSubmissionEvidence | undefined {
-  if (chatGptNewTurnIdentity(state.initialTurnIdentities, state.userIdentities)) return "user_turn";
+  // Current ChatGPT App surfaces can mount an activity shell and the user bubble as separate
+  // turn-key containers during the same Send. They are not two physical submissions. For the
+  // narrow purpose of proving that this Send was accepted, follow the newest user-shaped unit;
+  // later identity binding still rejects a changed accepted unit.
+  if (chatGptLatestNewTurnIdentity(state.initialTurnIdentities, state.userIdentities)) return "user_turn";
   if (chatGptLatestNewTurnIdentity(state.initialTurnIdentities, state.responseIdentities)) return "assistant_turn";
   if (state.generationRunning) return "generation_running";
   return undefined;
@@ -2926,7 +2943,7 @@ export class ChatGptBrowserWorker {
       return selectedMode;
     }
     if (modelFamily) activation = await selectChatGptModelFamily(
-      page, activation, modelFamily, () => activateChatGptEffortMenu(page, currentEffort),
+      activation, modelFamily, () => activateChatGptEffortMenu(page, currentEffort),
     );
     const separateProOption = activation.menu.getByRole("menuitemradio", { name: /^Pro$/i, exact: true });
     if (mode.effort === "max" && await separateProOption.count() === 1) {
@@ -2974,6 +2991,9 @@ export class ChatGptBrowserWorker {
     }
     if (activation.method === "pointerdown") {
       await captureDiagnostic?.("effort-menu-pointerdown-fallback");
+    }
+    if (activation.method === "keyboard") {
+      await captureDiagnostic?.("effort-menu-keyboard-fallback");
     }
     await captureDiagnostic?.("effort-menu-open-requested");
     const effortSlider = activation.slider;
@@ -3172,6 +3192,12 @@ export class ChatGptBrowserWorker {
       });
       await captureDiagnostic?.(useSavedChats ? "saved-chat-navigation-complete" : "temporary-chat-navigation-complete");
     }
+    const conversationMode = await ensureChatGptChatMode(page);
+    if (conversationMode === "switched-from-work") {
+      await captureDiagnostic?.("initial-work-mode-switched-to-chat");
+    } else if (conversationMode === "already-chat") {
+      await captureDiagnostic?.("initial-chat-mode-confirmed");
+    }
     // A failed page read is not evidence of an expired login. Preserve the actual observation
     // error; the authenticated-session check below owns login failures.
     let composer = await this.activeComposer(page);
@@ -3342,9 +3368,15 @@ export class ChatGptBrowserWorker {
     _initialTurnIdentities: readonly string[] = [],
   ): Promise<string> {
     return page.evaluate(stopButtonSelector => {
-      const text = (element: Element | null): string => (element as HTMLElement | null)?.innerText
-        ?.replace(/\s+/g, " ")
-        .trim() ?? "";
+      const text = (element: Element | null): string => {
+        const value = (element as HTMLElement | null)?.innerText?.replace(/\s+/g, " ").trim() ?? "";
+        // Activity headers contain both their accessible label and its nested visual label in the
+        // current ChatGPT renderer, producing "Inspected … Inspected …" in innerText. Preserve
+        // one semantic action rather than forwarding the duplicated DOM projection to Codex.
+        const duplicatedLabel = value.match(/^(.+?)\s+\1$/);
+        if (duplicatedLabel?.[1]) return duplicatedLabel[1];
+        return value;
+      };
       const visible = (element: Element): boolean => {
         const style = globalThis.getComputedStyle(element as HTMLElement);
         const rect = (element as HTMLElement).getBoundingClientRect();
@@ -3359,7 +3391,14 @@ export class ChatGptBrowserWorker {
       const activityHeaders = [...document.querySelectorAll('[class*="group/activity-header"]')]
         .filter(visible);
       const latestActivity = activityHeaders.at(-1);
-      if (latestActivity) return text(latestActivity).slice(-4_000);
+      if (latestActivity) {
+        const activity = text(latestActivity);
+        // "Thinking" and elapsed-time badges are renderer chrome, not public work milestones.
+        // Suppressing them keeps the native reasoning feed about actual inspection/edit/validation
+        // operations and avoids a second, misleading thought entry beside real function activity.
+        if (/^(?:thinking|worked for\s+\d+)/i.test(activity)) return "";
+        return activity.slice(-4_000);
+      }
       const currentTurn = [...document.querySelectorAll("[data-turn-key], [data-content-search-turn-key]")].at(-1);
       if (!currentTurn) return "";
       const roots = [
@@ -3396,11 +3435,14 @@ export class ChatGptBrowserWorker {
       const text = (element: Element): string => (element as HTMLElement).innerText
         .replace(/\s+/g, " ")
         .trim();
-      // This is the current public note wrapper in the live ChatGPT surface. It intentionally
-      // excludes the composer, hidden reasoning and retained transport content.
+      // `.pt-2.pb-1` is a turn panel, not one note: it accumulates every prior public phase
+      // plus the status rows.  Read its individual Markdown children instead, otherwise each
+      // poll replays the whole turn and duplicates both function activity and final prose.
       const note = [...document.querySelectorAll(".pt-2.pb-1")]
         .filter(visible)
-        .map(text)
+        .flatMap(panel => [...panel.children]
+          .filter(child => child.matches('[class*="MarkdownRoot-"]') && visible(child))
+          .map(text))
         .filter(candidate => candidate.length > 0
           && candidate.length <= 12_000
           && !/<codex_(?:context_json|transport_resume)>/i.test(candidate)
@@ -3546,7 +3588,7 @@ export class ChatGptBrowserWorker {
     if (evidence === "user_turn") {
       // Activity can temporarily replace this group before the assistant is mounted.
       // Preserve the identity that acknowledged Send, independently of rendered text.
-      const identity = chatGptNewTurnIdentity(baseline.initialTurnIdentities, state.userIdentities)!;
+      const identity = chatGptLatestNewTurnIdentity(baseline.initialTurnIdentities, state.userIdentities)!;
       if (baseline.acceptedUserIdentity && baseline.acceptedUserIdentity !== identity) {
         throw new Error("ChatGPT changed the user turn that acknowledged the submission");
       }
@@ -3920,6 +3962,22 @@ export class ChatGptBrowserWorker {
     });
   }
 
+  private async waitForRetainedConnectorResponse(
+    page: Page,
+    captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    abortSignal?: AbortSignal,
+  ): Promise<void> {
+    const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+    if (!await stop.isVisible().catch(() => false)) return;
+    // A retained connector chip can disappear while the previous response is still
+    // streaming. The Apps/@mention surfaces are intentionally unavailable then, so
+    // waiting preserves the in-flight final answer instead of spending connector retries.
+    await captureDiagnostic?.("retained-connector-awaiting-active-response");
+    await stop.waitFor({ state: "hidden", timeout: 0, signal: abortSignal });
+    await settleChatGptUi();
+    await captureDiagnostic?.("retained-connector-active-response-settled");
+  }
+
   private async selectModernConnector(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
@@ -3958,7 +4016,13 @@ export class ChatGptBrowserWorker {
         }
         await new Promise(resolve => setTimeout(resolve, 50));
       }
-      throw new Error(`ChatGPT Apps menu did not select ${JSON.stringify(this.config.appName)}`);
+      // The modern Apps menu can acknowledge a click yet leave the composer unchanged (a
+      // particularly common transient after a retained-chat remount). This is not a terminal
+      // connector failure: fall through to the proven @mention flow, which owns composer cleanup
+      // and has its own bounded retries. Throwing here bypassed that cleanup and left a large
+      // prompt drafted forever, so every native retry repeated the same failed Apps click.
+      await captureDiagnostic?.("connector-modern-app-selection-unconfirmed");
+      return null;
     } finally {
       await page.keyboard.press("Escape").catch(() => {});
     }
@@ -4230,6 +4294,7 @@ export class ChatGptBrowserWorker {
           // chip turns the next local-tool call into an unbound connector request (missing
           // turn_token).  Reattach the exact app before placing the continuation in the composer.
           await captureDiagnostic?.("retained-connector-binding-missing");
+          await this.waitForRetainedConnectorResponse(page, captureDiagnostic, abortSignal);
           composer = await this.selectConnector(
             page,
             captureDiagnostic,
@@ -4351,10 +4416,15 @@ export class ChatGptBrowserWorker {
     const priorStop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
     if (await priorStop.isVisible().catch(() => false)) {
       const pendingPrompt = await this.attachedPromptText(page, abortSignal);
-      await captureDiagnostic?.("send-queued-behind-active-response");
-      // ChatGPT permits drafting the next instruction while the previous response is still
-      // running, but Enter is ignored in that state. Keep the exact draft, wait for the old
-      // response to settle, then refresh both composer and submission baseline before sending.
+      await captureDiagnostic?.("send-steering-stop-requested");
+      // Enter is ignored while ChatGPT is generating. This path only runs after the session layer
+      // has identified a newer user instruction as a superseding direction, so stop the prior
+      // response instead of silently holding the direction behind an arbitrary long task.
+      await priorStop.click({
+        noWaitAfter: true,
+        signal: abortSignal,
+        timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+      });
       await priorStop.waitFor({ state: "hidden", timeout: 0, signal: abortSignal });
       await settleChatGptUi();
       const retainedPrompt = await this.attachedPromptText(page, abortSignal);
@@ -4365,7 +4435,7 @@ export class ChatGptBrowserWorker {
       }
       Object.assign(baseline, await this.captureSubmissionBaseline(page));
       composer = await this.activeComposer(page);
-      await captureDiagnostic?.("send-queue-released");
+      await captureDiagnostic?.("send-steering-stop-settled");
     }
     const sendButton = composer
       .locator("xpath=ancestor::form[1]")
@@ -4394,15 +4464,28 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.(hasVisibleSendButton ? "send-ready" : "send-keyboard-fallback");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
     await submissionLifecycle?.onSendActivated?.();
-    const sendTarget = hasVisibleSendButton ? sendButton : composer;
-    await sendTarget.press("Enter", {
-      noWaitAfter: true,
-      signal: abortSignal,
-      // runStage owns the operation budget. A second Locator timeout would silently collapse the
-      // 180-second Bigger Context budget back to the ordinary 20 seconds after Enter has already
-      // submitted the message; semantic submission evidence below remains the authority.
-      timeout: 0,
-    });
+    if (hasVisibleSendButton) {
+      // The current ChatGPT composer can keep a complete draft when an Enter key event is sent to
+      // its button (notably after a Lexical re-render). A pointer activation targets the actual
+      // submit control and is the same action the user performs. Keyboard Enter remains only for
+      // layouts where no accessible send button is present.
+      await sendButton.click({
+        noWaitAfter: true,
+        signal: abortSignal,
+        timeout: 0,
+      });
+      await captureDiagnostic?.("send-clicked");
+    } else {
+      await composer.press("Enter", {
+        noWaitAfter: true,
+        signal: abortSignal,
+        // runStage owns the operation budget. A second Locator timeout would silently collapse the
+        // 180-second Bigger Context budget back to the ordinary 20 seconds after Enter has already
+        // submitted the message; semantic submission evidence below remains the authority.
+        timeout: 0,
+      });
+      await captureDiagnostic?.("send-keyboard-pressed");
+    }
     const evidence = await this.waitForSubmissionAcceptedWithRecovery(
       page,
       baseline,
@@ -6023,13 +6106,35 @@ export class ChatGptBrowserWorker {
       // A retained lease proves the connector binding, not the current model selection.
       // Reconcile the live control before every submission, including retained continuations.
       let modelControlRecoveryAvailable = true;
+      let retainedConversationFallbackAvailable = reuseConversation;
       const selectStagingMode = async () => {
         if (await retryChatGptConversationLoad(page)) {
           // The Retry action reloads this same saved conversation. Wait for its composer before
           // touching the model selector so we never mistake the error view for a missing picker.
           await diagnostics.capture(page, "saved-conversation-retry-requested");
-          await this.activeComposer(page, 30_000, turn.abortSignal);
-          await diagnostics.capture(page, "saved-conversation-retry-ready");
+          try {
+            await this.activeComposer(page, 30_000, turn.abortSignal);
+            await diagnostics.capture(page, "saved-conversation-retry-ready");
+          } catch (error) {
+            // The retained URL is now proven unavailable. Repeating the same retry indefinitely
+            // strands a healthy native Codex turn, while opening a fresh chat lets its current
+            // prepared context continue the task. This fallback is deliberately limited to the
+            // explicit load-error surface; ordinary slow or busy conversations stay retained.
+            if (!retainedConversationFallbackAvailable) throw error;
+            retainedConversationFallbackAvailable = false;
+            reuseConversation = false;
+            await diagnostics.capture(page, "saved-conversation-fallback-started");
+            await page.goto(chatGptNewChatUrl(this.config.useSavedChats), {
+              waitUntil: "domcontentloaded",
+              timeout: 60_000,
+            });
+            await this.prepareChatSurface(
+              page,
+              checkpoint => diagnostics.capture(page, `saved-conversation-fallback-${checkpoint}`),
+              this.config.useSavedChats,
+            );
+            await diagnostics.capture(page, "saved-conversation-fallback-ready");
+          }
         }
         try {
           return await this.selectModelAndEffort(
@@ -6044,9 +6149,15 @@ export class ChatGptBrowserWorker {
         } catch (error) {
           // ChatGPT can temporarily omit the picker while a retained tab hydrates. No Send has
           // happened at this point, so one same-page reload is safe and keeps the conversation.
+          const recoverableModelControlFailure = error instanceof ChatGptWebAdapterError
+            && ["chatgpt_model_control_unavailable", "model_version_unavailable"].includes(error.code);
+          // A control read can time out while ChatGPT remounts the picker even though the
+          // authenticated page remains healthy. This happens before Send, so one retained-page
+          // reload is as safe as the existing unavailable-control recovery and prevents Extra
+          // High from failing a task solely because the DOM missed a five-second observation.
+          const recoverableModelObservationTimeout = error instanceof ChatGptBrowserObservationTimeoutError;
           if (!modelControlRecoveryAvailable
-            || !(error instanceof ChatGptWebAdapterError)
-            || error.code !== "chatgpt_model_control_unavailable") throw error;
+            || (!recoverableModelControlFailure && !recoverableModelObservationTimeout)) throw error;
           modelControlRecoveryAvailable = false;
           await diagnostics.capture(page, "model-control-recovery-started");
           await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -6132,7 +6243,11 @@ export class ChatGptBrowserWorker {
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
               undefined,
               { onSubmitted: recordStageUsage, onSendActivated: async () => {
-                await this.assertSelectedEffort(page, mode);
+                // selectModelAndEffort already opened the picker and proved the family/tick
+                // before this staged submission. Reopening that remote menu here only repeats
+                // the expensive visual verification. Keep the ready-composer and URL proof so
+                // a remount still blocks an unsafe Send.
+                await this.assertSelectedEffort(page, mode, false);
                 submissionRejection.begin(page);
               } },
               undefined,
@@ -6216,12 +6331,15 @@ export class ChatGptBrowserWorker {
       let submissionBaseline = await this.captureSubmissionBaseline(page, finalPrompt);
       let catalogRefreshAvailable = mode.localTools && !reuseConversation && !prepared.multipart;
       const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
+      const promptAttachmentTimeout = reuseConversation && mode.localTools
+        ? browserStageTimeouts.retainedConnectorRebind
+        : browserStageTimeouts.promptAttachment;
       for (;;) {
         try {
           await this.runStage(
             turn.traceId,
             "prompt_attachment",
-            browserStageTimeouts.promptAttachment,
+            promptAttachmentTimeout,
             (stageSignal) => {
               const promptAbortSignal = turn.abortSignal
                 ? AbortSignal.any([stageSignal, turn.abortSignal])
@@ -6336,7 +6454,10 @@ export class ChatGptBrowserWorker {
             recordFinalUsage?.();
             return turn.onSubmitted?.();
           }, onSendActivated: async () => {
-            await this.assertSelectedEffort(page, mode);
+            // The semantic picker confirmation completed immediately before prompt attachment.
+            // At send time only verify that the proven composer still exists; avoid a second
+            // open/close animation on every normal turn.
+            await this.assertSelectedEffort(page, mode, false);
             submissionRejection.begin(page);
             await turn.onSendActivated?.();
           } },
@@ -6603,7 +6724,8 @@ export class ChatGptBrowserWorker {
               return throwMarkdownConsistencyError(error);
             }
           })();
-          if (!snapshot.completionActionVisible && !publishedLiveMarkdownPreview && liveMarkdownPreview) {
+          if (!snapshot.completionActionVisible && !publishedLiveMarkdownPreview && liveMarkdownPreview
+            && !livePublicCommentary) {
             // Current Codex-flavoured MarkdownRoot is often a single non-streamable segment.
             // Its public visible text is still stable once the root is rendered, so use it as a
             // bounded preview instead of waiting for a later sibling segment that may never come.
@@ -6633,12 +6755,23 @@ export class ChatGptBrowserWorker {
             : snapshot.traceBlocks.map(block => block.kind === "answer"
               ? { ...block, kind: "commentary" as const, complete: false }
               : block);
+          const normalizedLivePublicCommentary = livePublicCommentary.replace(/\s+/g, " ").trim();
           for (const trace of visibleTrace.observe(liveTraceBlocks, traceBoundaryVisible)) {
             if (trace.kind === "reasoning" && !trace.continuation && trace.text.startsWith("@ ")) {
               const label = trace.text.slice(2).trim();
               if (label && completedActionLabels.at(-1) !== label) completedActionLabels.push(label);
             }
-            if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
+            if (trace.kind === "commentary") {
+              const normalizedTrace = trace.text.replace(/\s+/g, " ").trim();
+              // The direct public-note poll already published this exact phase. The trace
+              // projection sees the same DOM node later, so emitting it again creates a second
+              // assistant card and makes a function/action look duplicated in Codex.
+              if (normalizedLivePublicCommentary
+                && (normalizedTrace === normalizedLivePublicCommentary
+                  || normalizedTrace.startsWith(normalizedLivePublicCommentary)
+                  || normalizedLivePublicCommentary.startsWith(normalizedTrace))) continue;
+              turn.onCommentary?.(trace.text, trace.continuation === true);
+            }
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }
           if (textDelta) emitMarkdownDelta(textDelta);

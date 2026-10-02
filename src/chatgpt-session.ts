@@ -7,6 +7,73 @@ export const CHATGPT_SAVED_CHAT_URL = "https://chatgpt.com/";
 export function chatGptNewChatUrl(useSavedChats = false): string {
   return useSavedChats ? CHATGPT_SAVED_CHAT_URL : CHATGPT_TEMPORARY_CHAT_URL;
 }
+
+// The ChatGPT home surface can retain the account's last Chat/Work selection.  Restrict this to
+// actual interactive controls and require both labels so an ordinary conversation message cannot
+// be mistaken for a mode switcher.
+export const CHATGPT_CONVERSATION_MODE_CONTROL_SELECTOR = "button, [role=tab], [role=radio]";
+
+type ChatGptConversationModeResult = "absent" | "already-chat" | "switched-from-work";
+
+function selectedModeControlState(value: string | null): boolean | undefined {
+  if (value === null) return undefined;
+  if (["true", "active", "selected", "on"].includes(value.toLowerCase())) return true;
+  if (["false", "inactive", "unselected", "off"].includes(value.toLowerCase())) return false;
+  return undefined;
+}
+
+async function isSelectedConversationModeControl(control: Locator): Promise<boolean | undefined> {
+  for (const attribute of ["aria-selected", "aria-pressed", "data-state"]) {
+    const state = selectedModeControlState(await control.getAttribute(attribute).catch(() => null));
+    if (state !== undefined) return state;
+  }
+  return undefined;
+}
+
+/**
+ * ChatGPT presents this switch only on some initial surfaces.  Its absence is normal, but if it
+ * is present this bridge must send through Chat, where the composer and connector contract live.
+ */
+export async function ensureChatGptChatMode(
+  page: Page,
+  options: { timeoutMs?: number } = {},
+): Promise<ChatGptConversationModeResult> {
+  const controls = page.locator(CHATGPT_CONVERSATION_MODE_CONTROL_SELECTOR).filter({ visible: true });
+  const chat = controls.filter({ hasText: /^\s*(?:Chat|Conversa)\s*$/i });
+  const work = controls.filter({ hasText: /^\s*(?:Work|Trabalho)\s*$/i });
+  const [chatCount, workCount] = await Promise.all([
+    chat.count().catch(() => 0),
+    work.count().catch(() => 0),
+  ]);
+  if (chatCount === 0 && workCount === 0) return "absent";
+  if (chatCount !== 1 || workCount !== 1) {
+    throw new Error("ChatGPT exposed an ambiguous Chat/Work mode control");
+  }
+
+  const chatControl = chat.first();
+  const workControl = work.first();
+  const isChatSelected = await isSelectedConversationModeControl(chatControl);
+  const isWorkSelected = await isSelectedConversationModeControl(workControl);
+  if (isChatSelected === true && isWorkSelected === false) return "already-chat";
+  if (isChatSelected !== false || isWorkSelected !== true) {
+    throw new Error("ChatGPT exposed Chat/Work controls but could not prove that Chat is selected");
+  }
+
+  const timeout = Math.max(1, options.timeoutMs ?? 3_000);
+  await chatControl.click({ timeout });
+  const deadline = Date.now() + timeout;
+  do {
+    const [chatSelected, workSelected] = await Promise.all([
+      isSelectedConversationModeControl(chatControl),
+      isSelectedConversationModeControl(workControl),
+    ]);
+    if (chatSelected === true && workSelected === false) return "switched-from-work";
+    if (Date.now() >= deadline) break;
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+  } while (true);
+  throw new Error("ChatGPT could not switch the initial surface from Work to Chat");
+}
+
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -133,7 +200,7 @@ export interface ChatGptEffortSliderState {
 }
 
 export interface ChatGptEffortActivation {
-  method: "already-open" | "click" | "pointerdown";
+  method: "already-open" | "click" | "keyboard" | "pointerdown";
   menu: Locator;
   sliderContainer: Locator;
   slider: Locator;
@@ -225,9 +292,22 @@ export async function activateChatGptEffortMenu(
 
   const settleMs = options.settleMs ?? 3_000;
   await clearGhostEffortState(page, control);
-  await control.click({ force: true, timeout: Math.max(1, settleMs) });
+  // A recovered React composer can replace the trigger between locator resolution
+  // and Playwright's pointer action. Treat that one activation failure as a failed
+  // strategy, not as a terminal model-selection failure: the same semantic button
+  // can still accept keyboard activation after it remounts.
+  await control.click({ force: true, timeout: Math.max(1, settleMs) }).catch(() => {});
   const clickedSurface = await waitForEffortSurface(page, control, settleMs);
   if (clickedSurface) return { method: "click", ...clickedSurface };
+
+  await clearGhostEffortState(page, control);
+  // The current unified picker can be rendered as an accessible combobox.  Its
+  // React click handler occasionally stays detached immediately after a page
+  // recovery, while the keyboard activation path remains available.  Use the
+  // element's semantic activation before resorting to a synthetic pointer event.
+  await control.press("Enter", { timeout: Math.max(1, settleMs) }).catch(() => {});
+  const keyboardSurface = await waitForEffortSurface(page, control, settleMs);
+  if (keyboardSurface) return { method: "keyboard", ...keyboardSurface };
 
   await clearGhostEffortState(page, control);
   await control.dispatchEvent("pointerdown", {
@@ -235,11 +315,11 @@ export async function activateChatGptEffortMenu(
     buttons: 1,
     pointerType: "mouse",
     isPrimary: true,
-  });
+  }).catch(() => {});
   const pointerSurface = await waitForEffortSurface(page, control, settleMs);
   if (pointerSurface) return { method: "pointerdown", ...pointerSurface };
   throw new Error(
-    "ChatGPT effort control did not expose its owned menu or structural slider after click and primary pointerdown",
+    "ChatGPT effort control did not expose its owned menu or structural slider after click, keyboard activation, and primary pointerdown",
   );
 }
 
@@ -324,6 +404,40 @@ export async function readChatGptEffortAvailability(
     throw new Error("ChatGPT effort availability could not be verified from its slider ticks");
   }
   return normalized.map(lock => lock === "false");
+}
+
+/** Read model evidence only from the slider's active picker. */
+export async function readChatGptModelAnnouncements(slider: Locator): Promise<string[]> {
+  return slider.evaluate(element => {
+    const document = element.ownerDocument;
+    const descriptions = (element.closest('[role="menuitem"]')?.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/).filter(Boolean).map(id => document.getElementById(id)?.textContent ?? "");
+    const menu = element.closest('[role="menu"]');
+    const visible = (node: Element): boolean => {
+      for (let parent: Element | null = node; parent; parent = parent.parentElement) {
+        if (parent.matches('[hidden], [inert], [aria-hidden="true"]')) return false;
+        const style = getComputedStyle(parent);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+      }
+      return true;
+    };
+    const headers = [...(menu?.querySelectorAll('[data-model-picker-view-toggle="true"]') ?? [])]
+      .filter(header => header.closest('[role="menu"]') === menu && visible(header));
+    if (headers.length > 1) throw new Error("ChatGPT model picker exposes multiple active model headers");
+    if (headers.length === 1) {
+      const content = headers[0]!.querySelector("[data-menu-row-content]") ?? headers[0]!;
+      const words: string[] = [];
+      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.parentElement && visible(node.parentElement)) {
+          const word = node.textContent?.trim();
+          if (word) words.push(word);
+        }
+      }
+      descriptions.push(words.join(" "));
+    }
+    return descriptions;
+  });
 }
 
 export async function readChatGptEffortSnapshot(

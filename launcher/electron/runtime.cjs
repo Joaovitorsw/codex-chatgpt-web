@@ -17,6 +17,7 @@ const {
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { windowsTrustEnvironment } = require("./windows-trust.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
@@ -208,6 +209,7 @@ class RuntimeHost {
     this.active = null;
     this.activeChild = null;
     this.lifecycleOperation = null;
+    this.bridgeRecovery = null;
     this.cleanupEphemeralSecrets();
     this.passkeyContinuationRequested = false;
     try {
@@ -224,6 +226,55 @@ class RuntimeHost {
       && this.activeChild.exitCode === null
       && this.activeChild.signalCode === null;
     return this.lifecycleOperation || this.active || (stuckChild ? "previous runtime process shutdown" : null);
+  }
+
+  requestBridgeRecovery(reason) {
+    if (reason !== "native_connector_internal_error") {
+      throw new Error("Unsupported bridge recovery reason");
+    }
+    if (this.launcherProfile !== "production") {
+      throw new Error("Bridge recovery is unavailable in the isolated DEV launcher profile");
+    }
+    if (this.bridgeRecovery) return { status: "already_queued" };
+    const recovery = this.recoverBridgeWhenIdle(reason);
+    this.bridgeRecovery = recovery;
+    void recovery.finally(() => {
+      if (this.bridgeRecovery === recovery) this.bridgeRecovery = null;
+    });
+    return { status: "queued" };
+  }
+
+  async recoverBridgeWhenIdle(reason) {
+    const deadline = Date.now() + 60_000;
+    this.logger.warn("runtime.bridge_recovery_queued", { reason });
+    while (Date.now() < deadline) {
+      if (this.currentOperation()) {
+        await new Promise(resolve => setTimeout(resolve, 2_000));
+        continue;
+      }
+      const config = this.supervisor.readConfig();
+      if (!config) {
+        this.logger.warn("runtime.bridge_recovery_skipped", { reason, detail: "runtime is not configured" });
+        return;
+      }
+      const health = await this.supervisor.proxyHealthPayload(config);
+      if (health?.accepting_turns === true
+        && health.active_http_turns === 0
+        && health.active_browser_turns === 0) {
+        try {
+          await this.supervisor.restart();
+          this.logger.info("runtime.bridge_recovery_completed", { reason });
+          return;
+        } catch (error) {
+          this.logger.warn("runtime.bridge_recovery_deferred", {
+            reason,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 2_000));
+    }
+    this.logger.warn("runtime.bridge_recovery_expired", { reason });
   }
 
   browserInteractionMode() {
@@ -617,13 +668,11 @@ class RuntimeHost {
         ? embeddedRuntimeInvocation({ app: this.app, sourceRoot: this.sourceRoot, args })
         : this.command(args);
       const result = await new Promise((resolve, reject) => {
-        const environment = options.environment
-          ? { ...options.environment }
-          : { ...process.env };
-        Object.assign(environment, {
+        const environment = windowsTrustEnvironment({
+          ...(options.environment ?? process.env),
           CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
           ...(options.env || {}),
-        });
+        }, this.platform);
         const child = spawn(invocation.executable, invocation.args, {
           cwd: invocation.cwd,
           detached: DETACH_OWNED_CHILD,
@@ -836,6 +885,12 @@ class RuntimeHost {
       timeoutMs: 15_000,
     });
     return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
+  }
+
+  async inspectBridgeRouteAtStartup() {
+    this.assertProductionProfile("Codex bridge startup inspection");
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    return this.bridgeStatus("bridge-startup-status");
   }
 
   async restoreBridgeRouteWithinOperation(operationName) {

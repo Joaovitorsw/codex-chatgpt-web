@@ -1,5 +1,5 @@
-import type { Locator, Page } from "playwright-core";
-import { activateChatGptEffortMenu, parseChatGptEffortSliderState } from "../../chatgpt-session";
+import type { Locator } from "playwright-core";
+import { activateChatGptEffortMenu, parseChatGptEffortSliderState, readChatGptModelAnnouncements } from "../../chatgpt-session";
 import type { ChatGptWebAdapterEffort, ChatGptWebModelFamily } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
@@ -14,7 +14,10 @@ function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWeb
 
 function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
   return menu.menu.getByRole("menuitemradio", {
-    name: family === "5.6" ? /^GPT[-\s]?5\.6\s+Sol(?:\s+Pro)?$/i
+    // ChatGPT has shipped this row both as "GPT-5.6 Sol" and "5.6 Sol".
+    // The product/version remains the stable identity; the decorative GPT prefix
+    // must not make an otherwise available family look absent.
+    name: family === "5.6" ? /^(?:GPT[-\s]?)?5\.6(?:\s+Sol)?(?:\s+Pro)?$/i
       // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
       : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i,
     exact: true,
@@ -42,10 +45,9 @@ async function currentFamilyOption(
 
 /** Model and effort are separate browser controls; a generic Pro label proves neither family. */
 export async function selectChatGptModelFamily(
-  page: Page,
   menu: EffortMenu,
   family: ChatGptWebModelFamily,
-  reopen: () => Promise<EffortMenu>,
+  activate: () => Promise<EffortMenu>,
 ): Promise<EffortMenu> {
   try {
     const option = await currentFamilyOption(menu, family);
@@ -67,8 +69,9 @@ export async function selectChatGptModelFamily(
     }
     await option.waitFor({ state: "visible", timeout: 5_000 });
     await option.click({ timeout: 5_000 });
-    await page.keyboard.press("Escape");
-    const selected = await reopen();
+    // Selecting a family returns the open picker to its slider. Closing it and
+    // immediately reopening races the outgoing menu's cleanup in ChatGPT.
+    const selected = await activate();
     const deadline = Date.now() + 1_000;
     do {
       const current = await currentFamilyOption(selected, family);
@@ -116,10 +119,7 @@ export async function assertChatGptModelFamily(
       await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),
       await menu.slider.getAttribute("aria-valuenow"),
     );
-    const descriptions = await menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]").evaluate(element => (
-      (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
-        .map(id => element.ownerDocument.getElementById(id)?.textContent ?? "")
-    ));
+    const descriptions = await readChatGptModelAnnouncements(menu.slider);
     if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));

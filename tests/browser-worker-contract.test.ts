@@ -564,7 +564,14 @@ test("chat preparation preserves page-read and composer errors instead of report
     prepareChatSurface(page: unknown): Promise<unknown>;
   }).prepareChatSurface;
   for (const error of [new ChatGptBrowserObservationTimeoutError(5_000), new Error("ChatGPT composer is unavailable")]) {
-    const page = { url: () => "https://chatgpt.com/?temporary-chat=true" };
+    const absentModeControl = {
+      filter: () => absentModeControl,
+      count: async () => 0,
+    };
+    const page = {
+      url: () => "https://chatgpt.com/?temporary-chat=true",
+      locator: () => absentModeControl,
+    };
     await expect(prepare.call({ activeComposer: async () => { throw error; } }, page)).rejects.toBe(error);
   }
 });
@@ -638,15 +645,16 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
   const assistantLocator = { id: "assistant-turn" };
   const page = {
     isClosed: () => false,
+    evaluate: async () => "",
     locator: (selector: string) => selector.startsWith("[data-turn-id=")
       ? assistantLocator
       : hiddenLocator,
   } as unknown as Page;
-  let sendPresses = 0;
+  let sendClicks = 0;
   const sendButton = {
     waitFor: async () => {},
     isEnabled: async () => true,
-    press: async () => { sendPresses += 1; },
+    click: async () => { sendClicks += 1; },
   };
   const composer = {
     locator: () => ({ locator: () => ({ first: () => sendButton }) }),
@@ -706,7 +714,7 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
   );
 
   expect(evidence).toBe("mcp_tool_call");
-  expect(sendPresses).toBe(1);
+  expect(sendClicks).toBe(1);
   expect(domObservations).toBe(2);
   expect(recoveries).toBe(1);
   expect(lifecycle).toEqual(["activated", "submitted"]);
@@ -758,15 +766,14 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     isClosed: () => false,
     locator: () => hiddenLocator,
   } as unknown as Page;
-  let pressOptions: { noWaitAfter?: boolean; signal?: AbortSignal; timeout?: number } | undefined;
+  let clickOptions: { noWaitAfter?: boolean; signal?: AbortSignal; timeout?: number } | undefined;
   const sendButton = {
     waitFor: async () => {},
     isEnabled: async () => true,
-    press: async (
-      _key: string,
+    click: async (
       options?: { noWaitAfter?: boolean; signal?: AbortSignal; timeout?: number },
     ) => {
-      pressOptions = options;
+      clickOptions = options;
       if (options?.timeout !== 0) throw new Error("nested locator timeout replaced the outer stage budget");
     },
   };
@@ -781,11 +788,11 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     1_000,
     stageSignal => worker.sendAttachedPrompt(page, {}, undefined, stageSignal),
   )).resolves.toBe("user_turn");
-  expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: 0 });
-  expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
+  expect(clickOptions).toMatchObject({ noWaitAfter: true, timeout: 0 });
+  expect(clickOptions?.signal).toBeInstanceOf(AbortSignal);
 });
 
-test("a drafted follow-up waits for the previous response and then sends from a fresh baseline", async () => {
+test("a drafted direction stops the previous response and then sends from a fresh baseline", async () => {
   const worker = ChatGptBrowserWorker.forProvider({
     adapter: "chatgpt-web",
     baseUrl: `browser://queued-follow-up-${Date.now()}`,
@@ -803,6 +810,7 @@ test("a drafted follow-up waits for the previous response and then sends from a 
   const stop = {
     last() { return this; },
     isVisible: async () => priorRunning,
+    click: async () => { priorRunning = false; },
     waitFor: async ({ state, timeout }: { state: string; timeout: number }) => {
       expect(state).toBe("hidden");
       expect(timeout).toBe(0);
@@ -813,7 +821,7 @@ test("a drafted follow-up waits for the previous response and then sends from a 
     first() { return this; },
     waitFor: async () => { expect(priorRunning).toBeFalse(); },
     isEnabled: async () => true,
-    press: async () => { sends += 1; },
+    click: async () => { sends += 1; },
   };
   const composer = { locator: () => ({ locator: () => sendButton }) };
   const hidden = {
@@ -845,8 +853,8 @@ test("a drafted follow-up waits for the previous response and then sends from a 
   );
   expect(result).toBe("user_turn");
   expect(sends).toBe(1);
-  expect(checkpoints).toContain("send-queued-behind-active-response");
-  expect(checkpoints).toContain("send-queue-released");
+  expect(checkpoints).toContain("send-steering-stop-requested");
+  expect(checkpoints).toContain("send-steering-stop-settled");
 });
 
 test("two-part saved chats re-prove unchanged effort after the first message creates the conversation URL", async () => {
@@ -1023,6 +1031,10 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
   const makePage = (name: string) => ({
     name,
     isClosed: () => false,
+    // The production wait loop publishes any visible activity before binding the
+    // assistant turn. This fixture exercises only the binding recovery, so it
+    // intentionally exposes no activity.
+    evaluate: async () => "",
     locator: (selector: string) => selector.startsWith("[data-turn-id=")
       ? assistantLocator
       : hiddenLocator,
@@ -1089,6 +1101,7 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
   const assistantLocator = { id: "assistant" };
   const page = {
     isClosed: () => false,
+    evaluate: async () => "",
     locator: (selector: string) => selector.startsWith("[data-turn-id=") ? assistantLocator : hiddenLocator,
   } as unknown as Page;
   const realDateNow = Date.now;
@@ -1359,6 +1372,15 @@ test("prompt attachment retries once only before submission evidence without cha
   }, {}, "normal prompt", false, false, baseline);
   expect(normalAttempts).toBe(2);
   expect(normalResets).toBe(1);
+});
+
+test("submission accepts the newest user-shaped App turn when one Send mounts an activity shell", () => {
+  expect(chatGptSubmissionEvidence({
+    initialTurnIdentities: ["old-user", "old-assistant"],
+    userIdentities: ["old-user", "app-activity-shell", "submitted-user"],
+    responseIdentities: ["old-assistant"],
+    generationRunning: true,
+  })).toBe("user_turn");
 });
 
 test("prompt insertion stops before touching the composer when its stage is already aborted", async () => {
@@ -1633,6 +1655,34 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     "clear", "focus", "type", "menu:1",
     "clear", "focus", "type", "menu:2",
     "activate", "selected",
+  ]);
+});
+
+test("a retained connector rebind waits for the active ChatGPT response before opening a menu", async () => {
+  const checkpoints: string[] = [];
+  let visible = true;
+  const stop = {
+    last() { return this; },
+    isVisible: async () => visible,
+    waitFor: async ({ state, timeout }: { state: string; timeout: number }) => {
+      expect(state).toBe("hidden");
+      expect(timeout).toBe(0);
+      visible = false;
+    },
+  };
+  const page = { locator: () => stop };
+  const waitForRetainedConnectorResponse = (ChatGptBrowserWorker.prototype as unknown as {
+    waitForRetainedConnectorResponse(
+      page: unknown,
+      capture?: (checkpoint: string) => Promise<void>,
+    ): Promise<void>;
+  }).waitForRetainedConnectorResponse;
+
+  await waitForRetainedConnectorResponse.call({}, page, async checkpoint => { checkpoints.push(checkpoint); });
+
+  expect(checkpoints).toEqual([
+    "retained-connector-awaiting-active-response",
+    "retained-connector-active-response-settled",
   ]);
 });
 
@@ -2404,12 +2454,13 @@ test("retained tool turns restore a missing connector before inserting the conti
   await attachPrompt.call({
     activeComposer: async () => initialComposer,
     connectorIsSelected: async () => false,
+    waitForRetainedConnectorResponse: async () => { calls.push("wait"); },
     selectConnector: async () => { calls.push("select"); return selectedComposer; },
     insertPromptText: async (_page: unknown, text: string) => { expect(text).toBe(" continue"); calls.push("insert"); },
     assertPromptAttached: async () => { calls.push("assert"); },
     clearChatGptComposerState: async () => { calls.push("clear"); },
   }, dialogPage("").page, "continue", true, undefined, undefined, false, undefined, true);
-  expect(calls).toEqual(["select", "focus", "end", "insert", "assert"]);
+  expect(calls).toEqual(["wait", "select", "focus", "end", "insert", "assert"]);
 });
 
 test("attachment readiness waits for the visible filename and the enabled send button", async () => {
@@ -2655,20 +2706,22 @@ test("Think attachment runs after fresh connector selection and rechecks retaine
     const submitted: boolean[] = [];
     const worker = {
       activeComposer: async () => ui.composer,
+      connectorIsSelected: async () => ui.state.connectors.includes("Codex Native2"),
+      waitForRetainedConnectorResponse: async () => {},
       selectConnector: async () => { connectorSelections += 1; ui.state.connectors = ["Codex Native2"]; return ui.composer; },
       insertPromptText: async () => { submitted.push(ui.state.pressed); },
       assertPromptAttached: async () => {}, clearChatGptComposerState: async () => { ui.state.draft = ""; ui.state.connectors = []; },
     };
     await attach.call(worker, ui.page, "requested task", localTools, undefined, undefined, false, undefined, retained, true);
     expect(submitted).toEqual([true]);
-    expect(connectorSelections).toBe(localTools && !retained ? 1 : 0);
-    if (localTools && !retained) expect(ui.state.connectors).toEqual(["Codex Native2"]);
+    expect(connectorSelections).toBe(localTools ? 1 : 0);
+    if (localTools) expect(ui.state.connectors).toEqual(["Codex Native2"]);
     if (retained) {
       ui.state.pressed = false;
       await attach.call(worker, ui.page, "follow-up task", localTools, undefined, undefined, false, undefined, retained, true);
       expect(submitted).toEqual([true, true]);
       expect(ui.state.commands).toEqual(["/think", "/think"]);
-      expect(connectorSelections).toBe(0);
+      expect(connectorSelections).toBe(localTools ? 1 : 0);
     }
   }
 });
@@ -2740,8 +2793,9 @@ test("an unrelated Continue dialog is never auto-accepted", async () => {
   expect(lookedForButton).toBeFalse();
 });
 
-function dialogPage(text: string, buttonText = "Got it", errorActionVisible = false): { page: Page; pressed: string[] } {
+function dialogPage(text: string, buttonText = "Got it", errorActionVisible = false): { page: Page; pressed: string[]; clicked: number } {
   const pressed: string[] = [];
+  let clicked = 0;
   const createDialog = () => {
     let matches = true;
     let buttonMatches = true;
@@ -2749,6 +2803,7 @@ function dialogPage(text: string, buttonText = "Got it", errorActionVisible = fa
       last: () => button,
       isVisible: async () => matches && buttonMatches,
       press: async (key: string) => { pressed.push(key); },
+      click: async () => { clicked += 1; },
     };
     const dialog = {
       filter: ({ hasText }: { hasText: string | RegExp }) => {
@@ -2768,6 +2823,7 @@ function dialogPage(text: string, buttonText = "Got it", errorActionVisible = fa
   };
   return {
     page: {
+      evaluate: async () => "",
       locator: () => createDialog(),
       getByText: (hasText: string | RegExp) => createDialog().filter({ hasText }),
       getByRole: (_role: string, options?: { name?: string | RegExp }) => createDialog().getByRole(_role, options),
@@ -2781,6 +2837,7 @@ function dialogPage(text: string, buttonText = "Got it", errorActionVisible = fa
       },
     } as unknown as Page,
     pressed,
+    get clicked() { return clicked; },
   };
 }
 
@@ -2960,6 +3017,22 @@ test("effort readback rejects a changed selection or surface before activating S
   }
 });
 
+test("send-time effort proof keeps the selected family without reopening its picker", async () => {
+  const selection = { url: "https://chatgpt.com/c/current", label: "Médio" };
+  const control = { getAttribute: async () => "false" };
+  const controls = { filter() { return this; }, count: async () => 1, first: () => control };
+  const composer = { locator: () => ({ locator: () => controls }), isEditable: async () => true };
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    activeComposer: async () => composer,
+  }) as {
+    assertSelectedEffort(page: unknown, mode: unknown, verifyFamily: boolean): Promise<void>;
+  };
+
+  await expect(worker.assertSelectedEffort({ url: () => selection.url }, {
+    selection, modelFamily: "5.6", uiEffortIndex: 1,
+  }, false)).resolves.toBeUndefined();
+});
+
 test("the current response error action can be retried once in the same conversation", async () => {
   for (const text of [
     "An error occurred while generating the response.",
@@ -2980,7 +3053,7 @@ test("a retained conversation load error retries the same ChatGPT conversation",
   const fixture = dialogPage("Could not load this ChatGPT conversation", "Retry");
 
   await expect(retryChatGptConversationLoad(fixture.page)).resolves.toBe(true);
-  expect(fixture.pressed).toEqual(["Enter"]);
+  expect(fixture.clicked).toBe(1);
 });
 
 test("a retained conversation load error without Retry remains a retryable upstream failure", async () => {

@@ -68,6 +68,7 @@ echo Starting Codex Web GPT from local source with the production profile...
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 if not "%EXIT_CODE%"=="0" echo Launcher exited with code %EXIT_CODE%.
+if /i "%CODEX_WEB_GPT_SILENT%"=="1" exit /b %EXIT_CODE%
 echo The local launcher stopped. Press any key to close this terminal.
 pause >nul
 exit /b %EXIT_CODE%

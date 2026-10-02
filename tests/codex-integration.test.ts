@@ -28,6 +28,7 @@ import {
   managedAgentMaxDepthLine,
   restoreFileSnapshot,
   snapshotFile,
+  writeIntegrationState,
   writeFilesWithCompensation,
 } from "../src/codex-integration-shared";
 
@@ -73,6 +74,33 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
+  test("refuses an invalid generated config before changing the config or journals", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\n';
+    writeFileSync(configPath, original);
+
+    expect(() => writeIntegrationState(
+      {
+        version: 2,
+        configPath,
+        catalogPath: "catalog",
+        catalogSha256: "hash",
+        providerBlock: "",
+        installed: { model_provider: "chatgpt-web", model_catalog_json: "catalog" },
+        previous: {
+          model_provider: { present: false },
+          model_catalog_json: { present: false },
+        },
+      },
+      { path: configPath, data: `${original}model = "gpt-6"\n` },
+    )).toThrow("Refusing to write an invalid Codex config");
+
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(existsSync(getCodexJournalPath())).toBe(false);
+    expect(existsSync(getCodexJournalRecoveryPath())).toBe(false);
+  });
+
   test("route install, update, switching and removal preserve a symlinked shared Codex config", () => {
     const { root, codexHome } = fixture();
     const shared = join(root, "shared");

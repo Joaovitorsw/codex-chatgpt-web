@@ -15,7 +15,61 @@ import {
   chatGptEffortSlider,
   chatGptNewChatUrl,
   detectChatGptAccountCapabilities,
+  ensureChatGptChatMode,
 } from "../src/chatgpt-session";
+
+function chatWorkModePage(initialMode: "chat" | "work" | "ambiguous") {
+  let mode = initialMode;
+  const chat = {
+    click: async () => { mode = "chat"; },
+    getAttribute: async (name: string) => name === "aria-selected"
+      ? String(mode === "chat") : null,
+  };
+  const work = {
+    click: async () => { mode = "work"; },
+    getAttribute: async (name: string) => name === "aria-selected"
+      ? String(mode === "work") : null,
+  };
+  const absent = { count: async () => 0 };
+  const controls = {
+    filter: ({ hasText, visible }: { hasText?: RegExp; visible?: boolean }) => {
+      if (visible) return controls;
+      return hasText?.test("Chat") ? {
+        count: async () => 1,
+        first: () => chat,
+      } : hasText?.test("Work") ? {
+        count: async () => 1,
+        first: () => work,
+      } : absent;
+    },
+  };
+  return {
+    page: {
+      locator: () => controls,
+    },
+    currentMode: () => mode,
+  };
+}
+
+test("ChatGPT switches the initial Chat/Work control back to Chat before dispatch", async () => {
+  const fixture = chatWorkModePage("work");
+  await expect(ensureChatGptChatMode(fixture.page as never, { timeoutMs: 0 }))
+    .resolves.toBe("switched-from-work");
+  expect(fixture.currentMode()).toBe("chat");
+});
+
+test("ChatGPT leaves an already selected Chat control untouched", async () => {
+  const fixture = chatWorkModePage("chat");
+  await expect(ensureChatGptChatMode(fixture.page as never, { timeoutMs: 0 }))
+    .resolves.toBe("already-chat");
+  expect(fixture.currentMode()).toBe("chat");
+});
+
+test("ChatGPT fails closed when the initial mode control has conflicting selection state", async () => {
+  const fixture = chatWorkModePage("ambiguous");
+  await expect(ensureChatGptChatMode(fixture.page as never, { timeoutMs: 0 }))
+    .rejects.toThrow("could not prove that Chat is selected");
+});
 
 test("effort slider selects the newest semantic node when ChatGPT renders duplicates", () => {
   const selectedSlider = { id: "newest-slider" };
@@ -177,11 +231,11 @@ test.each(["aria-expanded", "data-state"])("effort activation does not bind a cl
   expect(clicks).toBe(1);
 });
 
-test("effort activation retries one ghost click with a primary pointerdown", async () => {
+test("effort activation retries a ghost click through keyboard activation before a primary pointerdown", async () => {
   let ghostOpen = false;
-  let pointerOpened = false;
+  let keyboardOpened = false;
   const events: unknown[] = [];
-  const ownedMenu = { isVisible: async () => pointerOpened };
+  const ownedMenu = { isVisible: async () => keyboardOpened };
   const hiddenSurface = {
     filter() { return this; },
     last() { return this; },
@@ -190,7 +244,7 @@ test("effort activation retries one ghost click with a primary pointerdown", asy
   };
   const control = {
     getAttribute: async (name: string) => {
-      if (name === "aria-controls") return pointerOpened ? "radix-effort-menu" : null;
+      if (name === "aria-controls") return keyboardOpened ? "radix-effort-menu" : null;
       if (name === "aria-expanded") return ghostOpen ? "true" : "false";
       if (name === "data-state") return ghostOpen ? "open" : "closed";
       return null;
@@ -199,10 +253,15 @@ test("effort activation retries one ghost click with a primary pointerdown", asy
       events.push(["click", options]);
       ghostOpen = true;
     },
+    press: async (key: string, options: unknown) => {
+      events.push(["press", key, options]);
+      ghostOpen = true;
+      keyboardOpened = true;
+    },
     dispatchEvent: async (name: string, detail: unknown) => {
       events.push([name, detail]);
       ghostOpen = true;
-      pointerOpened = true;
+      keyboardOpened = true;
     },
   };
   const page = {
@@ -219,13 +278,41 @@ test("effort activation retries one ghost click with a primary pointerdown", asy
   };
 
   const activation = await activateChatGptEffortMenu(page as never, control as never, { settleMs: 0 });
-  expect(activation.method).toBe("pointerdown");
+  expect(activation.method).toBe("keyboard");
   expect(activation.menu).toBe(ownedMenu as never);
   expect(events).toEqual([
     ["click", { force: true, timeout: 1 }],
     ["keyboard", "Escape"],
-    ["pointerdown", { button: 0, buttons: 1, pointerType: "mouse", isPrimary: true }],
+    ["press", "Enter", { timeout: 1 }],
   ]);
+});
+
+test("effort activation uses keyboard when the recovered trigger rejects a pointer click", async () => {
+  let keyboardOpened = false;
+  const ownedMenu = { isVisible: async () => keyboardOpened };
+  const hiddenSurface = {
+    filter() { return this; }, last() { return this; }, locator() { return this; },
+    isVisible: async () => false,
+  };
+  const control = {
+    getAttribute: async (name: string) => {
+      if (name === "aria-controls") return keyboardOpened ? "radix-effort-menu" : null;
+      if (name === "aria-expanded") return keyboardOpened ? "true" : "false";
+      if (name === "data-state") return keyboardOpened ? "open" : "closed";
+      return null;
+    },
+    click: async () => { throw new Error("intercepted by a remounted composer"); },
+    press: async () => { keyboardOpened = true; },
+    dispatchEvent: async () => { throw new Error("keyboard fallback should have opened first"); },
+  };
+  const page = {
+    locator: (selector: string) => selector === '[id="radix-effort-menu"]' ? ownedMenu : hiddenSurface,
+    keyboard: { press: async () => {} },
+  };
+
+  const activation = await activateChatGptEffortMenu(page as never, control as never, { settleMs: 0 });
+  expect(activation.method).toBe("keyboard");
+  expect(activation.menu).toBe(ownedMenu as never);
 });
 
 test("effort activation fails closed when neither event exposes a structural surface", async () => {
@@ -238,6 +325,7 @@ test("effort activation fails closed when neither event exposes a structural sur
   const control = {
     getAttribute: async () => null,
     click: async () => {},
+    press: async () => {},
     dispatchEvent: async () => {},
   };
   const page = {

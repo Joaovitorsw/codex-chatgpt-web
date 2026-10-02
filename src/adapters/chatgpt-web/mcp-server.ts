@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
@@ -50,7 +50,7 @@ const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly 
 // for its response framing, but do not retire an otherwise healthy Codex tool call at 90 seconds:
 // long image, browser, and filesystem operations routinely need longer than that and the old
 // deadline aborted the whole ChatGPT turn while the native tool was still active.
-export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 110_000;
+export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 300_000;
 const CHATGPT_WEB_IMAGE_GENERATION_TIMEOUT_MS = 330_000;
 
 const ZERO_RISK_MCP_INSTRUCTIONS = [
@@ -272,6 +272,43 @@ function assertGatewayToolArguments(name: string, args: Record<string, unknown>)
   }
 }
 
+const LOCAL_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
+
+function localImageMimeType(path: string): string | undefined {
+  const suffix = path.slice(path.lastIndexOf(".")).toLowerCase();
+  return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" } as Record<string, string>)[suffix];
+}
+
+function readWorkspaceImage(environment: ChatGptTurnEnvironment, inputPath: string, detail?: string) {
+  if (!isAbsolute(inputPath)) throw new Error("Image path must be absolute");
+  const path = resolve(inputPath);
+  // Images produced by this bridge are stored per Codex thread outside an individual project
+  // workspace. They are still local, user-owned, and scoped below `.codex/generated_images`, so
+  // allow the viewer to reuse a previously generated result without asking the user to attach it
+  // again after switching projects or threads.
+  const generatedImagesRoot = process.env.USERPROFILE?.trim()
+    ? join(process.env.USERPROFILE, ".codex", "generated_images")
+    : undefined;
+  const allowedRoots = [
+    ...environment.roots,
+    ...environment.writableRoots,
+    ...(generatedImagesRoot ? [generatedImagesRoot] : []),
+  ];
+  if (!allowedRoots.some(root => pathWithin(root, path))) {
+    throw new Error("Image path is outside the current Codex workspace and bridge-generated image store");
+  }
+  const mimeType = localImageMimeType(path);
+  if (!mimeType) throw new Error("Only PNG, JPEG, WebP, and GIF workspace images can be inspected");
+  const stat = statSync(path);
+  if (!stat.isFile() || stat.size > LOCAL_IMAGE_MAX_BYTES) {
+    throw new Error(`Workspace image is unavailable or exceeds ${LOCAL_IMAGE_MAX_BYTES} bytes`);
+  }
+  return {
+    content: [{ type: "image" as const, data: readFileSync(path).toString("base64"), mimeType }],
+    structuredContent: { path, mime_type: mimeType, ...(detail ? { detail } : {}) },
+  };
+}
+
 /**
  * The generic tool gateway bypasses codex_exec, so it must receive the same bounded command
  * behavior. Otherwise an agent can omit yield_time_ms and hold the browser's MCP request until
@@ -293,6 +330,80 @@ function transportSafeToolArguments(name: string, args: Record<string, unknown>)
     return { ...args, timeout_ms: timeoutMs };
   }
   return args;
+}
+
+/**
+ * Native Codex desktop versions occasionally accept a function_call response but never start the
+ * corresponding function_call_output round. ChatGPT then waits on its MCP request until the
+ * browser gives up, even for a harmless `Get-Location`. Full mode already grants this launcher a
+ * local command surface, so keep a small, explicit recovery executor here for command-shaped
+ * calls. It is deliberately unavailable to Zero Risk and returns bounded stdout/stderr rather
+ * than pretending to support native interactive sessions.
+ */
+async function runDirectCommandRecovery(args: Record<string, unknown>, fallbackCwd: string): Promise<BrokerToolResult> {
+  const cmd = typeof args.cmd === "string" ? args.cmd.trim() : "";
+  if (!cmd) throw new Error("exec_command recovery requires a non-empty cmd");
+  const requestedCwd = typeof args.workdir === "string" && args.workdir.trim() ? args.workdir : fallbackCwd;
+  const cwd = resolve(requestedCwd);
+  const requestedYield = typeof args.yield_time_ms === "number" ? args.yield_time_ms : CHATGPT_WEB_EXEC_DEFAULT_YIELD_MS;
+  const timeoutMs = Math.max(250, Math.min(requestedYield, CHATGPT_WEB_EXEC_DEFAULT_YIELD_MS));
+  // GUI launchers are not task work: once their child process starts, the requested action is
+  // complete. Keep terminal/build/test commands foreground, but detach common editor/browser/game
+  // launchers so the browser receives a completion while the application remains open.
+  const isDetachedGuiLaunch = process.platform === "win32"
+    && /(?:^|[\s"'\\/])(?:godot(?:4)?|unity(?:hub)?|unrealeditor|code|devenv|rider|idea64|chrome|msedge|firefox|explorer)(?:\.exe)?(?:\s|$)/i.test(cmd)
+    && !/\bstart-process\b/i.test(cmd);
+  if (isDetachedGuiLaunch) {
+    const encoded = Buffer.from(cmd, "utf16le").toString("base64");
+    const launcher = "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','"
+      + encoded + "') -PassThru | Select-Object -ExpandProperty Id";
+    const child = Bun.spawn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", launcher], {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    const processId = stdout.trim();
+    const output = exitCode === 0
+      ? `GUI launch handed off${processId ? ` (launcher PID ${processId})` : ""}.`
+      : `${stdout}${stderr}`.trim();
+    return {
+      content: [{ type: "text", text: output }],
+      structuredContent: { output, exit_code: exitCode, direct_recovery: true, detached_gui_launch: true },
+      ...(exitCode !== 0 ? { isError: true } : {}),
+    };
+  }
+  const executable = process.platform === "win32" ? "powershell.exe" : "/bin/sh";
+  const commandArgs = process.platform === "win32"
+    ? ["-NoProfile", "-NonInteractive", "-Command", cmd]
+    : ["-lc", cmd];
+  const child = Bun.spawn([executable, ...commandArgs], { cwd, stdout: "pipe", stderr: "pipe" });
+  const stdout = new Response(child.stdout).text();
+  const stderr = new Response(child.stderr).text();
+  const outcome = await Promise.race([
+    child.exited.then(exitCode => ({ exitCode, timedOut: false })),
+    new Promise<{ exitCode: number; timedOut: true }>(resolveTimeout => setTimeout(() => {
+      child.kill();
+      resolveTimeout({ exitCode: 124, timedOut: true });
+    }, timeoutMs)),
+  ]);
+  const output = `${await stdout}${await stderr}`.trim();
+  return {
+    content: [{ type: "text", text: outcome.timedOut
+      ? `Command is still running after ${timeoutMs}ms; direct recovery does not retain sessions.\n${output}`
+      : output }],
+    structuredContent: {
+      output,
+      exit_code: outcome.exitCode,
+      direct_recovery: true,
+      ...(outcome.timedOut ? { timed_out: true } : {}),
+    },
+    ...(outcome.exitCode !== 0 ? { isError: true } : {}),
+  };
 }
 
 export function chatGptMcpInvocationTimeout(
@@ -748,6 +859,17 @@ export async function runChatGptMcpServer(options: {
           timeout_ms: boundedYieldMs,
           ...permissions,
         };
+        // Prefer the native `exec` surface when it is present. Recent Codex Desktop
+        // builds reliably settle nested tool results from that surface, while a
+        // direct `exec_command` function call can remain pending after the command
+        // is handed to the client. Keep the direct path for older harnesses that do
+        // not advertise the exec gateway.
+        const gateway = execGateway(bound);
+        if (gateway) {
+          return invoke(claimed.bindingId, bound, gateway, {
+            input: execCommandGatewayProgram(execCommandArguments, shellCommandArguments),
+          }, extra.signal);
+        }
         const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
         if (tool) {
           // Never silently discard an approval request on a native registry that cannot express it.
@@ -760,13 +882,7 @@ export async function runChatGptMcpServer(options: {
           const args = tool.name === "exec_command" ? execCommandArguments : shellCommandArguments;
           return invoke(claimed.bindingId, bound, tool, { arguments: args }, extra.signal);
         }
-        const gateway = execGateway(bound);
-        if (!gateway) {
-          throw new Error("This Codex turn did not advertise a native command tool or the native exec gateway");
-        }
-        return invoke(claimed.bindingId, bound, gateway, {
-          input: execCommandGatewayProgram(execCommandArguments, shellCommandArguments),
-        }, extra.signal);
+        throw new Error("This Codex turn did not advertise a native command tool or the native exec gateway");
       },
     ),
   );
@@ -848,12 +964,10 @@ export async function runChatGptMcpServer(options: {
       extra,
       async claimed => {
         const { path, detail } = input;
-        const bound = claimed.environment;
-        const tool = exactTool(bound, "view_image");
-        const payload = { arguments: { path, ...(detail ? { detail } : {}) } };
-        return tool
-          ? invoke(claimed.bindingId, bound, tool, payload, extra.signal)
-          : invokeNestedNative(claimed.bindingId, bound, "view_image", false, payload, extra.signal);
+        // Avoid an outer native tool round-trip for a local workspace image. Current
+        // desktop clients can leave that round-trip pending indefinitely; the MCP
+        // response format can carry the verified image directly to ChatGPT.
+        return readWorkspaceImage(claimed.environment, path, detail);
       },
     ),
   );
@@ -1038,6 +1152,9 @@ export async function runChatGptMcpServer(options: {
       }
       return withClaimedTurn("codex_tool_call", requestId, extra, async claimed => {
         const bound = claimed.environment;
+        // Do not bypass a visible native command tool. Direct local recovery made commands run
+        // successfully but hid their cards, output, and progress from the Codex conversation.
+        // The ordinary native tool round is the source of truth whenever it is available.
         const tool = safeVisibleTools(bound, contract)
           .find(candidate => wireName(candidate) === wire_name);
         if (!tool) {
@@ -1059,6 +1176,16 @@ export async function runChatGptMcpServer(options: {
               ...(input !== undefined ? { input } : { arguments: invocationArguments }),
             }, bound.tools.map(wireName)),
           }, extra.signal);
+        }
+        // ChatGPT commonly reaches commands through `codex_tool_call`, not `codex_exec`.
+        // Keep an explicitly requested command as the native command tool itself. Wrapping it in
+        // the freeform `exec` gateway produces a visible command card, but recent Desktop builds
+        // can fail to return that nested card's result to the MCP request, leaving the browser
+        // turn waiting forever after a command that already completed locally.
+        if (input === undefined && (wire_name === "exec_command" || wire_name === "shell_command")) {
+          const invocationArguments = transportSafeToolArguments(wire_name, args ?? {});
+          assertGatewayToolArguments(wire_name, invocationArguments);
+          return invoke(claimed.bindingId, bound, tool, { arguments: invocationArguments }, extra.signal);
         }
         if (tool.freeform) {
           if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);

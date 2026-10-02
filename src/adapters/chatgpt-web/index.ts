@@ -11,6 +11,7 @@ import {
   LauncherManualTurnTimedOutError,
   markLauncherManualTurnStarted,
   releaseLauncherRetainedConversation,
+  requestLauncherRuntimeRecovery,
   startLauncherManualTurn,
   waitForLauncherManualSent,
   waitForLauncherManualTerminal,
@@ -246,20 +247,52 @@ function brokerResult(message: CodexToolResultMessage): BrokerToolResult {
   };
 }
 
+export function chatGptToolProgressLabel(wireName: string): string {
+  const leaf = wireName.split("__").at(-1) ?? wireName;
+  switch (leaf) {
+    case "exec_command":
+    case "shell_command":
+      return "Executando comando local";
+    case "write_stdin":
+      return "Acompanhando processo local em execução";
+    case "apply_patch":
+      return "Aplicando alterações nos arquivos";
+    case "view_image":
+      return "Verificando imagem local";
+    case "tool_search":
+    case "codex_tool_inventory":
+      return "Localizando a ferramenta necessária";
+    default:
+      return "Executando ferramenta local";
+  }
+}
+
+/**
+ * A retired per-turn capability must stop an operation that is still touching the
+ * local machine. Once ChatGPT has accepted the message and no native call is in
+ * flight, however, aborting its browser owner loses an otherwise valid final
+ * response merely because Codex reconnected or replaced its HTTP observer.
+ */
+export function chatGptCapabilityRetirementRequiresBrowserAbort(
+  submissionAccepted: boolean,
+  activeToolCalls: number,
+): boolean {
+  return !submissionAccepted || activeToolCalls > 0;
+}
+
 function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
   for (const request of requests) {
     // ChatGPT can execute an MCP call before it has rendered any public planning prose. Give
     // Codex a compact, truthful progress milestone in that gap; the native tool card supplies
     // the authoritative arguments and result immediately after this line.
-    const [namespace, name] = request.wireName.split("__", 2);
-    const label = name ?? namespace;
+    const label = chatGptToolProgressLabel(request.wireName);
     // A tool boundary is semantically different from the preceding public ChatGPT prose.
     // Without it Codex appends "Executando ..." to the final word of that prose, hiding the
     // gray action/card transition that remains visibly separate in the ChatGPT Activity UI.
     emit({ type: "assistant_boundary" });
     emit({
       type: "text_delta",
-      text: `Executando ${namespace && name ? `${namespace} / ` : ""}${label}.`,
+      text: `${label}.`,
       phase: "commentary",
     });
     emit({ type: "tool_call_start", id: request.callId, name: request.wireName });
@@ -427,6 +460,19 @@ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Erro
   );
 }
 
+function hasNativeConnectorInternalFailure(answer: string): boolean {
+  const normalized = answer.toLocaleLowerCase("en-US");
+  const internalFailure = normalized.includes("the tool failed internally")
+    || normalized.includes("tool failed internally")
+    || normalized.includes("ferramenta falhou internamente")
+    || normalized.includes("erro interno do executor");
+  const connectorReference = normalized.includes("codex native")
+    || normalized.includes("conector local")
+    || normalized.includes("local connector")
+    || normalized.includes("executor local");
+  return internalFailure && connectorReference;
+}
+
 function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSession): CodexToolResultMessage[] {
   const byId = new Map<string, CodexToolResultMessage>();
   for (const message of parsed.context.messages) {
@@ -448,6 +494,10 @@ function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequ
 
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
+// The browser observer normally acknowledges a just-rendered connector boundary before the
+// matching native function_call is released. A renderer remount can lose that acknowledgement
+// even though the MCP request was accepted, which used to hold the function batch forever.
+const CHATGPT_TOOL_BATCH_OBSERVATION_GRACE_MS = 1_500;
 
 export function createChatGptWebAdapter(
   provider: CodexProviderConfig,
@@ -605,6 +655,7 @@ export function createChatGptWebAdapter(
     });
     const browserAbort = new AbortController();
     let browserOwnerSettled = false;
+    const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
     const trackBrowserOwner = (browser: Promise<string>): Promise<string> => browser.finally(() => {
       browserOwnerSettled = true;
     });
@@ -620,20 +671,29 @@ export function createChatGptWebAdapter(
       observedCapabilityTokens.add(turnToken);
       void broker.waitForRetirement(turnToken).then(
         () => {
+          const hadActiveToolCalls = externalProgress.snapshot().activeToolCalls;
           const retirement = new Error("Codex Native retired the turn binding before its tool work completed");
           externalProgress.retire(retirement);
-          if (!browserOwnerSettled && !browserAbort.signal.aborted) browserAbort.abort(retirement);
+          if (!browserOwnerSettled
+            && !browserAbort.signal.aborted
+            && chatGptCapabilityRetirementRequiresBrowserAbort(submission.phase === "accepted", hadActiveToolCalls)) {
+            browserAbort.abort(retirement);
+          }
         },
         error => {
+          const hadActiveToolCalls = externalProgress.snapshot().activeToolCalls;
           const failure = new Error("ChatGPT could not observe Codex Native turn retirement", {
             cause: error,
           });
           externalProgress.retire(failure);
-          if (!browserAbort.signal.aborted) browserAbort.abort(failure);
+          if (!browserOwnerSettled
+            && !browserAbort.signal.aborted
+            && chatGptCapabilityRetirementRequiresBrowserAbort(submission.phase === "accepted", hadActiveToolCalls)) {
+            browserAbort.abort(failure);
+          }
         },
       );
     };
-    const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
     let submittedProgressAnnounced = false;
     // A canonical compaction request is side-effect free and remains safe to rebuild after an
     // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
@@ -1505,10 +1565,16 @@ export function createChatGptWebAdapter(
                       // while its same-tab observer is still recovering. Keep the causal barrier —
                       // tools are not emitted until the browser captures their text boundary — but
                       // let browser settlement or request cancellation end the wait.
-                      await externalProgress.waitForToolBatchObservation(
-                        revision,
-                        toolWaitAbort.signal,
-                      );
+                      await Promise.race([
+                        externalProgress.waitForToolBatchObservation(
+                          revision,
+                          toolWaitAbort.signal,
+                        ),
+                        new Promise<void>(resolveGrace => setTimeout(
+                          resolveGrace,
+                          CHATGPT_TOOL_BATCH_OBSERVATION_GRACE_MS,
+                        )),
+                      ]);
                     }
                     externalProgress.assertToolBatchActive(revision);
                   }
@@ -1546,6 +1612,19 @@ export function createChatGptWebAdapter(
                 ));
                 session.completeRound(roundKey);
                 chatGptWebTurnRetryPolicy.clear(retryKey);
+                if (mode.localTools
+                  && provider.chatgptWeb?.browserHostDescriptorPath
+                  && hasNativeConnectorInternalFailure(completedOutcome.answer)) {
+                  void requestLauncherRuntimeRecovery(
+                    provider.chatgptWeb.browserHostDescriptorPath,
+                    "native_connector_internal_error",
+                  ).catch(error => {
+                    console.warn(
+                      "[chatgpt-web] could not queue automatic bridge recovery: "
+                      + (error instanceof Error ? error.message : String(error)),
+                    );
+                  });
+                }
               };
               const waitForTrace = () => session.runtime.trace.wait(toolWaitAbort.signal)
                 .then(() => ({ type: "trace" as const }))

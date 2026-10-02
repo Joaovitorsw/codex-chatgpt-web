@@ -197,6 +197,9 @@ export interface CodexProviderContinuationState {
 export type AdapterEvent =
   | { type: "heartbeat" }
   | { type: "text_delta"; text: string; phase?: CodexMessagePhase }
+  | { type: "image_url"; url: string; alt?: string; phase?: CodexMessagePhase }
+  /** A completed Responses image-generation item. `result` is raw Base64, not a data URL. */
+  | { type: "image_generation"; result: string; revisedPrompt?: string; phase?: CodexMessagePhase }
   | { type: "thinking_delta"; thinking: string }
   // Opaque signed-reasoning metadata preserved when it appears in a Codex history.
   | { type: "thinking_signature"; signature: string }

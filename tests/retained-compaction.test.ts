@@ -156,6 +156,26 @@ test("one browser conversation spans native turns and rotates only at compaction
   expect(retainedConversationResumeRequest(before)?.context.messages).toEqual([
     { role: "user", content: "Continue with the next step", timestamp: 3 },
   ]);
+  const initialOrRetried = structuredClone(before);
+  initialOrRetried.context.messages = [
+    { role: "user", content: "Retry the initial local action", timestamp: 4 },
+  ];
+  // A retained launcher tab may outlive the first native response. It still needs a concrete
+  // prompt rather than aborting with "without a continuation prompt".
+  expect(retainedConversationResumeRequest(initialOrRetried)?.context.messages).toEqual([
+    { role: "user", content: "Retry the initial local action", timestamp: 4 },
+  ]);
+  const assistantFinalTail = structuredClone(before);
+  assistantFinalTail.context.messages.push({
+    role: "assistant",
+    content: [{ type: "text", text: "The retained browser turn completed, but native delivery failed." }],
+    timestamp: 5,
+  });
+  // The retained browser already has this assistant result. Replaying full native history made
+  // retry payloads hundreds of thousands of tokens long; keep just the last user request.
+  expect(retainedConversationResumeRequest(assistantFinalTail)?.context.messages).toEqual([
+    { role: "user", content: "Continue with the next step", timestamp: 3 },
+  ]);
 
   const v1Compact = structuredClone(before);
   (v1Compact._rawBody as { input: unknown[] }).input.unshift({

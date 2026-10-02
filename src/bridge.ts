@@ -366,6 +366,12 @@ export function bridgeToResponsesSSE(
       // we synthesize response.completed below, so Codex never hits the parser's
       // "stream closed before response.completed" (responses.rs) -> ApiError::Stream.
       let terminated = false;
+      // A completed Responses turn is not a cancelled HTTP request. In particular, a tool-use
+      // response must remain fully readable by Codex after `response.completed` so the client can
+      // schedule the local function call and submit its function_call_output in the next round.
+      // Aborting here races the Windows SSE consumer and can leave the ChatGPT broker waiting for
+      // a tool result that Codex never started.
+      let completedNormally = false;
       let firstOutputReported = false;
       const reportFirstOutput = (event: AdapterEvent): void => {
         if (firstOutputReported) return;
@@ -471,6 +477,55 @@ export function bridgeToResponsesSSE(
                 item_id: currentMsg.itemId, output_index: currentMsg.outputIndex,
                 content_index: 0, delta: event.text,
               });
+              break;
+            }
+            case "image_url": {
+              if (currentMsg) closeCurrentMessage();
+              if (currentReasoning) closeCurrentReasoning();
+              if (currentRawReasoning) closeCurrentRawReasoning();
+              flushHiddenRawReasoning();
+              if (currentToolCall) closeCurrentToolCall();
+              const itemId = `msg_${uuid()}`;
+              const part = { type: "input_image", image_url: event.url, detail: "high" };
+              const item = { type: "message", id: itemId, status: "completed", role: "assistant", content: [part], ...(event.phase ? { phase: event.phase } : {}) };
+              emit("response.output_item.added", { output_index: outputIndex, item: { ...item, status: "in_progress", content: [] } });
+              emit("response.content_part.added", { item_id: itemId, output_index: outputIndex, content_index: 0, part });
+              emit("response.content_part.done", { item_id: itemId, output_index: outputIndex, content_index: 0, part });
+              emit("response.output_item.done", { output_index: outputIndex, item });
+              finishedItems.push(item as OutputItem);
+              outputIndex++;
+              break;
+            }
+            case "image_generation": {
+              if (currentMsg) closeCurrentMessage();
+              if (currentReasoning) closeCurrentReasoning();
+              if (currentRawReasoning) closeCurrentRawReasoning();
+              flushHiddenRawReasoning();
+              if (currentToolCall) closeCurrentToolCall();
+              const itemId = `ig_${uuid()}`;
+              const pendingItem = {
+                type: "image_generation_call", id: itemId, status: "in_progress",
+              };
+              const item = {
+                ...pendingItem, status: "completed",
+                result: event.result,
+                ...(event.revisedPrompt ? { revised_prompt: event.revisedPrompt } : {}),
+                ...(event.phase ? { phase: event.phase } : {}),
+              };
+              // Codex clients commit image cards from the image-generation lifecycle, not from
+              // an output item containing a Base64 result alone. Replay the complete Responses
+              // sequence with the verified completed asset as the only partial frame.
+              emit("response.output_item.added", { output_index: outputIndex, item: pendingItem });
+              emit("response.image_generation_call.in_progress", { item_id: itemId, output_index: outputIndex });
+              emit("response.image_generation_call.generating", { item_id: itemId, output_index: outputIndex });
+              emit("response.image_generation_call.partial_image", {
+                item_id: itemId, output_index: outputIndex, partial_image_index: 0,
+                partial_image_b64: event.result,
+              });
+              emit("response.image_generation_call.completed", { item_id: itemId, output_index: outputIndex });
+              emit("response.output_item.done", { output_index: outputIndex, item });
+              finishedItems.push(item as OutputItem);
+              outputIndex++;
               break;
             }
             case "thinking_delta": {
@@ -625,6 +680,7 @@ export function bridgeToResponsesSSE(
                 reportTerminal("completed");
               }
               terminalEvent = true;
+              completedNormally = true;
               break;
             }
             case "incomplete": {
@@ -671,12 +727,12 @@ export function bridgeToResponsesSSE(
               terminalEvent = true;
               break;
             }
-          }
-          if (terminalEvent) {
-            onCancel?.();
-            terminated = true;
-            returnIterator();
-            break;
+            }
+            if (terminalEvent) {
+              if (!completedNormally) onCancel?.();
+              terminated = true;
+              returnIterator();
+              break;
           }
         }
       } catch (err) {
@@ -985,6 +1041,28 @@ export function buildResponseJSON(
           currentTextPhase = e.phase;
           currentText += e.text;
         }
+        break;
+      case "image_url":
+        flushText();
+        flushSummaryReasoning();
+        flushRawReasoning();
+        flushToolCall();
+        output.push({
+          type: "message", id: `msg_${uuid()}`, role: "assistant", status: "completed",
+          content: [{ type: "input_image", image_url: e.url, detail: "high" }],
+          ...(e.phase ? { phase: e.phase } : {}),
+        });
+        break;
+      case "image_generation":
+        flushText();
+        flushSummaryReasoning();
+        flushRawReasoning();
+        flushToolCall();
+        output.push({
+          type: "image_generation_call", id: `ig_${uuid()}`, status: "completed", result: e.result,
+          ...(e.revisedPrompt ? { revised_prompt: e.revisedPrompt } : {}),
+          ...(e.phase ? { phase: e.phase } : {}),
+        });
         break;
       case "thinking_delta":
         if (currentText) flushText();

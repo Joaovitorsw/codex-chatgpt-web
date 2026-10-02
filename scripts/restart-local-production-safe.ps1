@@ -1,5 +1,6 @@
 param(
   [switch]$Worker,
+  [switch]$Force,
   [switch]$RunImageSmoke,
   [int]$TimeoutMinutes = 30
 )
@@ -7,6 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $runner = Join-Path $repoRoot 'run-local-production.cmd'
+$silentRunner = Join-Path $repoRoot 'scripts\start-local-production-silent.ps1'
 $healthUrl = 'http://127.0.0.1:17841/healthz'
 $supervisorPath = Join-Path $env:USERPROFILE '.codex-chatgpt-web\runtime\launcher-supervisor.json'
 $logDir = Join-Path $repoRoot 'work\safe-restart'
@@ -23,6 +25,7 @@ if (-not $Worker) {
     '-TimeoutMinutes', [string]$TimeoutMinutes
   )
   if ($RunImageSmoke) { $workerArguments += '-RunImageSmoke' }
+  if ($Force) { $workerArguments += '-Force' }
   Start-Process -FilePath $pwsh -WindowStyle Hidden -ArgumentList $workerArguments -WorkingDirectory $repoRoot | Out-Null
   Write-Output "Safe restart queued. It will run after active Codex Web turns finish. Log: $logPath"
   exit 0
@@ -99,7 +102,7 @@ function Stop-ProcessTree([int]$RootPid) {
 
 Write-RestartLog 'Waiting for the Codex Web runtime to become idle.'
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
-while ((Get-Date) -lt $deadline) {
+while (-not $Force -and (Get-Date) -lt $deadline) {
   try {
     $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 3
     if ($health.active_http_turns -eq 0 -and $health.active_browser_turns -eq 0) { break }
@@ -110,9 +113,13 @@ while ((Get-Date) -lt $deadline) {
   Start-Sleep -Seconds 2
 }
 
-if ((Get-Date) -ge $deadline) {
+if (-not $Force -and (Get-Date) -ge $deadline) {
   Write-RestartLog 'Timed out without an idle window; no process was stopped.'
   exit 1
+}
+
+if ($Force) {
+  Write-RestartLog 'Forced restart requested by the user; stopping the current launcher despite active turns.'
 }
 
 $rootProcesses = @(Get-LauncherRootProcesses)
@@ -135,10 +142,12 @@ if ($ownedLauncherConsoles.Count -gt 0) {
   Start-Sleep -Milliseconds 500
 }
 
-Write-RestartLog 'Starting a fresh visible local-production launcher.'
-# /c keeps the console visible while the foreground launcher runs, but lets that console close with
-# its runtime.  /k left an empty window behind every time the Bun child tree was replaced.
-Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $runner) -WorkingDirectory $repoRoot | Out-Null
+Write-RestartLog 'Starting a fresh silent local-production launcher.'
+# The dedicated wrapper retains startup output in work/local-production while preventing an
+# interactive cmd.exe from flashing or lingering after Bun/Electron exits.
+Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+  '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $silentRunner
+) -WorkingDirectory $repoRoot -WindowStyle Hidden | Out-Null
 
 $readyDeadline = (Get-Date).AddSeconds(90)
 while ((Get-Date) -lt $readyDeadline) {

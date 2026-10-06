@@ -13,16 +13,13 @@ function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWeb
 }
 
 function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
-  return menu.menu.getByRole("menuitemradio", {
-    // ChatGPT has shipped this row both as "GPT-5.6 Sol" and "5.6 Sol".
-    // The product/version remains the stable identity; the decorative GPT prefix
-    // must not make an otherwise available family look absent.
-    name: family === "5.6" ? /^(?:GPT[-\s]?)?5\.6(?:\s+Sol)?(?:\s+Pro)?$/i
-      // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
-      : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i,
-    exact: true,
-    includeHidden: true,
-  });
+  // The selected family row stays in the simple panel as an aria-hidden advanced
+  // view after ChatGPT commits a choice. A role locator omits that row despite
+  // includeHidden, so inspect the menu-owned radio elements directly.
+  const name = family === "5.6" ? /^(?:GPT[-\s]?)?5\.6(?:\s+Sol)?(?:\s+Pro)?$/i
+    // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
+    : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i;
+  return menu.menu.locator('[role="menuitemradio"]').filter({ hasText: name });
 }
 
 /**
@@ -58,9 +55,18 @@ export async function selectChatGptModelFamily(
     if (await powerView.count() === 1) {
       const view = await powerView.getAttribute("data-model-picker-view");
       if (view === "simple") {
-        const trigger = powerView.locator('[data-model-picker-view-toggle="true"][aria-hidden="false"]');
+        const trigger = powerView.locator('[data-model-picker-view-toggle="true"]');
         if (await trigger.count() !== 1) throw familyError(family);
-        await trigger.click({ timeout: 5_000 });
+        await trigger.click({ force: true, timeout: 5_000 }).catch(async () => {
+          await trigger.press("Enter", { timeout: 5_000 }).catch(async () => {
+            await trigger.dispatchEvent("pointerdown", {
+              button: 0,
+              buttons: 1,
+              pointerType: "mouse",
+              isPrimary: true,
+            });
+          });
+        });
       } else if (view !== "advanced") throw familyError(family);
     } else {
       const trigger = menu.menu.locator('[role="menuitem"][aria-expanded][aria-hidden="false"]');
@@ -68,7 +74,16 @@ export async function selectChatGptModelFamily(
       if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click({ timeout: 5_000 });
     }
     await option.waitFor({ state: "visible", timeout: 5_000 });
-    await option.click({ timeout: 5_000 });
+    await option.click({ force: true, timeout: 5_000 }).catch(async () => {
+      await option.press("Enter", { timeout: 5_000 }).catch(async () => {
+        await option.dispatchEvent("pointerdown", {
+          button: 0,
+          buttons: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+        });
+      });
+    });
     // Selecting a family returns the open picker to its slider. Closing it and
     // immediately reopening races the outgoing menu's cleanup in ChatGPT.
     const selected = await activate();

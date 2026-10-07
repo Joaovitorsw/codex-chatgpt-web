@@ -818,7 +818,7 @@ export function compileChatGptWebPrompt(
     : mode.localTools
     ? [
       "<codex_transport_resume>",
-      `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
+      `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Never state or imply that a local tool, editor, command, or file operation was attempted, failed, or changed files unless this response contains the corresponding Codex Native call and its result. Execute the latest active user request now.`,
       "</codex_transport_resume>",
     ]
     : [

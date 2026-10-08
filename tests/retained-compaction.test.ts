@@ -328,9 +328,10 @@ test("active compaction drains an MCP call already queued without an outer Codex
   }
 });
 
-test("a completed retained agent returns an exact checkpoint and its browser is physically retired", async () => {
+test.each(["5.6", "6"] as const)("a retained %s checkpoint preserves model selection and physically retires its browser", async family => {
   expect(MAX_COMPACTION_HANDOFF_TIMEOUT_MS).toBe(5 * 60_000);
-  const sourceRequest = request(false);
+  const sourceRequest = { ...request(false), _chatgptModelFamily: family };
+  const compactRequest = { ...request(true), _chatgptModelFamily: family };
   const conversationKey = chatGptConversationKey(sourceRequest, "provider")!;
   const source = new ChatGptTurnSession({
     mode: "read-only",
@@ -376,7 +377,7 @@ test("a completed retained agent returns an exact checkpoint and its browser is 
 
   await expect(requestRetainedCompactionHandoff(
     worker as never,
-    request(true),
+    compactRequest,
     source,
     broker,
     { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
@@ -384,8 +385,10 @@ test("a completed retained agent returns an exact checkpoint and its browser is 
     undefined,
     60 * 60_000,
   )).resolves.toBe("Retained agent checkpoint");
+  expect(captured?.modelFamily).toBe(family);
   expect(captured?.conversationKey).toBe(conversationKey);
   expect(captured?.requireRetainedConversation).toBeTrue();
+  expect(captured?.compaction).toBeTrue();
   expect(captured?.nativeConnector).toBeTrue();
   expect(captured?.capabilities.localToolsEnabled).toBeFalse();
   expect(browserRetired).toBeTrue();
@@ -1720,6 +1723,61 @@ test("a disappeared retained source cannot leave its fresh compaction rebuild pa
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     chatGptTurnSessions.clear();
     await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("finishing the previous response does not consume the retained checkpoint's time budget", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-retained-phases-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web", baseUrl: `browser://retained-phases-${root}`,
+    chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root), localToolsEnabled: true,
+      solAvailable: true, extraHighAvailable: true, proAvailable: true, turnTimeoutMs: 40 },
+  };
+  const sourceRequest = request(false);
+  const namespace = chatGptWebExecutionNamespace(provider);
+  let finishSource!: (text: string) => void;
+  const browser = new Promise<string>(resolve => { finishSource = resolve; });
+  chatGptTurnSessions.getOrCreate(`${namespace}:${chatGptTurnExecutionKey(sourceRequest)}`, () => ({
+    mode: "read-only", browser, physicalSettlement: browser.then(() => {}),
+    trace: new ChatGptTraceFeed(), text: new ChatGptTextFeed(), usageInput: sourceRequest,
+    conversationKey: chatGptConversationKey(sourceRequest, namespace), cancel: () => finishSource("cancelled"),
+  }));
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run;
+  const broker = TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!);
+  await broker.listen();
+  worker.run = async turn => {
+    mock.timers.tick(25);
+    expect(turn.abortSignal?.aborted).toBeFalse();
+    const prepared = await turn.prepareResume!();
+    const binding = controlBinding(prepared.text);
+    prepared.release();
+    await callTurnBroker(provider.chatgptWeb!.brokerSocketPath!, {
+      method: "submit_compaction_handoff", token: binding.token,
+      handoffId: binding.handoffId, summary: "Checkpoint after previous response settled",
+    });
+    return "Checkpoint submitted";
+  };
+  const events: AdapterEvent[] = [];
+  mock.timers.enable({ apis: ["setTimeout"] });
+  let run: Promise<void> | undefined;
+  try {
+    run = createChatGptWebAdapter(provider).runTurn!(request(true), { headers: new Headers() }, event => events.push(event));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    mock.timers.tick(25);
+    finishSource("Previous response finished");
+    await run;
+    expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
+    expect(events.some(event => event.type === "text_delta" && event.text.includes("Checkpoint after previous"))).toBeTrue();
+  } finally {
+    finishSource("cleanup");
+    await run;
+    mock.timers.reset();
+    worker.run = originalRun;
+    chatGptTurnSessions.clear();
+    await broker.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

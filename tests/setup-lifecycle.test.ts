@@ -56,6 +56,53 @@ test("launcher setup refreshes account capabilities only when missing or explici
   } as never, false, "automatic")).toBe(true);
 });
 
+for (const development of [false, true]) {
+  test(`${development ? "DEV" : "production"} updates an installed launcher without a ChatGPT session`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-web-offline-upgrade-"));
+    const configPath = join(root, "config.json");
+    const existing = {
+      ...configModule.defaultConfig("browser-only"),
+      releaseVersion: "6.1.4",
+      browserHost: "launcher" as const,
+      solAvailable: true, extraHighAvailable: true, proAvailable: true,
+      ...(development ? { purpose: "dev-harness" as const } : {}),
+    };
+    writeFileSync(configPath, JSON.stringify(existing));
+    const save = spyOn(configModule, "saveConfig").mockImplementation(() => {});
+    const inspect = spyOn(browserHost, "inspectLauncherBrowserHost").mockRejectedValue(new Error("ChatGPT is signed out"));
+    const mocks = [save, inspect,
+      spyOn(configModule, "getConfigPath").mockReturnValue(configPath),
+      spyOn(configModule, "loadConfigForSetup").mockImplementation(() => structuredClone(existing)),
+      spyOn(integration, "preflightCodexIntegration").mockImplementation(() => {}),
+      spyOn(integration, "installCodexIntegration").mockImplementation(() => ({} as never)),
+      spyOn(service, "getServiceStatus").mockReturnValue({ installed: false, loaded: false } as never),
+      spyOn(service, "removeLegacyRuntimeArtifacts").mockImplementation(() => {}),
+    ];
+    try {
+      const listener = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+      const port = listener.port!;
+      await listener.stop(true);
+      const options = { mode: "browser-only" as const, subagentProtocol: "native" as const, port,
+        browserHostDescriptorPath: join(root, "launcher-browser.json"), acknowledgedUnofficial: true };
+      const configure = development ? setupDevProfile : setup;
+      await configure(options);
+      expect(inspect).not.toHaveBeenCalled();
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save.mock.calls[0]![0]).toMatchObject({
+        releaseVersion: configModule.defaultConfig().releaseVersion,
+        solAvailable: true, extraHighAvailable: true, proAvailable: true,
+      });
+      // Refreshing the actual model list still requires evidence from the account.
+      await expect(configure({ ...options, refreshAccountCapabilities: true })).rejects.toThrow("ChatGPT is signed out");
+      expect(inspect).toHaveBeenCalledTimes(1);
+      expect(save).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const mock of mocks.reverse()) mock.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const development of [false, true]) for (const interaction of ["manual", "automatic"] as const) {
   test(`${development ? "DEV" : "production"} ${interaction} setup commits the tunnel inputs before its supervisor starts the runtime`, async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-web-setup-owner-"));
@@ -117,6 +164,59 @@ for (const development of [false, true]) for (const interaction of ["manual", "a
       mocks.push(spyOn(configModule, "saveConfig").mockImplementation(() => { throw new Error("config commit failed"); }));
       await expect((development ? setupDevProfile : setup)({ ...options, port })).rejects.toThrow("config commit failed");
       expect(calls).toEqual([]);
+    } finally {
+      for (const mock of mocks.reverse()) mock.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const development of [false, true]) {
+  test(`${development ? "DEV" : "production"} rejects Luna Bigger Context without changing config and accepts explicitly disabling it`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-web-luna-setup-"));
+    const configPath = join(root, "config.json");
+    const existing = {
+      ...configModule.defaultConfig("browser-only"),
+      browserHost: "launcher" as const,
+      solAvailable: false, extraHighAvailable: false, proAvailable: false,
+      experimentalBiggerContext: true,
+      ...(development ? { purpose: "dev-harness" as const } : {}),
+    };
+    writeFileSync(configPath, JSON.stringify(existing));
+    let scannedSolAvailable = false;
+    const save = spyOn(configModule, "saveConfig").mockImplementation(() => {});
+    const integrate = spyOn(integration, "installCodexIntegration").mockImplementation(() => ({} as never));
+    const mocks = [save, integrate,
+      spyOn(configModule, "getConfigPath").mockReturnValue(configPath),
+      spyOn(configModule, "loadConfigForSetup").mockImplementation(() => structuredClone(existing)),
+      spyOn(integration, "preflightCodexIntegration").mockImplementation(() => {}),
+      spyOn(service, "getServiceStatus").mockReturnValue({ installed: false, loaded: false } as never),
+      spyOn(service, "removeLegacyRuntimeArtifacts").mockImplementation(() => {}),
+      spyOn(browserHost, "inspectLauncherBrowserHost").mockImplementation(async () => ({
+        solAvailable: scannedSolAvailable, extraHighAvailable: false, proAvailable: false,
+      }) as never),
+    ];
+    try {
+      const listener = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+      const port = listener.port!;
+      await listener.stop(true);
+      const options = { mode: "browser-only" as const, subagentProtocol: "native" as const, port,
+        browserHostDescriptorPath: join(root, "launcher-browser.json"), acknowledgedUnofficial: true };
+      const configure = development ? setupDevProfile : setup;
+      await expect(configure(options)).rejects.toThrow("Turn it off in launcher Settings");
+      await expect(configure({ ...options, experimentalBiggerContext: true })).rejects.toThrow("unavailable for Luna and Think");
+      // Refreshing a previously paid account must validate the newly observed capability.
+      existing.solAvailable = true;
+      await expect(configure({ ...options, refreshAccountCapabilities: true })).rejects.toThrow("--standard-context");
+      expect(save).not.toHaveBeenCalled();
+      expect(integrate).not.toHaveBeenCalled();
+      existing.solAvailable = false;
+      await configure({ ...options, experimentalBiggerContext: false });
+      expect(save.mock.calls.at(-1)?.[0]).toMatchObject({ solAvailable: false, experimentalBiggerContext: false });
+      expect(existing.experimentalBiggerContext).toBeTrue();
+      scannedSolAvailable = true;
+      await configure({ ...options, refreshAccountCapabilities: true, experimentalBiggerContext: true });
+      expect(save.mock.calls.at(-1)?.[0]).toMatchObject({ solAvailable: true, experimentalBiggerContext: true });
     } finally {
       for (const mock of mocks.reverse()) mock.mockRestore();
       rmSync(root, { recursive: true, force: true });

@@ -12,14 +12,19 @@ function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWeb
   );
 }
 
-function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
+function familyName(family: ChatGptWebModelFamily): RegExp {
+  return family === "5.6" ? /^(?:GPT[-\s]?)?5\.6(?:\s+Sol)?(?:\s+Pro)?$/i
+    : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i;
+}
+
+function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily): Locator {
   // The selected family row stays in the simple panel as an aria-hidden advanced
   // view after ChatGPT commits a choice. A role locator omits that row despite
   // includeHidden, so inspect the menu-owned radio elements directly.
-  const name = family === "5.6" ? /^(?:GPT[-\s]?)?5\.6(?:\s+Sol)?(?:\s+Pro)?$/i
-    // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
-    : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i;
-  return menu.menu.locator('[role="menuitemradio"]').filter({ hasText: name });
+  const name = familyName(family);
+  const locator = menu.menu.locator?.('[role="menuitemradio"]');
+  if (locator && typeof locator.filter === "function") return locator.filter({ hasText: name });
+  return menu.menu.getByRole("menuitemradio", { name, exact: true, includeHidden: true });
 }
 
 /**

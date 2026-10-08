@@ -14,6 +14,77 @@ import {
   verifyCodexInterruptHookRestored,
 } from "../src/codex-interrupt-hook";
 
+test("hook errors identify the damaged section without exposing config values", () => {
+  const { text, installed } = installCodexInterruptHookCommand(
+    'private_value = "secret-config-value"\n', "/fixture/config.toml", "private-hook-command",
+  );
+  const stateHeader = `[hooks.state.${JSON.stringify(installed.stateKey)}]`;
+  const cases = [
+    [text.replace(/\[\[hooks\.Interrupt(?:\.hooks)?\]\]/g, value => value.replace("Interrupt", "Other")),
+      "entry is missing from hooks.Interrupt"],
+    [text.replace(installed.command, "changed-private-command"), "command or settings in hooks.Interrupt"],
+    [text.replace(stateHeader, "[other_state]"), "trust entry is missing from hooks.state"],
+    [text.replace(installed.trustedHash, "sha256:changed"), "trust settings in hooks.state"],
+    ['private_value = "unterminated-secret', "could not be parsed as TOML"],
+    [text + "\n" + stateHeader, "could not be parsed as TOML"],
+  ];
+  for (const [edited, diagnosis] of cases) {
+    for (const check of [verifyCodexInterruptHook, restoreCodexInterruptHook,
+      (value: string, hook: typeof installed) => restoreCodexInterruptHook(value, hook, { allowAbsent: true })]) {
+      let message = "";
+      try { check(edited!, installed); } catch (error) { message = (error as Error).message; }
+      expect(message).toContain(diagnosis!);
+      expect(message).toContain("config.toml");
+      expect(message).toContain("Back up");
+      expect(message).toContain("Reinstall");
+      for (const privateValue of ["secret-config-value", installed.command, "changed-private-command", "unterminated-secret"]) {
+        expect(message).not.toContain(privateValue);
+      }
+    }
+  }
+});
+
+test("invalid saved setup records are not diagnosed as a broken Codex config", () => {
+  const { text, installed } = installCodexInterruptHookCommand("", "/fixture/config.toml", "bridge-hook");
+  for (const journal of [
+    { ...installed, trustedHash: "sha256:wrong" },
+    { ...installed, fragment: 'secret_value = "unterminated' },
+    { ...installed, fragment: installed.fragment.replace("timeout = 3", "timeout = 9") },
+  ]) {
+    expect(() => verifyCodexInterruptHook(text, journal)).toThrow("saved setup record is inconsistent");
+    expect(() => restoreCodexInterruptHook(text, journal)).toThrow("Do not delete or edit the integration journal");
+  }
+});
+
+test("native explicit hook defaults preserve ownership without accepting changed behavior", () => {
+  const original = '[mcp_servers.notes]\ncommand = "user-server"\n';
+  const { text, installed } = installCodexInterruptHookCommand(original, "/fixture/config.toml", "bridge-hook");
+  for (const explicitAsync of [false, true]) for (const explicitEnabled of [false, true]) {
+    let edited = text;
+    if (explicitAsync) edited = edited.replace("timeout = 3", "timeout = 3\nasync = false");
+    if (explicitEnabled) edited = edited.replace("trusted_hash =", "enabled = true\ntrusted_hash =");
+    verifyCodexInterruptHook(edited, installed);
+    const restored = restoreCodexInterruptHook(edited, installed);
+    expect(Bun.TOML.parse(restored)).toEqual(Bun.TOML.parse(original));
+    const reinstalled = installCodexInterruptHookCommand(restored, "/fixture/config.toml", "new-bridge-hook");
+    verifyCodexInterruptHook(reinstalled.text, reinstalled.installed);
+  }
+  for (const changed of [
+    text.replace("timeout = 3", "timeout = 3\nasync = true"),
+    text.replace("trusted_hash =", "enabled = false\ntrusted_hash ="),
+    text.replace("timeout = 3", 'timeout = 3\nasync = "false"'),
+    text.replace("trusted_hash =", 'enabled = "true"\ntrusted_hash ='),
+    text.replace("timeout = 3", "timeout = 3\nasync = false\nextra = true"),
+    text.replace("trusted_hash =", "enabled = true\nextra = true\ntrusted_hash ="),
+    text.replace("bridge-hook", "different-hook"),
+    text.replace("timeout = 3", "timeout = 2"),
+    text.replace(installed.trustedHash, "sha256:changed"),
+  ]) {
+    expect(() => verifyCodexInterruptHook(changed, installed)).toThrow("changed after setup");
+    expect(() => restoreCodexInterruptHook(changed, installed)).toThrow("changed after setup");
+  }
+});
+
 test("preserves hook ownership across native TOML command quoting and inline array serialization", () => {
   const original = 'model = "example"\n\n[mcp_servers.notes]\ncommand = "user-mcp"\n';
   const command = '"C:\\Program Files\\Bridge\\runtime.exe" "hook" "interrupt"';
@@ -279,12 +350,12 @@ test("preserves ownership when Codex moves trust state before the hook and norma
       rewritten.replace("timeout = 3", "timeout = 2"),
       rewritten.replace(JSON.stringify(installed.command), JSON.stringify("other-command")),
       rewritten.replace(installed.trustedHash, "sha256:changed"),
-      rewritten + state,
       rewritten + `${ending}[hooks.state.${JSON.stringify(installed.stateKey)}.extra]${ending}enabled = true`,
     ]) {
       expect(modified).not.toBe(rewritten);
       expect(() => verifyCodexInterruptHook(modified, installed)).toThrow("changed after setup");
     }
+    expect(() => verifyCodexInterruptHook(rewritten + state, installed)).toThrow("could not be parsed as TOML");
   }
 });
 

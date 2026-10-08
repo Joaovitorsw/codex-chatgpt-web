@@ -3462,7 +3462,7 @@ test("browser preflight separates model context from one-message transport limit
       "gpt-5.6-sol",
       effort,
       plus,
-      1_048_572,
+      500_000,
     )).not.toThrow();
     expect(() => assertChatGptWebInputWithinLimits(
       1,
@@ -3470,8 +3470,8 @@ test("browser preflight separates model context from one-message transport limit
       "gpt-5.6-sol",
       effort,
       plus,
-      1_048_573,
-    )).toThrow("1,048,572-character ChatGPT composer boundary");
+      500_001,
+    )).toThrow("500,000-character ChatGPT composer boundary");
   }
 
   expect(() => assertChatGptWebInputWithinLimits(
@@ -3623,14 +3623,14 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     plus,
     900_000,
     6,
-  )).not.toThrow();
+  )).toThrow("500,000-character ChatGPT composer boundary");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     270_000,
     80_000,
     "gpt-5.6-sol",
     "high",
     plus,
-    900_000,
+    500_000,
     6,
   )).toThrow("270,000-token six-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
@@ -3639,7 +3639,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "gpt-5.6-sol",
     "high",
     plus,
-    900_000,
+    500_000,
     2,
   )).toThrow("180,000-token two-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(

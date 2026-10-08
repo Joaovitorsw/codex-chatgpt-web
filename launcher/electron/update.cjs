@@ -1,6 +1,5 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -71,56 +70,97 @@ function validateReleaseAssetUrl(raw, version, assetName) {
   return url.toString();
 }
 
-function request(url, redirects = 0) {
-  return new Promise((resolve, reject) => {
-    if (redirects > MAX_REDIRECTS) {
-      reject(new Error(`Too many redirects while downloading ${url}`));
-      return;
+function createUpdateDownloader(createRequest, idleTimeoutMs = 60_000) {
+  const validateUrl = value => {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) {
+      throw new Error("Refusing non-HTTPS or credential-bearing update URL");
     }
-    const parsed = new URL(url);
-    if (parsed.protocol !== "https:") {
-      reject(new Error(`Refusing non-HTTPS update URL: ${parsed.protocol}`));
-      return;
-    }
-    const req = https.get(parsed, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": USER_AGENT,
-      },
-    }, (response) => {
-      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
-        response.resume();
-        const next = new URL(response.headers.location, parsed).toString();
-        request(next, redirects + 1).then(resolve, reject);
-        return;
-      }
-      if (response.statusCode !== 200) {
-        response.resume();
-        reject(new Error(`Update download failed with HTTP ${response.statusCode}`));
-        return;
-      }
-      resolve(response);
+    return url.toString();
+  };
+
+  async function* chunks(url) {
+    const request = createRequest({
+      url: validateUrl(url),
+      headers: { Accept: "application/vnd.github+json", "User-Agent": USER_AGENT },
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "manual",
     });
-    req.setTimeout(60_000, () => req.destroy(new Error("Update request timed out")));
-    req.once("error", reject);
-  });
-}
-
-async function downloadText(url, maxBytes = 2 * 1024 * 1024) {
-  const response = await request(url);
-  const chunks = [];
-  let bytes = 0;
-  for await (const chunk of response) {
-    bytes += chunk.length;
-    if (bytes > maxBytes) throw new Error("Update metadata exceeded its size limit");
-    chunks.push(chunk);
+    let timer;
+    let response;
+    let failure;
+    let finished = false;
+    let rejectResponse;
+    const fail = error => {
+      if (finished || failure) return;
+      failure = error;
+      rejectResponse(error);
+      response?.destroy(error);
+      request.abort();
+    };
+    const armTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => fail(new Error("Update request timed out")), idleTimeoutMs);
+      timer.unref?.();
+    };
+    try {
+      await new Promise((resolve, reject) => {
+        rejectResponse = reject;
+        let redirects = 0;
+        request.on("error", fail);
+        request.on("abort", () => fail(new Error("Update download was aborted")));
+        // net.fetch cancels manual redirects instead of exposing a 3xx response.
+        // ClientRequest lets us validate every destination before following it.
+        request.on("redirect", (_status, _method, destination) => {
+          try {
+            if (++redirects > MAX_REDIRECTS) throw new Error("Too many redirects while downloading update");
+            validateUrl(destination);
+            armTimeout();
+            request.followRedirect();
+          } catch (error) {
+            fail(error);
+          }
+        });
+        request.once("response", incoming => {
+          response = incoming;
+          response.on("error", fail);
+          response.on("aborted", () => fail(new Error("Update download was interrupted")));
+          resolve();
+        });
+        armTimeout();
+        request.end();
+      });
+      if (failure) throw failure;
+      if (response.statusCode !== 200) throw new Error(`Update download failed with HTTP ${response.statusCode}`);
+      armTimeout();
+      for await (const chunk of response) {
+        armTimeout();
+        yield chunk;
+      }
+    } finally {
+      finished = true;
+      clearTimeout(timer);
+      response?.destroy();
+      request.abort();
+    }
   }
-  return Buffer.concat(chunks).toString("utf8");
-}
 
-async function downloadFile(url, destination) {
-  const response = await request(url);
-  await pipeline(response, fs.createWriteStream(destination, { flags: "wx", mode: 0o600 }));
+  return {
+    async downloadText(url, maxBytes = 2 * 1024 * 1024) {
+      const parts = [];
+      let bytes = 0;
+      for await (const chunk of chunks(url)) {
+        bytes += chunk.length;
+        if (bytes > maxBytes) throw new Error("Update metadata exceeded its size limit");
+        parts.push(chunk);
+      }
+      return Buffer.concat(parts).toString("utf8");
+    },
+    async downloadFile(url, destination) {
+      await pipeline(chunks(url), fs.createWriteStream(destination, { flags: "wx", mode: 0o600 }));
+    },
+  };
 }
 
 function sha256(filePath) {
@@ -212,6 +252,11 @@ function buildJob({ version, platform, executablePath, assetPath, stagingRoot, t
 }
 
 function defaultDependencies() {
+  // Chromium owns the launcher's system proxy/PAC policy. Do not bypass it with
+  // Node HTTPS or borrow cookies from the authenticated ChatGPT browser profile.
+  const { downloadText, downloadFile } = createUpdateDownloader(
+    options => require("electron").net.request(options),
+  );
   return {
     fetchRelease: async () => JSON.parse(await downloadText(RELEASE_API_URL)),
     downloadText,
@@ -389,6 +434,7 @@ module.exports = {
   buildJob,
   compareVersions,
   createUpdateController,
+  createUpdateDownloader,
   expectedChecksum,
   macApplicationPath,
   parseVersion,

@@ -434,6 +434,12 @@ export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
   | {
+      phase: "approval";
+      traceId: string;
+      helperPid: number;
+      pending: boolean;
+    }
+  | {
       phase: "usage";
       traceId: string;
       helperPid: number;
@@ -459,6 +465,10 @@ export type LauncherTurnActivity =
       helperPid: number;
       /** Re-establish the launcher's hidden viewport after the caller closes its CDP session. */
       refreshViewport?: boolean;
+      progress?: {
+        stage: "preparing" | "sending" | "chatgpt";
+        activeToolCalls: number;
+      };
     }
   | {
       phase: "end";

@@ -198,7 +198,7 @@ test("DEV core setup configures only the isolated harness contract", async () =>
 });
 
 test("Bigger Context uses the setup transaction and refreshes the production Codex catalog", async () => {
-  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
+  const fixture = hostFor({ mode: "full", appName: "Codex Native2", solAvailable: true });
   const result = await fixture.host.setBiggerContext(true);
   assert.equal(result.enabled, true);
   assert.deepEqual(fixture.invocation(), {
@@ -215,6 +215,17 @@ test("Bigger Context uses the setup transaction and refreshes the production Cod
       "--bigger-context",
     ],
   });
+});
+
+test("Luna cannot enable Bigger Context, but can turn off an existing unsupported setting", async () => {
+  for (const createHost of [hostFor, devHostFor]) {
+    const fixture = createHost({ mode: "browser-only", solAvailable: false, experimentalBiggerContext: true });
+    await assert.rejects(fixture.host.setBiggerContext(true), /unavailable for Luna and Think/);
+    assert.equal(fixture.invocation(), undefined);
+    const result = await fixture.host.setBiggerContext(false);
+    assert.equal(result.enabled, false);
+    assert.ok(fixture.invocation().args.includes("--standard-context"));
+  }
 });
 
 test("Bigger Context updates the isolated DEV config without installing a Codex route", async () => {
@@ -407,7 +418,6 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
     "--automatic-browser-interaction",
-    "--refresh-account-capabilities",
     "--acknowledge-unofficial",
     "--restart-service",
   ]);
@@ -419,6 +429,48 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     connectorMigrated: false,
     stdout: "",
   });
+});
+
+test("a failed version upgrade preserves setup inputs without starting an incompatible old runtime", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-upgrade-failure-"));
+  const configPath = path.join(root, "config.json");
+  const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "6.1.4" };
+  fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+  let stops = 0;
+  let starts = 0;
+  const host = new RuntimeHost({
+    app: { getPath: () => root, getVersion: () => "6.1.6" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    codexHome: path.join(root, "codex"),
+    supervisor: {
+      configPath,
+      readSetupConfig: () => JSON.parse(fs.readFileSync(configPath)),
+      readConfig: () => JSON.parse(fs.readFileSync(configPath)),
+      stopForSetup: async () => { stops += 1; },
+      startIfConfigured: async () => { starts += 1; return { status: "needs-setup" }; },
+    },
+  });
+  host.run = async (_name, args) => {
+    assert.equal(args.includes("--refresh-account-capabilities"), false);
+    if (args.includes("--preflight-only")) return { code: 0, stdout: "", stderr: "" };
+    fs.writeFileSync(configPath, `${JSON.stringify({ ...config, releaseVersion: "6.1.6" })}\n`);
+    throw new Error("configuration write failed");
+  };
+  try {
+    await assert.rejects(host.upgradeManagedRuntime(), error => {
+      assert.match(error.message, /configuration write failed/);
+      assert.match(error.message, /Restart the launcher to retry the update/);
+      assert.doesNotMatch(error.message, /Previous runtime recovery|expected ready/);
+      return true;
+    });
+    assert.deepEqual(JSON.parse(fs.readFileSync(configPath)), config);
+    assert.equal(stops, 1);
+    assert.equal(starts, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("launcher migrates the legacy connector identity even when the release version is unchanged", async () => {
@@ -438,7 +490,6 @@ test("launcher migrates the legacy connector identity even when the release vers
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
     "--automatic-browser-interaction",
-    "--refresh-account-capabilities",
     "--acknowledge-unofficial",
     "--restart-service",
   ]);
@@ -459,7 +510,7 @@ test("launcher update transaction does not preserve a stale disconnected route p
   assert.equal(result.updated, true);
   assert.equal("bridgeEnabled" in result, false);
   assert.equal(fixture.invocation().args.includes("disconnect"), false);
-  assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), true);
+  assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), false);
 });
 
 test("launcher update preserves Zero Risk and never probes its account capabilities", async () => {
@@ -1376,6 +1427,34 @@ test("skill file experiment uses the setup transaction in production and DEV, an
   assert.equal(manual.invocation(), undefined);
 });
 
+
+test("tool approvals opt in and out through setup without refreshing models or changing chat settings", async () => {
+  for (const makeHost of [hostFor, devHostFor]) {
+    for (const mode of ["browser-only", "full"]) {
+      for (const enabled of [true, false]) {
+        const fixture = makeHost({ mode, browserInteractionMode: "automatic", autoApproveToolCalls: !enabled });
+        assert.equal((await fixture.host.setAutoApproveToolCalls(enabled)).enabled, enabled);
+        const { name, args } = fixture.invocation();
+        assert.equal(name, "auto-approve-tool-calls");
+        assert.equal(args.includes("--auto-approve-tool-calls"), enabled);
+        assert.equal(args.includes(`--${mode}`), true);
+        assert.equal(args.includes("--restart-service"), makeHost === hostFor);
+        assert.equal(args.includes("dev"), makeHost === devHostFor);
+        for (const flag of ["--refresh-account-capabilities", "--login", "--fresh-conversation", "--retained-conversation", "--temporary-chats", "--saved-chats"]) {
+          assert.equal(args.includes(flag), false);
+        }
+      }
+    }
+    for (const config of [null, { mode: "full", browserInteractionMode: "manual" }]) {
+      const fixture = makeHost(config);
+      await assert.rejects(() => fixture.host.setAutoApproveToolCalls(true), /Initialize|Zero Risk/);
+      assert.equal(fixture.invocation(), undefined);
+    }
+    const fixture = makeHost({ mode: "full" });
+    await assert.rejects(() => fixture.host.setAutoApproveToolCalls("true"), /boolean/);
+    assert.equal(fixture.invocation(), undefined);
+  }
+});
 
 test("fresh-conversation preference uses production and DEV setup without forcing mode or other preferences", async () => {
   for (const makeHost of [hostFor, devHostFor]) {

@@ -601,19 +601,46 @@ function smokePassedForCurrentVersion(state) {
 }
 
 function syncFreshConversationPreference(stateStore, config) {
+  const biggerContextAvailable = config?.solAvailable === true;
   const useSavedChats = config?.useSavedChats === true;
   const enabled = config?.experimentalFreshConversationPerTurn === true;
+  const autoApproveToolCalls = config?.autoApproveToolCalls === true;
   const current = stateStore.read();
   if (runtimeHost?.currentOperation()) return current;
-  if (current.experimentalFreshConversationPerTurn === enabled && current.useSavedChats === useSavedChats) return current;
+  const retentionChanged = current.experimentalFreshConversationPerTurn !== enabled || current.useSavedChats !== useSavedChats;
+  if (!retentionChanged && current.autoApproveToolCalls === autoApproveToolCalls
+    && current.biggerContextAvailable === biggerContextAvailable) return current;
   // Runtime restarts leave browser views alive. Retire completed chats when their
   // persistence policy changes, including changes made by the CLI.
-  const retainedKeys = new Set([...browserHost.turnTabs.values()]
+  const retainedKeys = new Set((retentionChanged ? [...browserHost.turnTabs.values()] : [])
     .filter(tab => tab.status === "ready" && tab.conversationKey
       && (current.useSavedChats !== useSavedChats || tab.interactionMode === "automatic"))
     .map(tab => tab.conversationKey));
   for (const key of retainedKeys) releaseRetainedConversation(browserHost, key);
-  const state = stateStore.update({ experimentalFreshConversationPerTurn: enabled, useSavedChats });
+  const state = stateStore.update({ experimentalFreshConversationPerTurn: enabled, useSavedChats, autoApproveToolCalls, biggerContextAvailable });
+  send("launcher:state-changed", state);
+  return state;
+}
+
+// RuntimeSupervisor reads this callback independently of IPC registration. Keep its
+// implementation self-contained so a config read can update all browser preferences
+// without requiring the renderer wiring to have been initialized first.
+function syncBrowserPreferences(stateStore, config) {
+  const biggerContextAvailable = config?.solAvailable === true;
+  const useSavedChats = config?.useSavedChats === true;
+  const enabled = config?.experimentalFreshConversationPerTurn === true;
+  const autoApproveToolCalls = config?.autoApproveToolCalls === true;
+  const current = stateStore.read();
+  if (runtimeHost?.currentOperation()) return current;
+  const retentionChanged = current.experimentalFreshConversationPerTurn !== enabled || current.useSavedChats !== useSavedChats;
+  if (!retentionChanged && current.autoApproveToolCalls === autoApproveToolCalls
+    && current.biggerContextAvailable === biggerContextAvailable) return current;
+  const retainedKeys = new Set((retentionChanged ? [...browserHost.turnTabs.values()] : [])
+    .filter(tab => tab.status === "ready" && tab.conversationKey
+      && (current.useSavedChats !== useSavedChats || tab.interactionMode === "automatic"))
+    .map(tab => tab.conversationKey));
+  for (const key of retainedKeys) releaseRetainedConversation(browserHost, key);
+  const state = stateStore.update({ experimentalFreshConversationPerTurn: enabled, useSavedChats, autoApproveToolCalls, biggerContextAvailable });
   send("launcher:state-changed", state);
   return state;
 }
@@ -1443,7 +1470,7 @@ async function start() {
   browserControl = await new BrowserControlServer({
     logger,
     getBrowserHost: () => browserHost,
-    getPreferences: () => syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
+    getPreferences: () => syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config),
     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
     limits: limitsController,
     requestRuntimeRecovery: reason => runtimeHost.requestBridgeRecovery(reason),
@@ -1461,7 +1488,7 @@ async function start() {
     onConfigRead: config => {
       // Setup may read an intermediate config before rollback. The setting IPC commits
       // its change only after the existing setup transaction has succeeded.
-      if (browserHost && !runtimeHost?.currentOperation()) syncFreshConversationPreference(stateStore, config);
+      if (browserHost && !runtimeHost?.currentOperation()) syncBrowserPreferences(stateStore, config);
     },
   });
   runtimeHost = new RuntimeHost({

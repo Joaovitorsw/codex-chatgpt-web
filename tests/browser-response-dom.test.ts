@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import type { Locator } from "playwright-core";
 import { ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptVisibleTraceTracker, CHATGPT_COMPLETION_SETTLE_MS } from "../src/adapters/chatgpt-web/browser-worker";
-import { ChatGptAnswerMarkdownDelivery, ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "../src/adapters/chatgpt-web/markdown";
+import { ChatGptAnswerMarkdownDelivery, chatGptHtmlToMarkdown, ChatGptMarkdownBuffer, ChatGptMarkdownConsistencyError, type ChatGptMarkdownSegment } from "../src/adapters/chatgpt-web/markdown";
 
 const smokeHtml = readFileSync(new URL("./fixtures/chatgpt-dil-smoke.html", import.meta.url), "utf8");
 const powerCompleteHtml = readFileSync(new URL("./fixtures/chatgpt-power-complete.html", import.meta.url), "utf8");
@@ -23,6 +23,10 @@ type Snapshot = {
 
 // Execute the production page callback, with only missing Domino browser APIs supplied.
 async function snapshot(html: string): Promise<Snapshot> {
+  return (await snapshots(html, []))[0]!;
+}
+
+async function snapshots(html: string, changes: Array<(document: Document) => void>): Promise<Snapshot[]> {
   const { createWindow } = require("@mixmark-io/domino");
   const window = createWindow(html);
   const innerText = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "innerText");
@@ -58,7 +62,11 @@ async function snapshot(html: string): Promise<Snapshot> {
     const worker = Object.create(ChatGptBrowserWorker.prototype) as {
       responseDomSnapshot(locator: Locator): Promise<Snapshot>;
     };
-    const result = await worker.responseDomSnapshot(locator);
+    const result = [await worker.responseDomSnapshot(locator)];
+    for (const change of changes) {
+      change(window.document);
+      result.push(await worker.responseDomSnapshot(locator));
+    }
     expect(errors).toEqual([]);
     return result;
   } finally {
@@ -72,6 +80,50 @@ async function snapshot(html: string): Promise<Snapshot> {
     else delete window.HTMLElement.prototype.append;
   }
 }
+
+const followupFixture = (root = 'data-markdown-text-style="assistant-message"') => `<section id="turn"><div data-content-search-unit-key="answer"><h4 data-conversation-role="assistant"></h4><div ${root}>
+<p>The report is complete.</p>
+<div class="relative min-w-0 px-3"><div class="flex min-w-0 flex-col items-start">
+<button class="group/suggested-followup"><span>Clarify the result</span></button>
+<button class="group/suggested-followup"><span>Shorten the report</span></button>
+</div><div aria-hidden="true" class="pointer-events-none start-0 top-0 w-max">
+<div><span>Clarify the result</span><span>Shorten the report</span></div>
+</div></div></div></div><button data-testid="copy-turn-action-button" aria-label="Copy"></button></section>`;
+
+test("suggested follow-up sizing copies stay out of the answer", async () => {
+  for (const root of ['class="markdown"', 'data-markdown-text-style="assistant-message"']) {
+    const result = await snapshot(followupFixture(root));
+    expect(result.visibleText).toBe("The report is complete.");
+    expect(chatGptHtmlToMarkdown(result.fullHtml)).toBe("The report is complete.");
+    expect(result.markdownSegments.map(segment => segment.text).join("\n")).not.toContain("Clarify the result");
+    expect(result.fullHtml).not.toContain("Shorten the report");
+    expect(result.completionActionVisible).toBeTrue();
+  }
+});
+
+test("changing follow-up sizing labels cannot rewrite delivered answer text", async () => {
+  const [before, after] = await snapshots(followupFixture(), [document => {
+    document.querySelector('[aria-hidden="true"] span')!.textContent = "A hydrated suggestion";
+  }]);
+  expect(before!.visibleText).toBe("The report is complete.");
+  expect(after!.visibleText).toBe(before!.visibleText);
+  expect(after!.fullHtml).toBe(before!.fullHtml);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  buffer.observe(before!.markdownSegments, 0);
+  buffer.observe(after!.markdownSegments, 1);
+  expect(buffer.finish().markdown).toBe("The report is complete.");
+});
+
+test("follow-up filtering preserves unrelated content and file-reference labels", async () => {
+  const html = followupFixture().replace('<p>The report is complete.</p>', `<p>The report is complete.</p>
+<p><span aria-hidden="true">Unrelated answer content.</span><button class="behavior-btn entity-underline">report.pdf</button></p>
+<pre><code>&lt;button class="group/suggested-followup"&gt;example&lt;/button&gt;</code></pre>`);
+  const result = await snapshot(html);
+  expect(result.visibleText).toContain("Unrelated answer content.");
+  expect(result.visibleText).toContain("report.pdf");
+  expect(chatGptHtmlToMarkdown(result.fullHtml)).toContain('class="group/suggested-followup"');
+  expect(result.visibleText).not.toContain("Clarify the result");
+});
 
 test("captured Activity progress is commentary before any assistant answer exists", async () => {
   const progress = await snapshot(powerActivityHtml);
@@ -129,8 +181,87 @@ test("keeps an unfinished hyperlink buffered and preserves delivered destination
   expect(buffer.finish().markdown).toBe("**[Open report](https://example.com/report#details)**.\n\nNext paragraph.");
   const changed = await snapshot(page(' href="https://example.com/different"'));
   buffer.observe(changed.markdownSegments, 2000);
-  expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
-  expect(buffer.finish().markdown).toBe("**[Open report](https://example.com/report#details)**.\n\nNext paragraph.");
+  expect(buffer.currentSnapshotIsConsistent()).toBeFalse();
+  expect(() => buffer.finish()).toThrow("completed text block");
+});
+
+test("observed resource preview hydration cannot rewrite delivered answer text", async () => {
+  // Structural fragment supplied in #769; only the title/filename/type are generic.
+  for (const root of ['class="markdown"', 'data-markdown-text-style="assistant-message"']) {
+    const page = (label: string, type: string) => `<section id="turn"><div data-content-search-unit-key="answer">
+      <h4 data-conversation-role="assistant"></h4><div ${root}>
+      <p>The layout was updated.</p>
+      <div data-chatgpt-copy-reference="0" data-markdown-copy="contents">
+        <div><span><span class="group/resource-row relative"><span>
+          <span title="${label}">${label}</span><span>${type}</span>
+        </span></span></span></div>
+      </div><p>Validation completed.</p>
+    </div></div><button aria-label="Copy"></button></section>`;
+    const before = await snapshot(page("Layout", ""));
+    const after = await snapshot(page("candidate-overview.png", "PNG"));
+    const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+    expect(buffer.observe(before.markdownSegments, 0)).toBe("The layout was updated.");
+    expect(buffer.observe(after.markdownSegments, 1)).toBe("");
+    expect(buffer.finish().markdown).toBe("The layout was updated.\n\nValidation completed.");
+    // These snapshots use different documents; node identities must not be reused.
+    expect(before.markdownSegments.map(({ key, ...content }) => content))
+      .toEqual(after.markdownSegments.map(({ key, ...content }) => content));
+    expect(after.markdownSegments.map(segment => segment.html).join("")).not.toContain("candidate-overview.png");
+    expect(after.fullHtml).not.toContain("candidate-overview.png");
+    await snapshots(page("candidate-overview.png", "PNG"), [doc => {
+      // Only the readback is projected; the actual browser document stays intact.
+      expect(doc.getElementById("turn")!.innerHTML).toContain("candidate-overview.png");
+    }]);
+
+    buffer.observe((await snapshot(page("Layout", "").replace("The layout was updated.", "Changed answer."))).markdownSegments, 2);
+    expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
+  }
+});
+
+test("file preview removal preserves a pending paragraph through movement and remounting", async () => {
+  for (const remount of [false, true]) {
+    const html = `<div id="turn"><div class="markdown">
+      <p>Report saved:</p><p id="file">report.md</p><p id="tail">Validation completed.</p>
+    </div><button aria-label="Copy"></button></div>`;
+    const [before, moved, repeated, continued, changed] = await snapshots(html, [
+      document => {
+        const root = document.querySelector(".markdown")!;
+        const file = document.querySelector("#file")!;
+        root.parentElement!.appendChild(file);
+        if (remount) root.innerHTML = root.innerHTML;
+      },
+      () => {},
+      document => {
+        const next = document.createElement("p");
+        next.textContent = "The task is finished.";
+        document.querySelector(".markdown")!.appendChild(next);
+      },
+      document => { document.querySelector(".markdown p")!.textContent = "A changed report."; },
+    ]);
+    const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+    expect(buffer.observe(before!.markdownSegments, 0)).toBe("Report saved:\n\nreport.md");
+    expect(buffer.observe(moved!.markdownSegments, 1)).toBe("");
+    expect(buffer.observe(repeated!.markdownSegments, 2)).toBe("");
+    if (!remount) expect(moved!.markdownSegments.at(-1)!.key).toBe(before!.markdownSegments.at(-1)!.key);
+    expect(buffer.observe(continued!.markdownSegments, 3)).toBe("\n\nValidation completed.");
+    expect(buffer.finish().markdown).toBe("Report saved:\n\nreport.md\n\nValidation completed.\n\nThe task is finished.");
+    buffer.observe(changed!.markdownSegments, 4);
+    expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
+  }
+});
+
+test("resource preview filtering preserves actual links, plain file labels and ordinary wrappers", async () => {
+  const result = await snapshot(`<section id="turn"><div class="markdown">
+    <div data-markdown-copy="contents">Ordinary content.</div>
+    <div data-chatgpt-copy-reference="0" data-markdown-copy="contents">report.md</div>
+    <div><span class="group/resource-row">Ordinary label.</span></div>
+    <div data-chatgpt-copy-reference="1" data-markdown-copy="contents">
+      <span class="group/resource-row"><a href="https://example.com/report">Download report</a></span>
+    </div><p>Done.</p>
+  </div><button aria-label="Copy"></button></section>`);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  buffer.observe(result.markdownSegments, 0);
+  expect(buffer.finish().markdown).toBe("Ordinary content.\n\nreport.md\n\nOrdinary label.\n\n[Download report](https://example.com/report)\n\nDone.");
 });
 
 test("captured DIL smoke response reaches Markdown delivery and stable completion", async () => {
@@ -268,15 +399,141 @@ test("reported code-block containers preserve code while their localized toolbar
       buffer.observe(during.markdownSegments, 0);
       buffer.observe(after.markdownSegments, 1000);
       expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
-      expect(buffer.finish().markdown).toBe(`Example\n\n\`\`\`python\n${code}\`\`\`\n\nDone.`);
+      const fence = "`".repeat(block === "div" ? 4 : 3);
+      expect(buffer.finish().markdown).toBe(`Example\n\n${fence}python\n${code}${fence}\n\nDone.`);
 
-      // Once finish seals the response, later DOM mutations belong to renderer hydration and
-      // cannot retract bytes already returned to Codex.
+      // A changed code block remains an explicit protocol error: streamed bytes cannot be retracted.
       const changed = await snapshot(html("", code.replace("print(first)", "print(other)")));
       buffer.observe(changed.markdownSegments, 2000);
-      expect(buffer.finish().delta).toBe("");
+      expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
     }
   }
+});
+
+test("captured CodeMirror reply preserves its language, fences and line boundaries", async () => {
+  const html = readFileSync(new URL("./fixtures/chatgpt-codemirror-reply-2026-10-11.html", import.meta.url), "utf8");
+  const captured = await snapshot(html);
+  expect(chatGptHtmlToMarkdown(captured.fullHtml)).toBe("# Probe\n\n- First item\n- Second item\n\n```python\nprint(1)\n```");
+  const code = 'def sample():\n    value = "日本語 & <x>"\n\n    return value\n';
+  const frames = await snapshots(html, [
+    doc => {
+      const editor = doc.querySelector(".cm-content")!;
+      editor.textContent = "";
+      for (const text of code.split("\n")) {
+        const line = doc.createElement("div"); line.className = "cm-line";
+        if (text) line.textContent = text; else line.appendChild(doc.createElement("br"));
+        editor.appendChild(line);
+      }
+    },
+    doc => { doc.querySelector('[data-markdown-copy="exclude"]')!.textContent = "コード"; },
+  ]);
+  const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+  buffer.observe(frames[1]!.markdownSegments, 0);
+  buffer.observe(frames[2]!.markdownSegments, 1000);
+  expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
+  expect(buffer.finish().markdown).toBe(`# Probe\n\n- First item\n- Second item\n\n\`\`\`python\n${code}\`\`\``);
+  expect(frames[2]!.fullHtml).not.toContain("コード");
+  expect(frames[2]!.fullHtml).not.toContain("cm-content");
+});
+
+test("CodeMirror source changes remain real answer edits and incomplete editors fail explicitly", async () => {
+  const html = readFileSync(new URL("./fixtures/chatgpt-codemirror-reply-2026-10-11.html", import.meta.url), "utf8");
+  const frames = await snapshots(html, [
+    doc => { doc.querySelector(".cm-line")!.textContent = "print(2)"; },
+  ]);
+  const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+  buffer.observe(frames[0]!.markdownSegments, 0);
+  buffer.finish();
+  buffer.observe(frames[1]!.markdownSegments, 1000);
+  expect(() => buffer.finish()).toThrow("ChatGPT changed a completed text block");
+  for (const missingSource of [
+    html.replace('<div class="cm-line">', '<div style="height:200px"></div><div class="cm-line">'),
+    html.replace('<div class="cm-line">', '<div class="cm-content" data-language="python"></div><div class="cm-line">'),
+  ]) {
+    await expect(snapshot(missingSource)).rejects.toThrow("one complete set of code lines");
+  }
+});
+
+test("known rich-content controls cannot keep a finished answer waiting, but answer edits restart settling", async () => {
+  // Chart and preview boundaries were captured in DEV; their controls can change
+  // after generation has stopped. Completion must use the same content as delivery.
+  const html = `<section id="turn"><div class="markdown">
+    <p id="prose">Here is the chart.</p><pre><code class="language-json">{"mark":"line"}</code></pre>
+    <div class="chart-widget-container" id="chart"><div role="status">Creating chart</div></div>
+    <div data-code-block-preview-pane="vega-lite" id="preview">Loading preview</div>
+    <p>Done.</p></div><button data-testid="copy-turn-action-button"></button></section>`;
+  const frames = await snapshots(html, [
+    doc => {
+      doc.getElementById("chart")!.innerHTML = '<button>Chart options</button><svg><text>Day 1 Day 2</text></svg>';
+      doc.getElementById("preview")!.innerHTML = '<iframe title="Preview"></iframe>';
+    },
+    doc => { doc.getElementById("chart")!.innerHTML = '<button>Chart options</button><svg><text>Day 3 Day 4</text></svg>'; },
+    doc => { doc.getElementById("prose")!.textContent = "Here is the revised chart."; },
+  ]);
+  const state = (frame: Snapshot) => ({ ...frame, running: false,
+    currentText: frame.visibleText, currentHtml: frame.fullHtml });
+  const tracker = new ChatGptCompletionTracker();
+  expect(frames.every(frame => frame.completionActionVisible)).toBeTrue();
+  expect(tracker.update({ ...state(frames[0]!), running: true }, 0)).toBeFalse();
+  expect(tracker.update(state(frames[0]!), 1)).toBeFalse();
+  expect(frames[1]!.visibleText).toBe(frames[0]!.visibleText);
+  expect(frames[2]!.fullHtml).toBe(frames[0]!.fullHtml);
+  expect(frames[2]!.fullHtml).not.toContain("Chart options");
+  expect(frames[2]!.fullHtml).toContain('{"mark":"line"}');
+  expect(tracker.update(state(frames[1]!), 1000)).toBeFalse();
+  expect(tracker.update(state(frames[2]!), 1 + CHATGPT_COMPLETION_SETTLE_MS)).toBeTrue();
+  expect(tracker.update(state(frames[3]!), 2 + CHATGPT_COMPLETION_SETTLE_MS)).toBeFalse();
+  expect(tracker.update(state(frames[3]!), 2 + 2 * CHATGPT_COMPLETION_SETTLE_MS)).toBeTrue();
+  // A widget refreshing after a tool call is not a new answer from the model.
+  const afterTool = new ChatGptCompletionTracker();
+  afterTool.observeToolBatch(1, frames[0]!.visibleText);
+  expect(afterTool.update(state(frames[1]!), 0)).toBeFalse();
+  expect(afterTool.update(state(frames[2]!), CHATGPT_COMPLETION_SETTLE_MS)).toBeFalse();
+  expect(afterTool.update(state(frames[3]!), 1 + CHATGPT_COMPLETION_SETTLE_MS)).toBeFalse();
+  expect(afterTool.update(state(frames[3]!), 1 + 2 * CHATGPT_COMPLETION_SETTLE_MS)).toBeTrue();
+});
+
+test("writing card controls cannot rewrite delivered content, but edited email text still can", async () => {
+  const html = (toolbar: string, body = "Hello <strong>Alex</strong>.") => `<section id="turn"><div class="markdown">
+    <p data-start="0" data-end="10">Drafts</p>
+    <div data-markdown-copy="rich-block" data-start="12" data-end="200">
+      <div>${toolbar}<button>Copy</button></div>
+      <div data-markdown-copy-content="true"><p>${body}</p><p>See <a href="https://example.com/">details</a>.</p>
+        <pre><code class="language-text">line 1\n  line 2</code></pre></div>
+      <footer>Email format</footer>
+    </div><p data-start="202" data-end="220">Done.</p></div></section>`;
+  const during = await snapshot(html("メール"));
+  const complete = await snapshot(html(""));
+  // These snapshots use separate documents; their DOM node identities differ.
+  expect(during.markdownSegments.map(({ key, ...content }) => content))
+    .toEqual(complete.markdownSegments.map(({ key, ...content }) => content));
+  expect(during.markdownSegments.map(segment => segment.text).join("\n")).not.toContain("メール");
+  expect(during.markdownSegments.map(segment => segment.text).join("\n")).not.toContain("Email format");
+  const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+  buffer.observe(during.markdownSegments, 0);
+  buffer.observe(complete.markdownSegments, 1000);
+  const output = buffer.finish().markdown;
+  expect(output).toContain("Hello **Alex**.");
+  expect(output).toContain("[details](https://example.com/)");
+  expect(output).toContain("line 1\n  line 2");
+  buffer.observe((await snapshot(html("", "Hello Sam."))).markdownSegments, 2000);
+  expect(() => buffer.finish()).toThrow("ChatGPT changed a completed text block");
+});
+
+test("nested writing cards keep the outer prose and cards without a unique body lose nothing", async () => {
+  const response = await snapshot(`<section id="turn"><div class="markdown">
+    <div data-markdown-copy="rich-block"><p>Outer prose</p>
+      <div data-markdown-copy="rich-block"><div>Toolbar</div>
+        <div data-markdown-copy-content="true"><p>Inner body</p></div></div></div>
+    <div data-markdown-copy="rich-block"><div data-markdown-copy-content="true">First</div>
+      <div data-markdown-copy-content="true">Second</div></div>
+    <p>End</p></div></section>`);
+  const text = response.markdownSegments.map(segment => segment.text).join("\n");
+  expect(text).toContain("Outer prose");
+  expect(text).toContain("Inner body");
+  expect(text).toContain("First");
+  expect(text).toContain("Second");
+  expect(text).not.toContain("Toolbar");
 });
 
 test("ordinary prose, inline code and legacy fenced code keep their meaning", async () => {
@@ -349,4 +606,195 @@ test("tool turns defer mutable roots and publish a rewritten human conclusion in
     markdown: "Concluído.\n\nArquivos ajustados: Header.css e Hero.css.",
     delta: "Concluído.\n\nArquivos ajustados: Header.css e Hero.css.",
   });
+});
+
+
+// #788 captures the same reference first as text, then an empty loading control.
+test("mutable references buffer from the preview while preceding paragraphs keep streaming", async () => {
+  const html = `<section id="turn"><div class="markdown"><p>Intro.</p>
+    <div id="preview" data-chatgpt-copy-reference="0" data-markdown-copy="contents">View</div>
+    <p>Closing note.</p></div><button aria-label="Copy"></button></section>`;
+  const frames = await snapshots(html, [
+    doc => { doc.getElementById("preview")!.innerHTML = '<div class="motion-safe:animate-spin"></div>'; },
+    doc => { doc.getElementById("preview")!.innerHTML = '<span class="group/resource-row">report.pdfPDF</span>'; },
+    doc => { doc.getElementById("preview")!.innerHTML = '<span class="group/resource-row"><a href="https://example.com/report">Download report</a></span>'; },
+  ]);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  expect(buffer.observe(frames[0]!.markdownSegments, 0)).toBe("Intro.");
+  for (const frame of frames.slice(1)) expect(buffer.observe(frame.markdownSegments, 1)).toBe("");
+  expect(buffer.finish()).toEqual({
+    markdown: "Intro.\n\n[Download report](https://example.com/report)\n\nClosing note.",
+    delta: "\n\n[Download report](https://example.com/report)\n\nClosing note.",
+  });
+});
+
+test("a removed preview cannot release its pending tail even if the prefix was still settling", async () => {
+  const html = `<section id="turn"><div class="markdown"><p>Intro.</p>
+    <div id="preview" data-chatgpt-copy-reference="0" data-markdown-copy="contents">View</div>
+    <p>Pending tail.</p><p>Closing.</p></div></section>`;
+  const [first, removed, remounted, edited] = await snapshots(html, [
+    doc => { doc.getElementById("preview")!.remove(); },
+    doc => { doc.querySelector(".markdown")!.outerHTML = html.match(/<div class="markdown">.*<\/div>/s)![0]; },
+    doc => { doc.querySelector("p")!.textContent = "Real edit."; },
+  ]);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 750);
+  expect(buffer.observe(first!.markdownSegments, 0)).toBe("");
+  expect(buffer.observe(removed!.markdownSegments, 1000)).toBe("Intro.");
+  expect(buffer.observe(removed!.markdownSegments, 2000)).toBe("");
+  expect(buffer.observe(remounted!.markdownSegments, 3000)).toBe("");
+  buffer.observe(edited!.markdownSegments, 4000);
+  expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
+});
+
+test("an empty preview that owns its own Markdown root still holds back following text", async () => {
+  for (const marker of ['div class="markdown"', 'span']) {
+    const html = `<section id="turn"><div class="markdown"><p>Intro.</p></div>
+      <${marker} id="preview" data-chatgpt-copy-reference="0" data-markdown-copy="contents"><span class="group/resource-row">preview.pngPNG</span></${marker.split(' ')[0]}>
+      <div class="markdown"><p>Tail.</p><p>End.</p></div></section>`;
+    // A span belongs inside its containing answer rather than being a separate renderer root.
+    const owned = marker === 'span' ? html.replace('</div>\n      <span', '\n      <span').replace('</span>\n      <div class="markdown">', '</span>') : html;
+    const [before, after] = await snapshots(owned, [doc => {
+      doc.getElementById("preview")!.innerHTML = '<a href="https://example.com/file">File</a>';
+    }]);
+    const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+    expect(buffer.observe(before!.markdownSegments, 0)).toBe("Intro.");
+    expect(buffer.observe(after!.markdownSegments, 1)).toBe("");
+    expect(buffer.finish().markdown).toBe("Intro.\n\n[File](https://example.com/file)\n\nTail.\n\nEnd.");
+  }
+});
+
+test("unmatched final blocks report structural evidence without exposing answer contents", () => {
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  buffer.observe([{ key: "original", tag: "p", html: "<p>Private answer</p>", text: "Private answer", streamable: true }]);
+  buffer.observe([{ key: "remounted", tag: "div", html: "<div>Private replacement</div>", text: "Private replacement", streamable: false }]);
+  try {
+    buffer.finish();
+    throw new Error("Expected a consistency error");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ChatGptMarkdownConsistencyError);
+    const diagnostic = (error as ChatGptMarkdownConsistencyError).diagnostic;
+    expect(diagnostic).toMatchObject({ reason: "unanchored_block", observedTag: "div", committedTag: "p", observedKeyMode: "dom-node", committedKeyMode: "dom-node", observedIndex: 0, committedIndex: 0 });
+    expect(JSON.stringify(diagnostic)).not.toContain("Private");
+  }
+});
+
+test("recreated horizontal rules preserve their Markdown and position among delivered paragraphs", async () => {
+  const html = `<section id="turn"><div class="markdown"><p>First.</p><hr><p>Middle.</p><hr><p>Last.</p><p>Pending.</p></div></section>`;
+  const frames = await snapshots(html, [doc => {
+    for (const hr of Array.from(doc.querySelectorAll("hr"))) hr.replaceWith(doc.createElement("hr"));
+  }, doc => {
+    doc.querySelector(".markdown")!.firstElementChild!.remove();
+    doc.querySelector("p")!.textContent = "Changed delivered text.";
+  }]);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  const streamed = buffer.observe(frames[0]!.markdownSegments, 0);
+  expect(streamed).toContain("First.");
+  expect(streamed.match(/\* \* \*/g)).toHaveLength(2);
+  expect(buffer.observe(frames[1]!.markdownSegments, 1)).toBe("");
+  expect(buffer.finish().markdown).toBe(chatGptHtmlToMarkdown(html));
+  buffer.observe(frames[2]!.markdownSegments, 2);
+  expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
+});
+
+test("repeated rules need ordered anchors and an inserted rule cannot masquerade as delivered content", () => {
+  const p = (key: string, text: string): ChatGptMarkdownSegment => ({ key, tag: "p", html: `<p>${text}</p>`, text, streamable: true });
+  const hr = (key: string): ChatGptMarkdownSegment => ({ key, tag: "hr", html: "<hr>", text: "", streamable: true });
+  const original = [p("a", "First"), hr("r1"), p("b", "Middle"), hr("r2"), p("c", "Last")];
+  for (const observed of [
+    [hr("new"), p("c", "Last")], // Either rule could be the remounted one.
+    [p("b", "Middle"), hr("new"), p("a", "First")], // Real reordering stays invalid.
+  ]) {
+    const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+    buffer.observe(original, 0);
+    buffer.observe(observed, 1);
+    expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
+  }
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  buffer.observe([p("a", "First"), p("c", "Last")], 0);
+  buffer.observe([p("a", "First"), hr("inserted"), p("c", "Last")], 1);
+  expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
+});
+
+test("late source ranges preserve the same answer blocks across subsequent remounts", async () => {
+  const html = `<section id="turn" data-turn-key="response">
+    <div data-content-search-unit-key="response:assistant"><h4 data-conversation-role="assistant">Assistant</h4>
+      <div data-markdown-text-style="assistant-message">
+        <p id="first">First paragraph.</p><p id="tail">Tail.</p>
+      </div>
+    </div></section>`;
+  const frames = await snapshots(html, [doc => {
+    for (const [id, start, end] of [["first", "0", "16"], ["tail", "18", "23"]]) {
+      doc.getElementById(id!)!.setAttribute("data-start", start!);
+      doc.getElementById(id!)!.setAttribute("data-end", end!);
+    }
+  }, doc => {
+    const answer = doc.querySelector('[data-markdown-text-style="assistant-message"]')!;
+    answer.innerHTML = answer.innerHTML;
+  }, doc => {
+    doc.getElementById("first")!.remove();
+    doc.getElementById("tail")!.textContent = "Tail extended.";
+    doc.getElementById("tail")!.setAttribute("data-end", "32");
+  }]);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  expect(buffer.observe(frames[0]!.markdownSegments, 0)).toBe("First paragraph.");
+  for (const [index, frame] of frames.slice(1).entries()) {
+    expect(buffer.observe(frame.markdownSegments, index + 1)).toBe("");
+    expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
+  }
+  expect(buffer.finish()).toEqual({ markdown: "First paragraph.\n\nTail extended.", delta: "\n\nTail extended." });
+});
+
+test("late source ranges cannot disguise edits, reordered blocks or unknown node replacements", async () => {
+  for (const change of ["text", "link", "order", "remount", "overlap"] as const) {
+    const html = `<section id="turn"><div class="markdown">
+      <p id="first"><a href="https://example.com/original">First</a></p>
+      <p id="second">Second.</p><p id="tail">Tail.</p>
+    </div></section>`;
+    const [before, after] = await snapshots(html, [doc => {
+      if (change === "remount") {
+        const answer = doc.querySelector(".markdown")!;
+        answer.innerHTML = answer.innerHTML;
+      }
+      if (change === "text") doc.getElementById("first")!.textContent = "Changed.";
+      if (change === "link") doc.querySelector("a")!.setAttribute("href", "https://example.com/changed");
+      if (change === "order") doc.querySelector(".markdown")!.insertBefore(doc.getElementById("second")!, doc.getElementById("first")!);
+      Array.from(doc.querySelectorAll("p")).forEach((node, index) => {
+        node.setAttribute("data-start", String(index * 20));
+        node.setAttribute("data-end", String(index * 20 + 10));
+      });
+      if (change === "overlap") doc.getElementById("tail")!.setAttribute("data-start", "25");
+    }]);
+    const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+    expect(buffer.observe(before!.markdownSegments, 0)).toBe("[First](https://example.com/original)\n\nSecond.");
+    expect(buffer.observe(after!.markdownSegments, 1)).toBe("");
+    expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
+  }
+});
+
+test("a known answer node cannot move its source range and be emitted again", async () => {
+  const [before, shifted] = await snapshots(`<section id="turn"><div class="markdown">
+    <p id="first" data-start="0" data-end="16">First paragraph.</p><p>Tail.</p>
+  </div></section>`, [doc => {
+    doc.getElementById("first")!.setAttribute("data-start", "50");
+    doc.getElementById("first")!.setAttribute("data-end", "66");
+  }]);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  expect(buffer.observe(before!.markdownSegments, 0)).toBe("First paragraph.");
+  expect(buffer.observe(shifted!.markdownSegments, 1)).toBe("");
+  expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
+});
+
+test("repeated text cannot rebind a known node to another committed source range", async () => {
+  const [before, shifted] = await snapshots(`<section id="turn"><div class="markdown">
+    <p id="first" data-start="0" data-end="8">Repeated.</p>
+    <p id="second" data-start="10" data-end="18">Repeated.</p><p>Tail.</p>
+  </div></section>`, [doc => {
+    doc.getElementById("first")!.remove();
+    doc.getElementById("second")!.setAttribute("data-start", "0");
+    doc.getElementById("second")!.setAttribute("data-end", "8");
+  }]);
+  const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+  expect(buffer.observe(before!.markdownSegments, 0)).toBe("Repeated.\n\nRepeated.");
+  expect(buffer.observe(shifted!.markdownSegments, 1)).toBe("");
+  expect(() => buffer.finish()).toThrow(ChatGptMarkdownConsistencyError);
 });

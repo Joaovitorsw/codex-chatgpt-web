@@ -8,7 +8,7 @@ import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
-import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
+import { callTurnBroker, TurnBrokerTimeoutError, type BrokerRetirementDiagnostics, type BrokerToolResult } from "./turn-broker";
 import { observeMcpToolCalls } from "./mcp-observation";
 
 interface ClaimedTurn {
@@ -27,6 +27,8 @@ const BRIDGE_TOOL_NAMES = new Set([
   "codex_view_image",
   "codex_generate_image_asset",
   "codex_tool_inventory",
+  "codex_tool_search",
+  "codex_browser_read",
   "codex_tool_call",
   "codex_turn_complete",
 ]);
@@ -771,14 +773,16 @@ export async function runChatGptMcpServer(options: {
       // A cancelled/timed-out MCP request no longer has a consumer for the native result. Revoke
       // the whole turn capability so the broker drops the pending invocation and every later call
       // from that abandoned ChatGPT response fails explicitly against its retired binding.
+      let diagnostics: BrokerRetirementDiagnostics | undefined;
       try {
-        await callTurnBroker(options.brokerSocketPath, {
+        const retired = await callTurnBroker<{ released: boolean; diagnostics?: BrokerRetirementDiagnostics }>(options.brokerSocketPath, {
           method: "release",
           bindingId,
           ...(error instanceof TurnBrokerTimeoutError ? {
             failure: { code: "codex_tool_timeout" as const, tool: wireName(tool), timeoutMs },
           } : {}),
         });
+        diagnostics = retired.diagnostics;
       } catch (releaseError) {
         throw new AggregateError(
           [error, releaseError],
@@ -788,14 +792,16 @@ export async function runChatGptMcpServer(options: {
       if (error instanceof TurnBrokerTimeoutError) {
         const toolName = wireName(tool);
         console.error(
-          `[chatgpt-web-mcp] ${toolName} did not complete within ${timeoutMs}ms; retired its turn binding`,
+          `[chatgpt-web-mcp] ${toolName} did not complete within ${timeoutMs}ms; retired its turn binding`
+          + ` broker_state_at_retirement=${JSON.stringify(diagnostics ?? null)}`,
         );
         return result({
           code: "codex_tool_timeout",
           tool: toolName,
           timeout_ms: timeoutMs,
           retryable: false,
-          message: `Codex tool ${toolName} did not complete before the MCP transport deadline. The current turn binding was retired; do not retry it in this ChatGPT response.`,
+          ...(diagnostics === undefined ? {} : { broker_state_at_retirement: diagnostics }),
+          message: `Codex tool ${toolName} did not complete before the MCP transport deadline. The current turn binding was retired; do not retry it in this ChatGPT response. Delivery confirms handoff to Codex; execution and approval status are unknown.`,
         }, true);
       }
       throw error;
@@ -1119,11 +1125,56 @@ export async function runChatGptMcpServer(options: {
   );
 
   server.registerTool(
+    "codex_tool_search",
+    {
+      title: "Discover deferred Codex tools",
+      description: "Use this read-only route to load deferred tools after codex_tool_inventory reports a miss. Do not send discovery through codex_tool_call or raw exec.",
+      inputSchema: {
+        ...turnReferenceInput(contract),
+        query: z.string().min(1).max(500),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (input, extra) => withClaimedTurn("codex_tool_search", turnReference(contract, input), extra, async claimed => {
+      const tool = safeVisibleTools(claimed.environment, contract).find(candidate => candidate.toolSearch && !candidate.freeform);
+      if (!tool) throw new Error("This Codex turn did not advertise a deferred tool discovery capability");
+      const args = { query: input.query, ...(input.limit !== undefined ? { limit: input.limit } : {}) };
+      assertBrowserToolArguments(tool, args);
+      return invoke(claimed.bindingId, claimed.environment, tool, { arguments: args }, extra.signal);
+    }),
+  );
+
+  server.registerTool(
+    "codex_browser_read",
+    {
+      title: "Read browser state without browser interaction",
+      description: "Use this read-only route for codex-browser info, tab lists, URL, title and DOM inspection. Empty session tab lists are normal. Navigation, clicks, filling, evaluation and screenshots are not accepted here; use codex_tool_call for those actions.",
+      inputSchema: {
+        ...turnReferenceInput(contract),
+        operation: z.enum(["codex_get_info", "codex_list_tabs", "codex_user_tabs", "codex_get_url", "codex_get_title", "codex_dom_snapshot", "codex_dom_get_visible"]),
+        tab_id: z.string().min(1).max(1000).optional(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async (input, extra) => withClaimedTurn("codex_browser_read", turnReference(contract, input), extra, async claimed => {
+      const name = `mcp__codex_browser__${input.operation}`;
+      const args = input.tab_id === undefined ? {} : { tab_id: input.tab_id };
+      const tool = safeVisibleTools(claimed.environment, contract).find(candidate => wireName(candidate) === name && !candidate.freeform);
+      if (tool) {
+        assertBrowserToolArguments(tool, args);
+        return invoke(claimed.bindingId, claimed.environment, tool, { arguments: args }, extra.signal);
+      }
+      return invokeNestedNative(claimed.bindingId, claimed.environment, name, false, { arguments: args }, extra.signal);
+    }),
+  );
+
+  server.registerTool(
     "codex_tool_call",
     {
       title: "Call any tool from the current Codex harness",
       description: afterSafeStart(contract, [
-        "Invoke an exact wire_name returned by codex_tool_inventory. The outer Codex runtime performs the call, approvals, and UI lifecycle.",
+        "Invoke an exact wire_name returned by codex_tool_inventory. Prefer codex_tool_search for discovery and codex_browser_read for supported browser queries. The outer Codex runtime performs the call, approvals, and UI lifecycle.",
         ...(contract === "native" ? [
           `A pending context-compaction request can also provide the reserved ${CODEX_COMPACTION_CONTROL_WIRE_NAME} operation, which is not listed by inventory.`,
           "Use only that request's issued control token and arguments {handoff_id, summary}. This operation submits the conversation summary to the pending Codex task; it does not execute commands, access files, or invoke other tools.",

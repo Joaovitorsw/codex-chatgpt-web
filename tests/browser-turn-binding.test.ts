@@ -1,7 +1,58 @@
 import { expect, test } from "bun:test";
 import { chromium, type Locator, type Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { readFileSync } from "node:fs";
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("CodeMirror language invalidates the response cache and incomplete code is not delivered", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(readFileSync(new URL("./fixtures/chatgpt-codemirror-reply-2026-10-11.html", import.meta.url), "utf8"));
+    const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+    const cache = {};
+    const observe = () => worker.responseDomSnapshot(page.locator("#turn"), cache);
+    expect(chatGptHtmlToMarkdown((await observe()).fullHtml)).toContain("```python\nprint(1)\n```");
+    await page.locator(".cm-content").evaluate(editor => editor.setAttribute("data-language", "text"));
+    expect(chatGptHtmlToMarkdown((await observe()).fullHtml)).toContain("```text\nprint(1)\n```");
+    await page.locator(".cm-content").evaluate(editor => {
+      const gap = document.createElement("div");
+      gap.style.height = "200px";
+      editor.appendChild(gap);
+    });
+    await expect(observe()).rejects.toThrow("one complete set of code lines");
+  } finally { await browser.close(); }
+});
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("paragraph identity survives file preview movement in both response layouts", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  try {
+    for (const root of ['class="markdown"', 'data-markdown-text-style="assistant-message"']) {
+      const page = await browser.newPage();
+      await page.setContent(`<section id="turn"><div data-content-search-unit-key="answer">
+        <h4 data-conversation-role="assistant"></h4><div id="answer" ${root}>
+        <p>Report saved:</p><p id="file">report.md</p><p id="tail">Done.</p>
+      </div></div><button aria-label="Copy"></button></section>`);
+      const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
+      const cache = {};
+      const observe = () => worker.responseDomSnapshot(page.locator("#turn"), cache);
+      const before = await observe();
+      const buffer = new ChatGptMarkdownBuffer(undefined, 0);
+      expect(buffer.observe(before.markdownSegments, 0)).toBe("Report saved:\n\nreport.md");
+      await page.locator("#file").evaluate(file => { file.parentElement!.parentElement!.appendChild(file); });
+      const moved = await observe();
+      expect(moved.markdownSegments.at(-1).key).toBe(before.markdownSegments.at(-1).key);
+      expect(buffer.observe(moved.markdownSegments, 1)).toBe("");
+      await page.locator("#answer").evaluate(answer => { answer.innerHTML = answer.innerHTML; });
+      buffer.observe((await observe()).markdownSegments, 2);
+      expect(buffer.finish().markdown).toBe("Report saved:\n\nreport.md\n\nDone.");
+      await page.locator("#tail").evaluate(tail => { tail.textContent = "A changed answer."; });
+      buffer.observe((await observe()).markdownSegments, 3);
+      expect(() => buffer.finish()).toThrow();
+      await page.close();
+    }
+  } finally { await browser.close(); }
+}, 15_000);
 
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("activity tone and collapsed content invalidate the response cache", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
@@ -57,7 +108,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("preserves the accepted user 
       if (scenario === "old-group-remains") replacement += '<div data-turn-key="fallback-turn-0"></div>';
       await page.locator("main").evaluate((node, html) => { node.innerHTML = html; }, replacement);
       const result = worker.reconcileAssistantTurnBinding(page, baseline, binding);
-      if (scenario === "same-user") {
+      if (scenario === "same-user" || scenario === "unfinished") {
         expect((await result).identity).toBe("group:assistant:submitted");
       } else {
         await expect(result).rejects.toThrow("another user turn");
@@ -69,7 +120,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("preserves the accepted user 
 
 // Execute the real observation/rebinding code against the reported renderer transition.
 // No account, network requests, or model submissions are used.
-test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("completed exchange rekeys only with the exact submitted prompt and no competing turn", async () => {
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("owned exchange rekeys only with the exact submitted prompt and no competing turn", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
   try {
     const worker = Object.create(ChatGptBrowserWorker.prototype) as {
@@ -104,7 +155,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("completed exchange rekeys on
       if (scenario === "old-group-remains") html += '<div data-turn-key="optimistic"><div data-user-message-bubble>Earlier</div></div>';
       await page.locator("main").evaluate((node, next) => { node.innerHTML = next; }, html);
       const result = worker.reconcileAssistantTurnBinding(page, baseline, binding);
-      if (scenario === "matching" || scenario === "history" || scenario === "same-key" || scenario === "nested-duplicate") {
+      if (scenario === "matching" || scenario === "history" || scenario === "same-key" || scenario === "nested-duplicate" || scenario === "unfinished") {
         const rebound = await result;
         expect(rebound.identity).toBe(`group:assistant:${scenario === "same-key" ? "optimistic" : "persisted"}`);
         expect(await rebound.locator.count()).toBe(1);
@@ -117,9 +168,13 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("completed exchange rekeys on
 }, 30_000);
 
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("binds captured Activity before an answer exists and recognizes uploaded native-button tiles", async () => {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => new URL(request.url).pathname === "/backend-api/files/process_upload_stream"
+    ? new Response(JSON.stringify({ event: "file.processing.completed", file_id: "fixture-file" }) + "\n", { headers: { "content-type": "application/x-ndjson" } })
+    : new Response("<main></main>", { headers: { "content-type": "text/html" } }) });
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
   try {
     const page = await browser.newPage();
+    await page.goto(`http://127.0.0.1:${server.port}`);
     const worker = Object.create(ChatGptBrowserWorker.prototype) as any;
     await page.setContent('<main></main>');
     const baseline = await worker.captureSubmissionBaseline(page, "Prompt");
@@ -132,8 +187,13 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("binds captured Activity befo
       await page.setContent(`<form data-chatgpt-composer><div data-composer-markdown contenteditable="true" role="textbox" style="height:40px">Prompt</div>
         <input type="file" multiple><${tile} class="composer-attachment-surface" aria-label="codex-input-image-1.png">File</${tile.split(' ')[0]}>
         <button type="submit">Send</button></form>`);
+      await page.locator('input[type="file"]').evaluate(input => {
+        input.addEventListener("change", () => void fetch("/backend-api/files/process_upload_stream", {
+          method: "POST", body: JSON.stringify({ file_name: "codex-input-image-1.png", file_id: "fixture-file" }),
+        }));
+      });
       await worker.attachFiles(page, { images: [{ ref: "codex-input-image-1", imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" }] });
       expect(await page.locator('input[type="file"]').evaluate(input => (input as HTMLInputElement).files?.[0]?.name)).toBe("codex-input-image-1.png");
     }
-  } finally { await browser.close(); }
+  } finally { await browser.close(); server.stop(true); }
 }, 15_000);

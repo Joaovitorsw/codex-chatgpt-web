@@ -42,7 +42,6 @@ import {
 import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, stopTunnel, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, installTunnelService, restartTunnelService, stopTunnelService, tunnelServiceDefinitionMatches, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
-import { CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR } from "./chatgpt-web-models";
 
 export interface SetupOptions {
   connectorNameSuffix?: string;
@@ -56,12 +55,14 @@ export interface SetupOptions {
   forceLogin?: boolean;
   autoApproveToolCalls?: boolean;
   experimentalBiggerContext?: boolean;
+  composerPredictionsEnabled?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalContextAttachments?: boolean;
   experimentalFreshConversationPerTurn?: boolean;
   useSavedChats?: boolean;
   zeroRiskProEnabled?: boolean;
   replaceCodexRoute?: boolean;
+  preserveDisconnectedRoute?: boolean;
   restartService?: boolean;
   acknowledgedUnofficial?: boolean;
   tunnelId?: string;
@@ -151,6 +152,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     extraHighAvailable: before.extraHighAvailable,
     proAvailable: before.proAvailable,
     experimentalBiggerContext: before.experimentalBiggerContext,
+    composerPredictionsEnabled: before.composerPredictionsEnabled,
     experimentalSkillAttachments: before.experimentalSkillAttachments,
     experimentalFreshConversationPerTurn: before.experimentalFreshConversationPerTurn,
     useSavedChats: before.useSavedChats,
@@ -182,6 +184,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     extraHighAvailable: after.extraHighAvailable,
     proAvailable: after.proAvailable,
     experimentalBiggerContext: after.experimentalBiggerContext,
+    composerPredictionsEnabled: after.composerPredictionsEnabled,
     experimentalSkillAttachments: after.experimentalSkillAttachments,
     experimentalFreshConversationPerTurn: after.experimentalFreshConversationPerTurn,
     useSavedChats: after.useSavedChats,
@@ -204,11 +207,27 @@ export function tunnelWorkerRuntimeChanged(before: AppConfig | undefined, after:
     || JSON.stringify(before.tunnel) !== JSON.stringify(after.tunnel);
 }
 
+/**
+ * On Windows, EACCES can indicate a reserved port, an exclusive binding, or a security policy.
+ * The error alone does not identify which one prevented the listener from starting.
+ */
+export function portBindFailureMessage(
+  host: string,
+  port: number,
+  error: NodeJS.ErrnoException,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const message = `Cannot bind ${host}:${port}: ${error.message}`;
+  if (platform !== "win32" || error.code !== "EACCES") return message;
+  return `${message}. Windows may have reserved this port, another service may hold it exclusively, or security software may be blocking it. `
+    + "See \"Windows: Cannot bind the local port (EACCES)\" in TROUBLESHOOTING.md";
+}
+
 async function assertPortAvailable(host: string, port: number): Promise<void> {
   await new Promise<void>((resolveAvailable, rejectAvailable) => {
     const server = createServer();
     server.unref();
-    server.once("error", error => rejectAvailable(new Error(`Cannot bind ${host}:${port}: ${error.message}`)));
+    server.once("error", error => rejectAvailable(new Error(portBindFailureMessage(host, port, error))));
     server.listen(port, host, () => server.close(error => error ? rejectAvailable(error) : resolveAvailable()));
   });
 }
@@ -282,6 +301,9 @@ function baseConfig(
     delete config.browserHostDescriptorPath;
   }
   if (options.autoApproveToolCalls !== undefined) config.autoApproveToolCalls = options.autoApproveToolCalls;
+  if (options.composerPredictionsEnabled !== undefined) {
+    config.composerPredictionsEnabled = options.composerPredictionsEnabled;
+  }
   if (options.experimentalSkillAttachments !== undefined) {
     config.experimentalSkillAttachments = options.experimentalSkillAttachments;
   }
@@ -585,9 +607,6 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   config.solAvailable = solAvailable === true;
   config.extraHighAvailable = config.solAvailable && extraHighAvailable === true;
   config.proAvailable = config.solAvailable && proAvailable === true;
-  if (config.experimentalBiggerContext && !config.solAvailable) {
-    throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
-  }
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
   if (beforeService.loaded && preliminaryChange && !options.restartService) {
@@ -658,6 +677,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   if (!migratingTerminalRuntime) removeLegacyRuntimeArtifacts(config);
   installCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
+    preserveDisconnectedRoute: options.preserveDisconnectedRoute,
   });
   installBundledCodexSkills();
 
@@ -702,9 +722,6 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
     config.proAvailable = capabilities.solAvailable && capabilities.proAvailable;
   }
 
-  if (config.experimentalBiggerContext && !config.solAvailable) {
-    throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
-  }
 
   await configureTunnel(config, existing, options);
   // DEV uses the same supervisor-owned startup after this configuration is committed.

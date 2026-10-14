@@ -6,9 +6,27 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $runner = Join-Path $repoRoot 'run-local-production.cmd'
 $logDir = Join-Path $repoRoot 'work\local-production'
+$launcherEntry = Join-Path $repoRoot 'launcher'
 
 if (-not (Test-Path -LiteralPath $runner)) {
   throw "Local production runner was not found: $runner"
+}
+
+# A second development launcher cannot bind Vite's fixed port and may still open
+# another Electron process before it notices the conflict. Detect the exact local
+# launcher path first so repeated double-clicks remain safe and silent.
+$escapedLauncherEntry = [Regex]::Escape($launcherEntry)
+$existingLauncher = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.Name -ieq 'electron.exe' -and
+    $_.CommandLine -match $escapedLauncherEntry -and
+    $_.CommandLine -notmatch '--type='
+  } |
+  Select-Object -First 1
+
+if ($null -ne $existingLauncher) {
+  Write-Output "Local production launcher is already running (PID $($existingLauncher.ProcessId))."
+  exit 0
 }
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null

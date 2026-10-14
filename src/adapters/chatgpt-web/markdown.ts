@@ -261,6 +261,8 @@ export interface ChatGptMarkdownSegment {
   sourceStart?: number;
   sourceEnd?: number;
   streamable: boolean;
+  /** File-reference controls can replace their label, spinner and download link until completion. */
+  mutableReference?: boolean;
 }
 
 interface ChatGptMarkdownCandidate extends ChatGptMarkdownSegment {
@@ -279,13 +281,19 @@ interface CommittedChatGptMarkdownSegment {
 
 export class ChatGptMarkdownConsistencyError extends Error {
   constructor(message: string, readonly diagnostic?: {
-    reason: "text_changed" | "link_target_changed" | "block_order_changed" | "source_range_overlap";
+    reason: "text_changed" | "link_target_changed" | "block_order_changed" | "source_range_overlap" | "source_range_changed" | "unanchored_block";
     observedStart?: number;
     observedEnd?: number;
     committedStart?: number;
     committedEnd?: number;
     observedTextChars: number;
     committedTextChars: number;
+    observedTag?: string;
+    committedTag?: string;
+    observedIndex: number;
+    committedIndex: number;
+    observedKeyMode?: "source-range" | "dom-node";
+    committedKeyMode?: "source-range" | "dom-node";
   }) {
     super(message);
     this.name = "ChatGptMarkdownConsistencyError";
@@ -310,6 +318,7 @@ export class ChatGptMarkdownBuffer {
   private lastGroup: string | undefined;
   private consistencyError: ChatGptMarkdownConsistencyError | undefined;
   private prefixRecoveryMarkdown: string | undefined;
+  private referencePrefix: Set<string> | undefined;
 
   constructor(
     private readonly transform: (markdown: string) => string = markdown => markdown,
@@ -329,7 +338,9 @@ export class ChatGptMarkdownBuffer {
       // are append-only, so accept only the provably safe case where the rebuilt snapshot starts
       // byte-for-byte with the committed ledger; the remaining suffix can be emitted at finish.
       const rebuilt = this.renderSnapshot(segments);
-      if (rebuilt.startsWith(this.markdown)) {
+      if (segments.length <= this.committed.length
+        && segments.every(segment => segment.sourceStart === undefined && segment.sourceEnd === undefined)
+        && rebuilt.startsWith(this.markdown)) {
         this.prefixRecoveryMarkdown = rebuilt;
         this.consistencyError = undefined;
         this.candidates.clear();
@@ -345,6 +356,13 @@ export class ChatGptMarkdownBuffer {
     // Compact summaries are delivered as one final unit. Their intermediate DOM is a draft,
     // so changes remain safe until finish() commits the final snapshot.
     if (this.delivery === "complete") return "";
+
+    const referenceIndex = reconciled.findIndex(segment => segment.mutableReference);
+    if (referenceIndex >= 0) {
+      const prefix = new Set(reconciled.slice(0, referenceIndex).map(segment => this.candidateId(segment)));
+      this.referencePrefix = this.referencePrefix
+        ? new Set([...this.referencePrefix].filter(id => prefix.has(id))) : prefix;
+    }
 
     const visibleCandidates = new Set<string>();
     for (const segment of reconciled) {
@@ -379,6 +397,9 @@ export class ChatGptMarkdownBuffer {
       const segment = reconciled[committedCount]!;
       const candidateId = this.candidateId(segment);
       const candidate = this.candidates.get(candidateId);
+      // A disappearing or remounted preview must not release text after it. Only
+      // blocks already known to precede it may stream; finish() delivers the rest.
+      if (this.referencePrefix && !this.referencePrefix.has(candidateId)) break;
       if (!candidate?.streamable || candidate.streamableAt === undefined) break;
       if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
       delta += this.commit(candidate);
@@ -420,15 +441,16 @@ export class ChatGptMarkdownBuffer {
     if (this.committed.length === 0 || segments.length === 0) return segments;
 
     const pending: ChatGptMarkdownSegment[] = [];
-    const lastRangedCommitted = this.committed
-      .filter(segment => segment.sourceEnd !== undefined)
-      .at(-1);
-    const lastCommittedEnd = lastRangedCommitted?.sourceEnd;
+    let lastRangedIndex = this.committed.findLastIndex(segment => segment.sourceEnd !== undefined);
+    let lastRangedCommitted = this.committed[lastRangedIndex];
+    let lastCommittedEnd = lastRangedCommitted?.sourceEnd;
+    const hydratedRanges: Array<{ index: number; segment: CommittedChatGptMarkdownSegment }> = [];
     let highestCommittedIndex = -1;
+    const matchedCommitted = new Set<number>();
     let sawPending = false;
     let previousSourceStart: number | undefined;
 
-    for (const segment of segments) {
+    for (const [observedIndex, segment] of segments.entries()) {
       if (segment.sourceStart !== undefined) {
         if (previousSourceStart !== undefined && segment.sourceStart <= previousSourceStart) {
           return new ChatGptMarkdownConsistencyError(
@@ -437,24 +459,50 @@ export class ChatGptMarkdownBuffer {
         }
         previousSourceStart = segment.sourceStart;
       }
-      const committedIndex = this.committedIndex(segment);
+      const committedIndex = this.committedIndex(segment, highestCommittedIndex, matchedCommitted);
+      if (committedIndex instanceof ChatGptMarkdownConsistencyError) return committedIndex;
       if (committedIndex !== undefined) {
         const committed = this.committed[committedIndex]!;
-        if (segment.sourceStart === undefined && (committed.text !== segment.text
-          || sawPending || committedIndex <= highestCommittedIndex)) {
+        if (sawPending || committedIndex <= highestCommittedIndex || committed.text !== segment.text) {
           return this.changedCommittedBlockError(
-            "block_order_changed",
+            sawPending || committedIndex <= highestCommittedIndex ? "block_order_changed" : "text_changed",
             segment,
             committed,
+            observedIndex,
+            committedIndex,
           );
         }
         highestCommittedIndex = committedIndex;
+        matchedCommitted.add(committedIndex);
+        // Link destinations are answer content even when textContent remains identical.
+        // Cosmetic DOM/formatting hydration still does not invalidate a committed paragraph.
+        if (JSON.stringify(committed.linkTargets ?? []) !== JSON.stringify(segment.linkTargets ?? [])) {
+          return this.changedCommittedBlockError("link_target_changed", segment, committed, observedIndex, committedIndex);
+        }
+        if (committed.sourceStart !== undefined && segment.sourceStart !== undefined
+          && committed.sourceStart !== segment.sourceStart) {
+          return this.changedCommittedBlockError("source_range_changed", segment, committed, observedIndex, committedIndex);
+        }
+        // A matching DOM node can acquire its first source range after delivery. Preserve
+        // that proven association for later remounts, only after this whole snapshot passes.
+        if (committed.sourceStart === undefined && segment.sourceStart !== undefined) {
+          const hydrated = { ...committed, sourceStart: segment.sourceStart, sourceEnd: segment.sourceEnd };
+          hydratedRanges.push({ index: committedIndex, segment: hydrated });
+          if (committedIndex > lastRangedIndex) {
+            lastRangedIndex = committedIndex;
+            lastRangedCommitted = hydrated;
+            lastCommittedEnd = hydrated.sourceEnd;
+          }
+        }
         continue;
       }
 
       if (segment.sourceStart !== undefined && lastCommittedEnd !== undefined) {
         if (segment.sourceStart <= lastCommittedEnd) {
-          return this.changedCommittedBlockError("source_range_overlap", segment, lastRangedCommitted!);
+          return this.changedCommittedBlockError(
+            "source_range_overlap", segment, lastRangedCommitted!, observedIndex,
+            lastRangedIndex,
+          );
         }
         sawPending = true;
         pending.push(segment);
@@ -462,36 +510,68 @@ export class ChatGptMarkdownBuffer {
       }
 
       const followsVisibleCommittedTail = highestCommittedIndex === this.committed.length - 1;
-      if (!followsVisibleCommittedTail && !this.matchesLatestPending(segment)) {
+      // A known, undelivered paragraph also anchors new content after a virtualized
+      // committed tail. Earlier committed blocks are still checked above for edits/reordering.
+      if (!followsVisibleCommittedTail && !sawPending && !this.matchesLatestPending(segment)) {
+        const tail = this.committed.at(-1)!;
         return new ChatGptMarkdownConsistencyError(
           "ChatGPT final DOM could not be aligned with text already streamed to Codex",
+          {
+            reason: "unanchored_block",
+            observedStart: segment.sourceStart, observedEnd: segment.sourceEnd,
+            committedStart: tail.sourceStart, committedEnd: tail.sourceEnd,
+            observedTextChars: segment.text.length, committedTextChars: tail.text.length,
+            observedTag: segment.tag, committedTag: tail.tag,
+            observedIndex, committedIndex: this.committed.length - 1,
+            observedKeyMode: segment.sourceStart === undefined ? "dom-node" : "source-range",
+            committedKeyMode: tail.sourceStart === undefined ? "dom-node" : "source-range",
+          },
         );
       }
       sawPending = true;
       pending.push(segment);
     }
 
+    for (const hydrated of hydratedRanges) this.committed[hydrated.index] = hydrated.segment;
     return pending;
   }
 
-  private committedIndex(segment: ChatGptMarkdownSegment): number | undefined {
+  private committedIndex(
+    segment: ChatGptMarkdownSegment,
+    afterIndex: number,
+    matched: ReadonlySet<number>,
+  ): number | ChatGptMarkdownConsistencyError | undefined {
+    const sameNode = this.committed.findIndex(committed => segment.key === committed.key);
+    if (sameNode >= 0) return sameNode;
     const exact = this.committed.findIndex(committed => (
       segment.sourceStart !== undefined && committed.sourceStart !== undefined
-        ? segment.sourceStart === committed.sourceStart && segment.tag === committed.tag
-        : segment.key === committed.key
+        && segment.sourceStart === committed.sourceStart && segment.tag === committed.tag
     ));
     if (exact >= 0) return exact;
 
     if (segment.sourceStart !== undefined) return undefined;
     if (!segment.tag) return undefined;
-    // Empty text is not an identity: separate rules and images can share it.
-    // Their exact DOM keys/ranges above remain valid, but a new empty block must
-    // not be mistaken for an earlier committed one by the text-only match.
-    if (!segment.text.trim()) return undefined;
+    // A horizontal rule has no textContent but does produce Markdown. Match its
+    // occurrences in order, just like repeated paragraphs below. Other empty
+    // blocks (including images/previews) still require exact DOM keys or ranges.
+    if (!segment.text.trim() && segment.tag !== "hr") return undefined;
     const semanticMatches = this.committed
       .map((committed, index) => ({ committed, index }))
       .filter(({ committed }) => committed.tag === segment.tag && committed.text === segment.text);
-    return semanticMatches.length === 1 ? semanticMatches[0]!.index : undefined;
+    // Match each committed occurrence at most once, in response order. A new
+    // repeated paragraph must not be rebound to an occurrence already consumed
+    // by this snapshot. Counting from zero breaks when earlier blocks disappear.
+    const remaining = semanticMatches.filter(match => match.index > afterIndex);
+    if (remaining.length === 1) return remaining[0]!.index;
+    if (remaining.length > 1) {
+      if (afterIndex >= 0 && remaining[0]!.index === afterIndex + 1) return remaining[0]!.index;
+      return new ChatGptMarkdownConsistencyError("ChatGPT final DOM has ambiguous repeated text already streamed to Codex");
+    }
+    // A known pending tail can survive removal of its committed prefix. Without
+    // that evidence, an unseen earlier occurrence is a reorder, not new text.
+    const earlier = semanticMatches.find(match => !matched.has(match.index));
+    if (earlier && !this.matchesLatestPending(segment)) return earlier.index;
+    return undefined;
   }
 
   private matchesLatestPending(segment: ChatGptMarkdownSegment): boolean {
@@ -503,7 +583,7 @@ export class ChatGptMarkdownBuffer {
     if (exact.length === 1) return true;
     if (segment.sourceStart !== undefined) return false;
     if (!segment.tag) return false;
-    if (!segment.text.trim()) return false;
+    if (!segment.text.trim() && segment.tag !== "hr") return false;
     return this.latest.filter(candidate => (
       candidate.tag === segment.tag && candidate.text === segment.text
     )).length === 1;
@@ -545,6 +625,8 @@ export class ChatGptMarkdownBuffer {
     reason: NonNullable<ChatGptMarkdownConsistencyError["diagnostic"]>["reason"],
     observed: ChatGptMarkdownSegment,
     committed: CommittedChatGptMarkdownSegment,
+    observedIndex: number,
+    committedIndex: number,
   ): ChatGptMarkdownConsistencyError {
     return new ChatGptMarkdownConsistencyError(
       "ChatGPT changed a completed text block that was already streamed to Codex",
@@ -556,6 +638,10 @@ export class ChatGptMarkdownBuffer {
         committedEnd: committed.sourceEnd,
         observedTextChars: observed.text.length,
         committedTextChars: committed.text.length,
+        observedTag: observed.tag,
+        committedTag: committed.tag,
+        observedIndex,
+        committedIndex,
       },
     );
   }

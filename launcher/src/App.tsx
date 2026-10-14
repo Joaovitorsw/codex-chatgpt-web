@@ -45,6 +45,7 @@ export function App() {
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const catalogError = useRef<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
 
   useEffect(() => {
@@ -61,6 +62,7 @@ export function App() {
       setLogs(next.logs);
       setOperation(next.operation);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
+        if (next.operation.name === "catalog-verification") catalogError.current = next.operation.message;
         setError(messageOf(next.operation.message));
       }
     }).catch((cause) => setError(messageOf(cause)));
@@ -80,6 +82,14 @@ export function App() {
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
+      if (next.name === "catalog-verification") {
+        if (next.status === "failed") catalogError.current = next.message;
+        if (next.status === "completed") {
+          const resolved = catalogError.current;
+          setError(current => current === resolved ? null : current);
+          catalogError.current = null;
+        }
+      }
       if (next.status === "failed" && next.name !== "mcp-verification") setError(messageOf(next.message));
     });
     const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
@@ -875,7 +885,10 @@ function BrowserSurface({
   platform: string;
   setError: (error: string | null) => void;
 }) {
+  const [passkeyStarting, setPasskeyStarting] = useState(false);
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  const passkeyPhase = browser?.passkeyPhase;
+  const passkeyActive = passkeyStarting || Boolean(passkeyPhase);
   const visible = browser?.visible === true;
   const manualInteraction = interactionMode === "manual";
   const activeBrowserTurn = browser?.tabs.some(tab => (
@@ -885,15 +898,19 @@ function BrowserSurface({
   )) === true;
   const passkeyAvailable = !manualInteraction
     && platform === "darwin"
-    && browser?.authenticated !== true;
+    && (browser?.authenticated !== true || passkeyActive);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
-  const navigationLocked = activeBrowserTurn
-    || browser?.status === "running"
-    || browser?.status === "testing";
-  const passkeyWaiting = passkeyAvailable
-    && operation?.name === "passkey-login"
-    && operation.status === "running"
-    && browser?.authenticated !== true;
+  const navigationLocked = activeBrowserTurn || passkeyActive || browser?.status === "running" || browser?.status === "testing";
+  const passkeyWaiting = passkeyAvailable && passkeyPhase === "waiting";
+  const passkeyImporting = passkeyPhase === "importing" || passkeyContinuationRequested;
+  const passkeyBlocked = !passkeyActive && operation?.status === "running";
+  const passkeyDisabled = passkeyBlocked || (passkeyActive && (!passkeyWaiting || passkeyImporting));
+  const passkeyLabel = passkeyImporting ? copy.passkeyImporting
+    : passkeyWaiting ? copy.passkeyContinue : passkeyActive ? copy.passkeyOpening : copy.passkeySignIn;
+  const passkeyTitle = passkeyImporting ? copy.passkeyImporting
+    : passkeyWaiting ? copy.passkeyWaitingTitle : copy.passkeyOpening;
+  const passkeyBody = passkeyImporting ? copy.passkeyImportingBody
+    : passkeyWaiting ? copy.passkeyContinueBody : copy.passkeyOpeningBody;
   const checkingSavedSession = !manualInteraction
     && browser?.authenticated !== true
     && browser?.status === "loading";
@@ -936,10 +953,17 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
-  const openPasskeyLogin = () => {
-    if (operation?.status === "running") return;
+  const openPasskeyLogin = async () => {
+    if (passkeyActive || passkeyBlocked) return;
+    setPasskeyStarting(true);
     setError(null);
-    void api!.openPasskeyLogin().catch(cause => setError(messageOf(cause)));
+    try {
+      await api!.openPasskeyLogin();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setPasskeyStarting(false);
+    }
   };
   const continuePasskeyLogin = async () => {
     if (!passkeyWaiting || passkeyContinuationRequested) return;
@@ -1036,20 +1060,25 @@ function BrowserSurface({
         {passkeyAvailable ? (
           <button
             className="toolbar-text-button"
-            disabled={passkeyWaiting && passkeyContinuationRequested}
+            disabled={passkeyDisabled}
+            title={passkeyBlocked ? operation?.message : copy.passkeyOpeningBody}
             onClick={() => void (passkeyWaiting ? continuePasskeyLogin() : openPasskeyLogin())}
             type="button"
           >
-            {passkeyWaiting
-              ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
-              : copy.passkeySignIn}
+            {passkeyLabel}
           </button>
         ) : null}
-        <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
+        <button className="toolbar-text-button" disabled={passkeyActive} onClick={() => void toggle()} type="button">
           {visible ? copy.hideBrowser : copy.openChatgpt}
         </button>
         {browser?.loading ? <i className="browser-loading-line" /> : null}
       </div>
+      {passkeyActive && visible ? (
+        <div className="passkey-login-guide" role="status">
+          <strong>{passkeyTitle}</strong>
+          <p>{passkeyBody}</p>
+        </div>
+      ) : null}
       {selectedManualTab
         && ["awaiting-user", "sent"].includes(selectedManualTab.manualState ?? "") ? (
         <ManualTurnGuide
@@ -1064,14 +1093,14 @@ function BrowserSurface({
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />
-            {!checkingSavedSession ? <><h1>{activeBrowserTurn
+            {!checkingSavedSession ? <><h1>{passkeyActive ? passkeyTitle : activeBrowserTurn
               ? copy.activeTaskHidden
               : manualInteraction
                 ? copy.browserReady
                 : browser?.authenticated
                   ? copy.noActiveTask
                   : copy.stepAccount}</h1>
-            <p>{activeBrowserTurn
+            <p>{passkeyActive ? passkeyBody : activeBrowserTurn
               ? copy.activeTaskHiddenBody
               : manualInteraction
                 ? copy.stepAccountBody
@@ -1079,19 +1108,17 @@ function BrowserSurface({
                   ? copy.noActiveTaskBody
                   : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
+              <PrimaryButton disabled={passkeyActive} onClick={() => void toggle()}>
                 {manualInteraction || browser?.authenticated
                   ? copy.openChatgpt
                   : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (
                 <SecondaryButton
-                  disabled={passkeyWaiting && passkeyContinuationRequested}
+                  disabled={passkeyDisabled}
                   onClick={passkeyWaiting ? continuePasskeyLogin : openPasskeyLogin}
                 >
-                  {passkeyWaiting
-                    ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
-                    : copy.passkeySignIn}
+                  {passkeyLabel}
                 </SecondaryButton>
               ) : null}
             </div></> : null}
@@ -1850,6 +1877,17 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setComposerPredictions = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setComposerPredictions(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setSkillAttachments = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -2008,8 +2046,6 @@ function SettingsSurface({
         <SettingRow
           body={snapshot.state.browserInteractionMode === "manual"
             ? copy.manualBiggerContextUnavailable
-            : snapshot.state.biggerContextAvailable === false
-            ? copy.lunaBiggerContextUnavailable
             : copy.biggerContextBody}
           label={copy.biggerContext}
         >
@@ -2020,6 +2056,13 @@ function SettingsSurface({
               || (snapshot.state.biggerContextAvailable !== true && !snapshot.state.experimentalBiggerContext)
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={copy.composerPredictionsBody} label={copy.composerPredictions}>
+          <Switch
+            checked={snapshot.state.composerPredictionsEnabled}
+            disabled={busy || !snapshot.state.coreSetupComplete}
+            onChange={(checked) => void setComposerPredictions(checked)}
           />
         </SettingRow>
         <SettingRow body={snapshot.state.browserInteractionMode === "manual"

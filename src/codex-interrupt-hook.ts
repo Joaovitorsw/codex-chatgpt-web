@@ -236,8 +236,23 @@ function inlineInterruptArray(ast: AST.TOMLProgram): AST.TOMLArray | undefined {
 }
 
 function parseHookDocument(text: string): HookDocument {
-  return Bun.TOML.parse(text.replace(/\r\n?/g, "\n")) as HookDocument;
+  try {
+    return Bun.TOML.parse(text.replace(/\r\n?/g, "\n")) as HookDocument;
+  } catch {
+    // Parser errors can quote config values, including credentials.
+    throw invalidConfig();
+  }
 }
+
+function invalidConfig(): Error {
+  return new Error("Codex config.toml could not be parsed as TOML. Back up the file, repair its syntax "
+    + "or restore a known-good backup, then retry Setup > Install into Codex > Reinstall. "
+    + "The launcher has not overwritten the file.");
+}
+
+const HOOK_RECOVERY = " Back up Codex config.toml, restore only the launcher's hook sections from a known-good "
+  + "backup made after successful setup, then retry Setup > Install into Codex > Reinstall. "
+  + "Keep unrelated settings and hooks. If no suitable backup exists, export Activity > Export safe log and ask for help.";
 
 function withoutEmptyHookContainers(document: HookDocument): unknown {
   const result = structuredClone(document);
@@ -258,9 +273,13 @@ function removeRanges(text: string, ranges: SourceRange[]): string {
 }
 
 function locateCodexInterruptHook(text: string, installed: InstalledCodexInterruptHook): SourceRange[] {
-  const changed = () => new Error("Codex interrupt lifecycle hook changed after setup; refusing to overwrite it");
+  const changed = (detail = "The launcher's entries in hooks.Interrupt and hooks.state cannot be safely identified.") =>
+    new Error("Codex interrupt lifecycle hook changed after setup; refusing to overwrite it. " + detail + HOOK_RECOVERY);
+  const invalidJournal = () => new Error("Codex interrupt lifecycle hook journal is invalid. "
+    + "The launcher's saved setup record is inconsistent; this does not establish that config.toml is damaged. "
+    + "Export Activity > Export safe log and ask for help. Do not delete or edit the integration journal.");
   if (codexInterruptHookHash(installed.command) !== installed.trustedHash) {
-    throw new Error("Codex interrupt lifecycle hook journal hash is invalid");
+    throw invalidJournal();
   }
   let document: HookDocument;
   let ast: AST.TOMLProgram;
@@ -268,8 +287,9 @@ function locateCodexInterruptHook(text: string, installed: InstalledCodexInterru
   const expectedGroup = { hooks: [{ type: "command", command: installed.command, timeout: 3 }] };
   const expectedState = { trusted_hash: installed.trustedHash };
   const equal = (left: unknown, right: unknown) => JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
-  // Codex can persist its default hook values explicitly. They do not alter the
-  // bridge ownership and must not make a safe reinstall look like a route conflict.
+  // Codex defaults command hooks to synchronous and trusted hook state to enabled.
+  // Its settings UI may persist those defaults explicitly. They do not change
+  // ownership; different values and every other added field still fail closed.
   const sameGroup = (value: unknown) => equal(value, expectedGroup)
     || equal(value, { hooks: [{ ...expectedGroup.hooks[0], async: false }] });
   const sameState = (value: unknown) => equal(value, expectedState)
@@ -277,13 +297,17 @@ function locateCodexInterruptHook(text: string, installed: InstalledCodexInterru
   try {
     const journal = parseHookDocument(installed.fragment);
     if (!equal(journal.hooks?.Interrupt, [expectedGroup])
-      || !equal(journal.hooks?.state, { [installed.stateKey]: expectedState })) throw changed();
+      || !equal(journal.hooks?.state, { [installed.stateKey]: expectedState })) throw invalidJournal();
+    journalAst = parseTOML(installed.fragment.replace(/\r(?!\n)/g, "\n"), { tomlVersion: "1.0" });
+  } catch {
+    throw invalidJournal();
+  }
+  try {
     document = parseHookDocument(text);
     // Normalize bare CR without moving offsets; the parser retains every source range and comment.
     ast = parseTOML(text.replace(/\r(?!\n)/g, "\n"), { tomlVersion: "1.0" });
-    journalAst = parseTOML(installed.fragment.replace(/\r(?!\n)/g, "\n"), { tomlVersion: "1.0" });
   } catch {
-    throw changed();
+    throw invalidConfig();
   }
   const groups = document.hooks?.Interrupt;
   // Codex may normalize or reorder the Interrupt array while keeping each command and its
@@ -292,9 +316,13 @@ function locateCodexInterruptHook(text: string, installed: InstalledCodexInterru
   const matchingGroupIndexes = Array.isArray(groups)
     ? groups.flatMap((group, index) => sameGroup(group) ? [index] : [])
     : [];
-  if (matchingGroupIndexes.length !== 1) throw changed();
+  if (matchingGroupIndexes.length !== 1) throw changed(!Array.isArray(groups) || groups[installed.groupIndex] === undefined
+    ? "The launcher entry is missing from hooks.Interrupt."
+    : "The launcher command or settings in hooks.Interrupt were changed.");
   const currentGroupIndex = matchingGroupIndexes[0]!;
-  if (!sameState(document.hooks?.state?.[installed.stateKey])) throw changed();
+  if (!sameState(document.hooks?.state?.[installed.stateKey])) throw changed(document.hooks?.state?.[installed.stateKey] === undefined
+    ? "The launcher trust entry is missing from hooks.state."
+    : "The launcher trust settings in hooks.state were changed.");
 
   const ranges: SourceRange[] = [];
   // A native config edit may discard comments. Authority comes from the exact journal, command,
@@ -413,7 +441,7 @@ export function restoreCodexInterruptHook(
   // Explicit Setup can reinstall a fully removed hook. A stale journal alone does not mean
   // there is still a definition to remove; partial edits must retain the strict checks below.
   if (options.allowAbsent && managedMarkerCount(text) === 0 && !text.includes(MANAGED_INTERRUPT_HOOK_END)) {
-    const { hooks } = Bun.TOML.parse(text) as { hooks?: unknown };
+    const { hooks } = parseHookDocument(text);
     if (hooks === undefined) return text;
     if (hooks && typeof hooks === "object" && !Array.isArray(hooks)) {
       const hookRecord = hooks as Record<string, unknown>;

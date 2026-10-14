@@ -295,10 +295,12 @@ describe("Zero Risk public MCP ABI", () => {
       const listed = await client.listTools();
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
         "codex_apply_patch",
+        "codex_browser_read",
         "codex_exec",
         "codex_generate_image_asset",
         "codex_tool_call",
         "codex_tool_inventory",
+        "codex_tool_search",
         "codex_turn_complete",
         "codex_turn_start",
         "codex_view_image",

@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.6/codex-web-gpt-6.1.6-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.6/codex-web-gpt-6.1.6-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.6/codex-web-gpt-6.1.6-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.9/codex-web-gpt-6.1.9-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.9/codex-web-gpt-6.1.9-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.9/codex-web-gpt-6.1.9-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.6/codex-web-gpt-6.1.6-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">Todas as versões</a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.9/codex-web-gpt-6.1.9-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">Todas as versões</a>
 </p>
 
 <p align="center">
@@ -96,15 +96,23 @@ O modo Full conecta as chamadas de ferramentas do ChatGPT à tarefa atual do Cod
 [OpenAI tunnel-client](https://github.com/openai/tunnel-client). O túnel é de saída: não expõe IP
 público, não abre porta de entrada e não exige redirecionamento no roteador.
 
+O launcher usa o proxy do sistema para o túnel; variáveis de proxy configuradas explicitamente têm prioridade. Conexões locais permanecem locais.
+
 A página **MCP** do launcher orienta toda a configuração. Para ver os cliques exatos, consulte os
 [guias em vídeo](TROUBLESHOOTING.md).
 
 > **Limites**
 >
-> Consulte [Limites](https://github.com/miuuyy/codex-chatgpt-web/discussions/309) para ver as
-> franquias atuais de mensagens do ChatGPT. Os limites de contexto dependem do tipo de conta e do
-> esforço selecionado. Plus Medium/High usa uma janela medida de 90.000 tokens, ou até 270.000
-> tokens com o **contexto 3×** experimental, sempre com compactação nativa do Codex.
+> See [Limits](https://github.com/miuuyy/codex-chatgpt-web/discussions/309) for the current
+> ChatGPT message allowances for **GPT-5.6 Sol Pro** and **GPT-6 Astra**. Context limits depend on
+> the account type and selected effort. Plus Medium/High uses a measured 90,000-token window.
+> GPT-5.6 supports up to 270,000 tokens with experimental **3× context** enabled, with native
+> Codex compaction supported throughout.
+>
+> GPT-6 Sol supports Bigger Context at Medium, High and available Extra High: **120,000 tokens
+> on Plus**, with compaction at **110,000**, and **240,000 on Pro**, with compaction at **220,000**.
+> GPT-6 Instant uses standard context.
+> GPT-5.6 and GPT-6 Pro keep their existing Bigger Context limits.
 
 1. Conclua a configuração exigida, abra **MCP**, crie o túnel e a chave de API comum e pressione **Conectar harness**.
 2. Ative o **Modo de desenvolvedor** do ChatGPT e crie um conector Tunnel chamado exatamente **Codex Native2**, com **Autenticação: nenhuma** e **Permitir todas as ações**.

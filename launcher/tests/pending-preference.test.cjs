@@ -6,7 +6,7 @@ const vm = require("node:vm");
 
 const main = fs.readFileSync(path.resolve(__dirname, "../electron/main.cjs"), "utf8");
 const helpers = main.slice(
-  main.indexOf("function syncFreshConversationPreference("),
+  main.indexOf("function syncBrowserPreferences("),
   main.indexOf("function registerIpc("),
 );
 

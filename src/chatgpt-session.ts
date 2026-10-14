@@ -125,40 +125,37 @@ export const CHATGPT_EFFORT_SLIDER_SELECTOR = [
   '[role="group"] [role="slider"]',
 ].join(", ");
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
-// `data-testid` is preferred, but the launcher must also recognize the localized
-// accessible action while ChatGPT is hydrating/remounting the composer.  Missing that
-// active-state proof lets a later native prompt race the still-running web response.
-export const CHATGPT_STOP_BUTTON_SELECTOR = [
-  '[data-testid="stop-button"]',
-  'form[data-chatgpt-composer] button[type="button"][aria-label="Stop"]',
-  'form[data-chatgpt-composer] button[type="button"][aria-label="Parar"]',
-  'button[aria-label*="Stop" i]',
-  'button[aria-label*="Parar" i]',
+
+/** Model identity precedes the localized slider position; punctuation is not language-specific. */
+export function parseChatGptModelAnnouncement(text: string): {
+  version: string; name?: string; mode: string;
+} | undefined {
+  const normalized = text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
+  const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^\p{P}]+)(?:\p{P}|$)/iu.exec(normalized);
+  if (!match) return undefined;
+  return { version: match[1]!, ...(match[2] ? { name: match[2].toLowerCase() } : {}), mode: match[3]!.trim() };
+}
+
+/** Resolve only inside the verified composer's form; multiple submitters are an error. */
+export const CHATGPT_SEND_BUTTON_SELECTOR = '[data-testid="send-button"], button[type="submit"]';
+// Captured in the launcher's current composer on 2026-10-09. The primary action's
+// square glyph identifies Stop without its translated label. Button type/class alone
+// also match voice controls; keep the observed icon and composer ownership together.
+const CHATGPT_STOP_ICON_PATH = "M4.5 5.75C4.5 5.05964 5.05964 4.5 5.75 4.5H14.25C14.9404 4.5 15.5 5.05964 15.5 5.75V14.25C15.5 14.9404 14.9404 15.5 14.25 15.5H5.75C5.05964 15.5 4.5 14.9404 4.5 14.25V5.75Z";
+export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], '
+  + `form[data-chatgpt-composer] button[type="button"].size-token-button-composer:has(svg.icon-primary-action > path[d="${CHATGPT_STOP_ICON_PATH}"])`;
+// Captured Luna Think control (2026-09-08). The brain glyph's opening contour,
+// composer pill and pressed state identify this action independently of its label.
+// Other composer pills (search, tools, attachments) must not be treated as Think.
+// The Free account in the DEV launcher (2026-10-11) uses an SVG sprite instead.
+// The sprite fragment stays the same with Think on/off; the asset hash does not.
+export const CHATGPT_THINK_BUTTON_SELECTOR = [
+  'button[type="button"].__composer-pill[aria-pressed]:has(> .__composer-pill-icon > svg[viewBox="0 0 24 24"] > path[d^="M14.8974 2.29998C15.8303 2.29013 16.802 2.58194 17.5566 3.22577"])',
+  'button[type="button"][aria-pressed]:has(> svg[viewBox="0 0 20 20"] > use[href$="#brain-regular-20"])',
 ].join(", ");
-export const CHATGPT_SEND_BUTTON_SELECTOR = [
-  '[data-testid="send-button"]',
-  '[data-testid="composer-submit-button"]',
-  'button[type="submit"]:not([data-testid="stop-button"])',
-  'button[aria-label="Send"]',
-  'button[aria-label="Send message"]',
-  'button[aria-label="Enviar"]',
-  'button[aria-label="Enviar mensagem"]',
-].join(", ");
-export const CHATGPT_COMPLETION_ACTION_SELECTOR = [
-  'button[data-testid="copy-turn-action-button"]',
-  'button[data-testid="good-response-turn-action-button"]',
-  'button[data-testid="bad-response-turn-action-button"]',
-  'button[data-testid="regenerate-turn-action-button"]',
-  'button[aria-label="Regenerate response"]',
-  'button[aria-label="Gerar resposta novamente"]',
-  'button[aria-label="Copy message"]',
-  'button[aria-label="Copiar mensagem"]',
-  'button[aria-label="Good response"]',
-  'button[aria-label="Bad response"]',
-  'button[aria-label="Boa resposta"]',
-  'button[aria-label="Resposta ruim"]',
-  '[data-turn-key] .turn-action-controls button',
-].join(", ");
+// The new footer is shared with user messages. Response extraction additionally requires
+// this control to FOLLOW the last assistant answer, excluding the user's earlier footer.
+export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"], [data-turn-key] .turn-action-controls button';
 export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="assistant"]:not([data-turn-key] *)',
   '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]:not([data-turn-key] *)',
@@ -292,11 +289,9 @@ export async function activateChatGptEffortMenu(
 
   const settleMs = options.settleMs ?? 3_000;
   await clearGhostEffortState(page, control);
-  // A recovered React composer can replace the trigger between locator resolution
-  // and Playwright's pointer action. Treat that one activation failure as a failed
-  // strategy, not as a terminal model-selection failure: the same semantic button
-  // can still accept keyboard activation after it remounts.
-  await control.click({ force: true, timeout: Math.max(1, settleMs) }).catch(() => {});
+  // Let Playwright wait for stable layout and hit testing after navigation.
+  // A forced click can be delivered before the new renderer's viewport is usable.
+  await control.click({ timeout: Math.max(1, settleMs) }).catch(() => {});
   const clickedSurface = await waitForEffortSurface(page, control, settleMs);
   if (clickedSurface) return { method: "click", ...clickedSurface };
 
@@ -372,6 +367,17 @@ export async function selectChatGptEffortTick(
   if (locked !== null && locked !== "false") {
     throw new Error(`ChatGPT effort target ${targetValue} is locked`);
   }
+  if (typeof target.boundingBox === "function") {
+    const bounds = await target.boundingBox();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+      const direction = targetValue > state.value ? 1 : -1;
+      for (let value = state.value; value !== targetValue; value += direction) {
+        // Key steps depend on the preceding selection and may replace the semantic input.
+        await sliderContainer.locator('[role="slider"]').last().press(direction > 0 ? "ArrowRight" : "ArrowLeft");
+      }
+      return;
+    }
+  }
   await target.click({ force: true, timeout: 5_000 });
 }
 
@@ -409,11 +415,13 @@ export async function readChatGptEffortAvailability(
 /** Read model evidence only from the slider's active picker. */
 export async function readChatGptModelAnnouncements(slider: Locator): Promise<string[]> {
   return slider.evaluate(element => {
-    const document = element.ownerDocument;
+    const doc = element.ownerDocument;
     const descriptions = (element.closest('[role="menuitem"]')?.getAttribute("aria-describedby") ?? "")
-      .split(/\s+/).filter(Boolean).map(id => document.getElementById(id)?.textContent ?? "");
+      .split(/\s+/).filter(Boolean).map(id => doc.getElementById(id)?.textContent ?? "");
+    // Some accounts now announce only the effort ("Pro, 5 of 5"); the model
+    // version is shown in the picker header as adjacent text nodes ("6" + "Pro").
     const menu = element.closest('[role="menu"]');
-    const visible = (node: Element): boolean => {
+    const rendered = (node: Element): boolean => {
       for (let parent: Element | null = node; parent; parent = parent.parentElement) {
         if (parent.matches('[hidden], [inert], [aria-hidden="true"]')) return false;
         const style = getComputedStyle(parent);
@@ -422,14 +430,14 @@ export async function readChatGptModelAnnouncements(slider: Locator): Promise<st
       return true;
     };
     const headers = [...(menu?.querySelectorAll('[data-model-picker-view-toggle="true"]') ?? [])]
-      .filter(header => header.closest('[role="menu"]') === menu && visible(header));
+      .filter(header => header.closest('[role="menu"]') === menu && rendered(header));
     if (headers.length > 1) throw new Error("ChatGPT model picker exposes multiple active model headers");
     if (headers.length === 1) {
       const content = headers[0]!.querySelector("[data-menu-row-content]") ?? headers[0]!;
       const words: string[] = [];
-      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+      const walker = doc.createTreeWalker(content, NodeFilter.SHOW_TEXT);
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        if (node.parentElement && visible(node.parentElement)) {
+        if (node.parentElement && rendered(node.parentElement)) {
           const word = node.textContent?.trim();
           if (word) words.push(word);
         }
@@ -439,7 +447,6 @@ export async function readChatGptModelAnnouncements(slider: Locator): Promise<st
     return descriptions;
   });
 }
-
 export async function readChatGptEffortSnapshot(
   sliderContainer: Locator,
   timeoutMs = 1_000,

@@ -83,6 +83,8 @@ Setup options:
   --retained-conversation      Reuse the browser chat between turns (default)
   --saved-chats                Keep task conversations in ChatGPT history
   --temporary-chats            Use Temporary Chat for task conversations (default)
+  --composer-predictions       Enable next-message suggestions using GPT-6 Sol Medium (default)
+  --no-composer-predictions    Disable next-message suggestions for Web models
   --skill-attachments         Experimental selected skills as text attachments
   --inline-skills             Keep selected skills inline (default)
   --context-attachments       Upload contexts over 24k characters as one text attachment
@@ -260,7 +262,10 @@ async function loginCommand(args: string[]): Promise<void> {
       ...defaultConfig(),
       chromeExecutablePath,
       storageStatePath,
-    }, { continuation: continuation.promise });
+    }, {
+      continuation: continuation.promise,
+      onBrowserReady: () => { stdout.write(`${JSON.stringify({ version: 1, type: "passkey-login-ready" })}\n`); },
+    });
   } finally {
     continuation.close();
   }
@@ -308,6 +313,10 @@ async function setupCommand(args: string[]): Promise<void> {
   if (runtimeKeyFile) options.runtimeKeyFile = runtimeKeyFile;
   options.forceLogin = takeFlag(args, "--login");
   options.autoApproveToolCalls = takeFlag(args, "--auto-approve-tool-calls");
+  const predictions = takeFlag(args, "--composer-predictions");
+  const noPredictions = takeFlag(args, "--no-composer-predictions");
+  if (predictions && noPredictions) throw new Error("Choose --composer-predictions or --no-composer-predictions");
+  if (predictions || noPredictions) options.composerPredictionsEnabled = predictions;
   const skillAttachments = takeFlag(args, "--skill-attachments");
   const inlineSkills = takeFlag(args, "--inline-skills");
   if (skillAttachments && inlineSkills) throw new Error("Choose --skill-attachments or --inline-skills");
@@ -339,6 +348,7 @@ async function setupCommand(args: string[]): Promise<void> {
   }
   if (zeroRiskPro || zeroRiskDefault) options.zeroRiskProEnabled = zeroRiskPro;
   options.replaceCodexRoute = takeFlag(args, "--replace-codex-route");
+  options.preserveDisconnectedRoute = takeFlag(args, "--preserve-disconnected-route");
   options.restartService = takeFlag(args, "--restart-service");
   assertNoArgs(args);
 
@@ -396,6 +406,7 @@ async function doctorCommand(args: string[]): Promise<void> {
 
 async function routeCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
+  const forRuntimeRecovery = action === "disconnect" && takeFlag(args, "--for-runtime-recovery");
   assertNoArgs(args);
   const result = action === "status"
     ? (() => {
@@ -403,14 +414,16 @@ async function routeCommand(args: string[]): Promise<void> {
         return {
           installed: status.installed,
           active: status.active,
+          ...(status.journal && "reconnectOnStartup" in status.journal && status.journal.reconnectOnStartup
+            ? { reconnectOnStartup: true } : {}),
           ...(status.routeUrl ? { routeUrl: status.routeUrl } : {}),
           errors: status.errors,
         };
       })()
-    : action === "connect"
-      ? activateCodexIntegration()
+    : action === "connect" || action === "recover"
+      ? activateCodexIntegration({ recoveryOnly: action === "recover" })
       : action === "disconnect"
-        ? deactivateCodexIntegration()
+        ? deactivateCodexIntegration({ forRuntimeRecovery })
         : action === "restore-native"
           ? restoreNativeCodexIntegration()
         : undefined;

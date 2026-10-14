@@ -45,7 +45,7 @@ test.each([
     selectModelAndEffort: async (_page: unknown, model: string, effort: string, _capabilities: unknown,
       _diagnostic: unknown, trackUsage: boolean, family: string) => {
       expect(trackUsage).toBe(false);
-      expect(family).toBe(gpt6Pro && effort === "max" ? "6" : "5.6");
+      expect(family).toBe(gpt6Pro ? "6" : "5.6");
       actions.push(`effort:${effort}`);
       return resolveChatGptWebModelMode(model, effort, capabilities);
     },
@@ -116,6 +116,7 @@ test.each([
       attachPrompt: (ChatGptBrowserWorker.prototype as any).attachPrompt,
       attachPromptWithCompactionRetry: (ChatGptBrowserWorker.prototype as any).attachPromptWithCompactionRetry,
       activeComposer: async () => composer,
+      connectorIsSelected: async () => connectorSelected,
       selectConnector: async () => { connectorSelected = true; actions.push("attach:tools"); return composer; },
       insertPromptText: async () => { expect(connectorSelected).toBeTrue(); },
       assertPromptAttached: async () => {},
@@ -167,7 +168,7 @@ test.each([
       `effort:${effort}`,
       tools ? "attach:tools" : "attach:plain", "files", "send", "observe",
     ]);
-    expect(sendBudgets).toEqual(multipart ? Array(6).fill(180_000) : [60_000]);
+    expect(sendBudgets).toEqual(Array(multipart ? 6 : 1).fill(180_000));
     expect(released).toBe(true);
     expect(activated).toBe(1);
     expect(page.listenerCount("request")).toBe(0);

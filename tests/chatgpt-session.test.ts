@@ -161,8 +161,8 @@ test("browser controls and turn ownership remain locale agnostic on the pt-BR su
   const document = createDocument(`<body><form>
     <button id="effort-pt" aria-haspopup="menu" aria-label="Selecionar modelo do ChatGPT"></button>
     <button id="apps-pt" aria-label="Adicionar arquivos e mais"></button>
-    <button id="complete-pt" aria-label="Copiar mensagem"></button>
-    <button id="feedback-pt" data-testid="good-response-turn-action-button"></button>
+    <button id="complete-pt" data-testid="copy-turn-action-button" aria-label="Copiar mensagem"></button>
+    <section data-turn-key="owned-answer"><div class="turn-action-controls"><button id="feedback-pt" data-testid="good-response-turn-action-button"></button></div></section>
     <section data-chatgpt-search-unit-key="assistant"><div data-conversation-role="assistant"></div></section>
     <section data-chatgpt-search-unit-key="user"><div data-user-message-bubble></div></section>
   </form></body>`);
@@ -193,7 +193,7 @@ test("effort activation binds the owned menu after the control opens", async () 
       return null;
     },
     click: async (options: unknown) => {
-      expect(options).toEqual({ force: true, timeout: 1 });
+      expect(options).toEqual({ timeout: 1 });
       opened = true;
     },
   };
@@ -281,7 +281,7 @@ test("effort activation retries a ghost click through keyboard activation before
   expect(activation.method).toBe("keyboard");
   expect(activation.menu).toBe(ownedMenu as never);
   expect(events).toEqual([
-    ["click", { force: true, timeout: 1 }],
+    ["click", { timeout: 1 }],
     ["keyboard", "Escape"],
     ["press", "Enter", { timeout: 1 }],
   ]);

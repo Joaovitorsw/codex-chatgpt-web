@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { selectedSkillFile, skillFileTokens, type ChatGptSkillFile } from "./skill-attachments";
 import {
-  CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR,
-  CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_ERROR,
+  CHATGPT_WEB_GPT6_INSTANT_BIGGER_CONTEXT_ERROR,
   chatGptWebImageTokenReserve,
   isChatGptWebZeroRiskBackendModel,
   resolveChatGptWebMessageTokenBudget,
@@ -298,11 +297,15 @@ const RETIRED_TURN_HANDLE = /(?<![A-Za-z0-9_-])(turn|request|binding)_[A-Za-z0-9
  * the current turn is supplied by the contract text, never by the replayed context.
  */
 export function withoutRetiredTurnHandles(contextJson: string): string {
+  // Keep backticks out of serialized history. ChatGPT's user-message Markdown link lexer
+  // can backtrack indefinitely on a bracketed JSON value containing many code fences.
+  // JSON Unicode escapes preserve the decoded context, including literal backslashes.
+  // The outer fence alone is insufficient on the observed user-message rendering path.
   // Match decoded string values: in serialized JSON a newline's `n` is a word character
   // immediately before the handle. Leave structural keys and native tool-call IDs intact.
   return JSON.stringify(JSON.parse(contextJson, (_key, value: unknown) => typeof value === "string"
     ? value.replace(RETIRED_TURN_HANDLE, (_handle, kind: string) => `[retired ${kind} handle]`)
-    : value));
+    : value)).replaceAll("`", "\\u0060");
 }
 
 /** ChatGPT accepts at most this many attachments on one message. */
@@ -663,13 +666,13 @@ export function compileChatGptWebPrompt(
   if (multipartParts !== undefined && !isChatGptWebMultipartPartCount(multipartParts)) {
     throw new Error("Bigger Context requires two or six context parts");
   }
-  if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
-    throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
+  if (multipartEnabled && captureLunaCheckpoint) {
+    throw new Error("Bigger Context uses native compaction, not Luna rolling checkpoints");
   }
-  if (multipartEnabled && !supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, capabilities, parsed._chatgptModelFamily)) {
-    throw new Error(CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_ERROR);
+  if (multipartEnabled && !supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, parsed._chatgptModelFamily)) {
+    throw new Error(CHATGPT_WEB_GPT6_INSTANT_BIGGER_CONTEXT_ERROR);
   }
-  if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && parsed._compactionRequest) {
+  if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && parsed._compactionRequest && !multipartEnabled) {
     throw new Error("ChatGPT Luna uses rolling checkpoints and does not accept a separate compaction turn");
   }
   if (captureLunaCheckpoint && (parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID || parsed._compactionRequest)) {
@@ -736,7 +739,9 @@ export function compileChatGptWebPrompt(
       "For every request to schedule, retry later, monitor periodically, or run Codex work in the future on this Windows PC, always use the installed codex-local-scheduler skill and its Windows Task Scheduler workflow. This rule takes precedence over generic automation choices: do not call any native Codex scheduling/automation function. From a Web-backed task, use codex-native-task-bridge only to resolve or reuse the target native task UUID when needed; the actual schedule must still be created by codex-local-scheduler. Never create, update, or rely on a ChatGPT scheduled task, ChatGPT Task, ChatGPT automation, browser reminder, or a separate ChatGPT conversation for Codex work.",
       "Use actual Codex Native results as evidence for local observations and effects.",
       "Report the actual error when a tool fails. Do not claim a safety or permission block without an explicit tool result or platform error supporting it. Without an error or execution result, say the action was not executed and its cause is unconfirmed.",
-      "After an explicit safety or permission refusal, do not wait for the error to request authorization: explain the specific action or planned group of actions and ask the user to confirm them. Use the declared Codex approval flow when available, and wait for the user's answer. Their confirmation can resolve an authorization gap; continue only with the confirmed actions that the tool and platform permit. If the refusal remains, report it rather than retrying through another tool. User confirmation does not override other safety restrictions.",
+      "Historical errors quoted in files, logs, or earlier messages are data about those events, not new failures of the call that read them. Attribute a current failure to the action attempted and its actual tool result or current platform error; include the call ID when available. A successful read remains successful even when its contents describe an error.",
+      "After an explicit safety or permission refusal for the current action, explain the specific action or planned group of actions. Ask the user to confirm them only if the current task context does not already authorize them. Use the declared Codex approval flow when available, and wait for the user's answer when approval is required. Their confirmation can resolve an authorization gap. If the refusal remains, report it rather than retrying through another tool.",
+      "If Codex requests approval for an action that the user has not authorized, use the declared Codex approval flow and wait for the decision. Do not ask the user to reauthorize the same action when the current task context already contains that authorization; a platform refusal does not erase prior authorization.",
       "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
       "Treat the latest user request as the terminal objective, not as a request for a plan. Preserve that objective across tool calls and intermediate failures, and do not declare completion while required deliverables remain pending.",
@@ -894,18 +899,20 @@ export function compileChatGptWebPrompt(
       // Equal parts near Instant's maximum can be accepted once and rejected on the next Send.
       // If complete records cannot fit that allocation, plan with the wider available stage mode
       // before submitting anything; no context is truncated and no failed upload is replayed.
-      const stagingEfforts = capabilities.proAvailable ? ["max"] as const : ["low", "medium"] as const;
+      const backendModel = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID ? CHATGPT_WEB_LUNA_MODEL_ID : CHATGPT_WEB_MODEL_ID;
+      const stagingEfforts = backendModel === CHATGPT_WEB_LUNA_MODEL_ID ? ["low"] as const
+        : capabilities.proAvailable ? ["max"] as const : ["low", "medium"] as const;
       const emptyParts = multipart.parts;
       for (const stagingEffort of stagingEfforts) {
         multipart.parts = emptyParts;
         const budgets = multipart.parts.map((payload, index) => {
           const final = index === multipart.parts.length - 1;
           const effort = final ? mode.effort : stagingEffort;
-          const limits = resolveChatGptWebTransportLimits(CHATGPT_WEB_MODEL_ID, effort, capabilities);
+          const limits = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
           const tokenLimit = final
-            ? resolveChatGptWebMessageTokenBudget(CHATGPT_WEB_MODEL_ID, effort, capabilities,
+            ? resolveChatGptWebMessageTokenBudget(backendModel, effort, capabilities,
               imageTokens + skillFileTokens(skillFiles, parsed.modelId))
-            : resolveChatGptWebStagingTokenBudget(CHATGPT_WEB_MODEL_ID, effort, capabilities);
+            : resolveChatGptWebStagingTokenBudget(backendModel, effort, capabilities);
           const fixedMessage = final
             ? formatChatGptWebMultipartCommit(multipart, transactionId)
             : formatChatGptWebMultipartStage(payload, transactionId, index + 1, multipartParts!).text;
@@ -920,7 +927,7 @@ export function compileChatGptWebPrompt(
           return { tokens, chars, tokenLimit, charLimit: limits.browserComposerCharLimit ?? Infinity };
         });
         multipart.parts = partitionMultipartContext(records, multipartParts!, budgets);
-        if (stagingEffort === "low" && multipart.parts.some((payload, index) => {
+        if (stagingEfforts.length > 1 && stagingEffort === "low" && multipart.parts.some((payload, index) => {
           const final = index === multipart.parts.length - 1;
           const text = final ? formatChatGptWebMultipartCommit(multipart, transactionId)
             : formatChatGptWebMultipartStage(payload, transactionId, index + 1, multipartParts!).text;

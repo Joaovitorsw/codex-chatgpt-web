@@ -13,7 +13,7 @@ import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adap
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
-import { CHATGPT_STOP_BUTTON_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
+import { CHATGPT_STOP_BUTTON_SELECTOR, CHATGPT_SEND_BUTTON_SELECTOR, CHATGPT_THINK_BUTTON_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import { ChatGptExternalTurnProgress, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import type { CodexProviderConfig } from "../src/types";
 import { compileChatGptWebPrompt, formatChatGptWebMultipartCommit, formatChatGptWebMultipartStage } from "../src/adapters/chatgpt-web/prompt";
@@ -118,6 +118,7 @@ test("submission DOM tracks logical identities and retains virtualized history i
   ];
   const observers: (() => void)[] = [];
   const element = (turn: Turn, container: boolean) => ({
+    closest: () => null,
     getAttribute: (name: string) => ({
       "data-turn-id": container ? null : turn.id,
       "data-turn-id-container": turn.id,
@@ -715,19 +716,14 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
 
   expect(evidence).toBe("mcp_tool_call");
   expect(sendClicks).toBe(1);
-  expect(domObservations).toBe(2);
+  expect(domObservations).toBe(1);
   expect(recoveries).toBe(1);
   expect(lifecycle).toEqual(["activated", "submitted"]);
+  // Acceptance must not dispatch tools before a pre-tool answer boundary can be read.
   const acknowledgementDeadline = new AbortController();
-  const timer = setTimeout(() => acknowledgementDeadline.abort(), 100);
-  try {
-    await expect(progress.waitForToolBatchObservation(
-      toolBatchRevision,
-      acknowledgementDeadline.signal,
-    )).resolves.toBeUndefined();
-  } finally {
-    clearTimeout(timer);
-  }
+  const observation = progress.waitForToolBatchObservation(toolBatchRevision, acknowledgementDeadline.signal);
+  acknowledgementDeadline.abort();
+  await expect(observation).rejects.toMatchObject({ name: "AbortError" });
 });
 
 test("Bigger Context send activation keeps the outer stage budget instead of restoring a nested 20-second timeout", async () => {
@@ -857,6 +853,29 @@ test("a drafted direction stops the previous response and then sends from a fres
   expect(checkpoints).toContain("send-steering-stop-settled");
 });
 
+test.each(["low", "high"] as const)("GPT-6 Plus stages High but keeps the Instant exclusion (%s)", async reasoning => {
+  const root = mkdtempSync(join(tmpdir(), "gpt6-context-"));
+  const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
+  let released = false;
+  let browserStages = 0;
+  const prepared = { ...compileChatGptWebPrompt({
+    modelId: CHATGPT_WEB_MODEL_ID, stream: true, options: { reasoning },
+    context: { messages: [{ role: "user", content: "Keep the entire task.", timestamp: 1 }] },
+  }, capabilities, undefined, { experimentalMultipartParts: 2 }), release() { released = true; } };
+  const worker: any = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web", baseUrl: `browser://${root}`, chatgptWeb: { browserDiagnosticsPath: root },
+  });
+  worker.runStage = async () => { browserStages++; throw new Error("Test reached browser acquisition"); };
+  try {
+    await expect(worker.runBrowserTurn({
+      traceId: "six_context", modelId: CHATGPT_WEB_MODEL_ID, modelFamily: "6", reasoning, capabilities,
+      prepare: async () => prepared, onTextDelta() {}, onReasoningSummary() {},
+    })).rejects.toThrow(reasoning === "low" ? "GPT-6 Instant uses standard context" : "Test reached browser acquisition");
+    expect(browserStages).toBe(reasoning === "low" ? 0 : 1);
+    expect(released).toBeTrue();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("two-part saved chats re-prove unchanged effort after the first message creates the conversation URL", async () => {
   const root = mkdtempSync(join(tmpdir(), "saved-chat-multipart-"));
   const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false };
@@ -893,7 +912,7 @@ test("two-part saved chats re-prove unchanged effort after the first message cre
     },
     captureSubmissionBaseline: async () => ({}),
     attachPrompt: async () => {}, attachPromptWithCompactionRetry: async () => {}, attachFiles: async () => {},
-    waitForNewAssistantTurn: async () => ({}), waitForMultipartAcknowledgement: async () => {},
+    waitForNewAssistantTurn: async () => ({}), waitForMultipartAcknowledgement: async () => ({ identity: "stage-one" }),
     sendAttachedPrompt: async (_page: unknown, _baseline: unknown, _capture: unknown, _signal: unknown,
       _progress: unknown, lifecycle: { onSendActivated(): Promise<void> }) => {
       await lifecycle.onSendActivated();
@@ -1210,6 +1229,54 @@ test("active composer resolution waits for exactly one visible editor", async ()
   }).activeComposer;
 
   expect(await activeComposer.call({}, page, 500)).toBe(composer);
+});
+
+test("composer verification ignores icon markup while preserving the exact prompt and live editor", async () => {
+  const { createWindow } = require("@mixmark-io/domino");
+  const links = Array.from({ length: 6 }, (_, index) => `https://drive.google.com/file/d/example-${index}`);
+  const icon = '<svg><title>Drive</title><desc>File icon</desc><style>@supports (color:color(display-p3 1 1 1)){}</style>  <g><path d="M0 0"/></g></svg>';
+  const literal = '<svg><text>Keep this code</text></svg> <style>body { color: red }</style> <script>example()</script>';
+  const window = createWindow('<div id="composer"><p></p><p></p><p></p><p></p></div>');
+  const composer = window.document.getElementById("composer");
+  const paragraphs = composer.children;
+  paragraphs[0].innerHTML = '<span data-id="plugin:example" data-keyword="Codex Native2">Codex Native2</span>'
+    + '<span data-inline-selection-pill-cursor-target>\u200b</span>'
+    + links.map(url => `<a href="${url}"><span contenteditable="false">${icon}</span>${url}</a>`).join(" ");
+  paragraphs[1].textContent = literal;
+  paragraphs[3].innerHTML = '  Keep  two spaces, 日本語 and <span contenteditable="false">ordinary rich text</span>.';
+  // Non-rendering style/script nodes can also occur outside the icon itself.
+  for (const tag of ["style", "script"]) {
+    const decoration = window.document.createElement(tag);
+    decoration.textContent = "not prompt text";
+    composer.appendChild(decoration);
+  }
+  const expected = `${links.join(" ")}\n${literal}\n\n  Keep  two spaces, 日本語 and ordinary rich text.`;
+  const original = composer.innerHTML;
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { appName: "Codex Native2" },
+    activeComposer: async () => ({ evaluate: async (callback: Function, options: unknown) => callback(composer, options) }),
+  }) as {
+    attachedPromptText(page: unknown): Promise<string>;
+    assertPromptAttached(page: unknown, prompt: string): Promise<void>;
+    promptTextEquivalent(expected: string, observed: string): boolean;
+  };
+  expect(await worker.attachedPromptText({})).toBe(expected);
+  await expect(worker.assertPromptAttached({}, expected)).resolves.toBeUndefined();
+  expect(composer.innerHTML).toBe(original);
+  expect(composer.querySelectorAll("svg").length).toBe(6);
+
+  // Decorations are ignored; a changed URL, missing text or extra ordinary
+  // non-editable content must still fail the existing integrity comparison.
+  for (const [variant, mutate] of [
+    () => { composer.querySelector("a").lastChild.textContent += "/changed"; },
+    () => { composer.querySelectorAll("p")[1].textContent = literal.slice(0, -1); },
+    () => { composer.querySelectorAll("p")[3].querySelector("span").textContent += " unexpected"; },
+  ].entries()) {
+    composer.innerHTML = original;
+    mutate();
+    expect({ variant, equivalent: worker.promptTextEquivalent(expected, await worker.attachedPromptText({})) })
+      .toEqual({ variant, equivalent: false });
+  }
 });
 
 test("prompt verification accepts Lexical NBSP preservation without weakening other mismatches", async () => {
@@ -1588,6 +1655,25 @@ test("repeated connector verification reuses its selected pill before clearing t
   expect(checkpoints).toEqual(["personalization-already-enabled", "connector-already-selected"]);
 });
 
+test("connector selection retries a transient modern Apps click before using the legacy mention menu", async () => {
+  const selectedComposer = { selected: true };
+  let modernAttempts = 0;
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+  }).selectConnector;
+
+  await expect(selectConnector.call({
+    selectModernConnector: async () => {
+      modernAttempts += 1;
+      return modernAttempts === 1 ? null : selectedComposer;
+    },
+  }, {
+    locator: () => { throw new Error("legacy connector menu must not be used after one transient Apps miss"); },
+  })).resolves.toBe(selectedComposer);
+
+  expect(modernAttempts).toBe(2);
+});
+
 test("connector selection retriggers the complete mention after a fresh-page hydration miss", async () => {
   const calls: string[] = [];
   let menuAttempt = 0;
@@ -1834,6 +1920,7 @@ for (const captureScreenshots of [false, true]) test(`connector failure persists
     const [traceDirectory] = readdirSync(diagnosticsRoot);
     expect(traceDirectory).toStartWith("verify_contract_trace-");
     const files = readdirSync(join(diagnosticsRoot, traceDirectory!));
+    expect(JSON.parse(readFileSync(join(diagnosticsRoot, traceDirectory!, ".trace-state"), "utf8")).status).toBe("failed");
     expect(screenshots).toBe(captureScreenshots ? 4 : 0);
     expect(files.filter(name => name.endsWith(".png"))).toHaveLength(screenshots);
     const checkpoints = files
@@ -1892,6 +1979,7 @@ test("successful connector verification clears the proven selection before relea
     expect(result).toBe("Codex Native2 DEV");
     expect(calls).toEqual(["prepare", "select", "clear"]);
     const [traceDirectory] = readdirSync(diagnosticsRoot);
+    expect(JSON.parse(readFileSync(join(diagnosticsRoot, traceDirectory!, ".trace-state"), "utf8")).status).toBe("completed");
     const checkpoints = readdirSync(join(diagnosticsRoot, traceDirectory!))
       .filter(name => name.endsWith(".json"))
       .sort()
@@ -2475,8 +2563,10 @@ test("attachment readiness waits for the visible filename and the enabled send b
       return sendChecks >= 2;
     },
   };
+  const readyTile = { or() { return this; }, waitFor: async () => undefined };
   const composerForm = {
-    locator: () => ({ first: () => send }),
+    getByRole: () => readyTile,
+    locator: (selector: string) => selector.includes("composer-attachment-surface") ? readyTile : send,
   };
   const composer = {
     locator: (selector: string) => {
@@ -2484,6 +2574,7 @@ test("attachment readiness waits for the visible filename and the enabled send b
       return composerForm;
     },
   };
+  let uploadEvent: (event: { method: string; params: unknown }) => void = () => {};
   const input = {
     waitFor: async (state: { state: string; timeout: number }) => {
       expect(state).toEqual({ state: "attached", timeout: 20_000 });
@@ -2492,9 +2583,18 @@ test("attachment readiness waits for the visible filename and the enabled send b
     setInputFiles: async (files: Array<{ name: string }>) => {
       calls.push(["setFiles", files.map(file => file.name).join(",")]);
       uploaded = true;
+      uploadEvent({ method: "Network.requestWillBeSent", params: { frameId: "owned", requestId: "upload", request: { method: "POST", url: "https://chatgpt.com/backend-api/files/process_upload_stream", postData: JSON.stringify({ file_name: files[0]!.name }) } } });
+      uploadEvent({ method: "Network.responseReceived", params: { requestId: "upload", response: { status: 200 } } });
     },
   };
   const page = {
+    url: () => "https://chatgpt.com/",
+    context: () => ({ newCDPSession: async () => ({
+      on: (_name: string, listener: typeof uploadEvent) => { uploadEvent = listener; },
+      off: () => {}, detach: async () => {},
+      send: async (method: string) => method === "Page.getFrameTree" ? { frameTree: { frame: { id: "owned" } } }
+        : method === "Network.streamResourceContent" ? { bufferedData: Buffer.from(JSON.stringify({ event: "file.processing.completed" }) + "\n").toString("base64") } : {},
+    }) }),
     locator: (selector: string) => {
       if (selector.includes('input[type="file"]:not([accept])')) return { last: () => input };
       if (selector === '[data-composer-attachments] [class*="group/composer-attachment"]') return {
@@ -2524,7 +2624,7 @@ test("attachment readiness waits for the visible filename and the enabled send b
     ["sendEnabled"],
     ["sendEnabled"],
   ]);
-  expect(composerResolutions).toBe(2);
+  expect(composerResolutions).toBe(1);
 });
 
 test("assistant turn identity follows the human conclusion appended after an app execution turn", () => {
@@ -2557,16 +2657,29 @@ test("mixed context text and screenshot attachments prove both native tile shape
   const contextName = `codex-task-context--${createHash("sha256").update(context).digest("hex").slice(0, 16)}.txt`;
   const observed: string[] = [];
   let tileCount = 0;
-  const ready = { waitFor: async () => undefined };
+  const ready = { or() { return this; }, waitFor: async () => undefined };
   const send = { isEnabled: async () => true };
-  const form = { locator: () => ({ first: () => send }) };
+  const form = { getByRole: () => ready, locator: (selector: string) => selector.includes("composer-attachment-surface") ? ready : send };
   const composer = { locator: () => form };
+  let uploadEvent: (event: { method: string; params: unknown }) => void = () => {};
   const page = {
+    url: () => "https://chatgpt.com/",
+    context: () => ({ newCDPSession: async () => ({
+      on: (_name: string, listener: typeof uploadEvent) => { uploadEvent = listener; },
+      off: () => {}, detach: async () => {},
+      send: async (method: string) => method === "Page.getFrameTree" ? { frameTree: { frame: { id: "owned" } } }
+        : method === "Network.streamResourceContent" ? { bufferedData: Buffer.from(JSON.stringify({ event: "file.processing.completed" }) + "\n").toString("base64") } : {},
+    }) }),
     locator: (selector: string) => {
       if (selector.includes('input[type="file"]:not([accept])')) return {
         last: () => ({ waitFor: async () => undefined, setInputFiles: async (files: Array<{ name: string }>) => {
           observed.push(...files.map(file => file.name));
           tileCount = files.length;
+          files.forEach((file, index) => {
+            const requestId = `upload-${index}`;
+            uploadEvent({ method: "Network.requestWillBeSent", params: { frameId: "owned", requestId, request: { method: "POST", url: "https://chatgpt.com/backend-api/files/process_upload_stream", postData: JSON.stringify({ file_name: file.name }) } } });
+            uploadEvent({ method: "Network.responseReceived", params: { requestId, response: { status: 200 } } });
+          });
         } }),
       };
       if (selector === '[data-composer-attachments] [class*="group/composer-attachment"]') return { count: async () => tileCount };
@@ -2606,8 +2719,9 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
     isVisible: async () => false,
   };
   const visibleControls = { count: async () => 0 };
+  const thinkControls = { or() { return this; }, filter: () => visibleControls };
   const composerForm = {
-    locator: () => ({ filter: () => visibleControls }),
+    locator: () => thinkControls,
     getByRole: () => ({ filter: () => ({ count: async () => 0 }) }),
   };
   const composer = { locator: () => composerForm };
@@ -2635,73 +2749,96 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
   expect(checkpoints).toEqual(["luna-default-confirmed"]);
 });
 
-function thinkSlashFixture() {
-  const state = { pressed: false, controlPresent: true, highlighted: true, popupCount: 1, optionCount: 1,
-    draft: "", connectors: [] as string[], loseConnector: false, commands: [] as string[], enters: 0 };
-  const control = { getAttribute: async () => state.pressed ? "true" : "false" };
-  const controls = { count: async () => state.controlPresent ? 1 : 0, first: () => control };
-  const row = { getAttribute: async () => state.highlighted ? "" : null,
-    waitFor: async () => { if (!state.optionCount) throw new Error("Think command is unavailable"); } };
-  const rows = { filter: () => rows, first: () => row, count: async () => state.optionCount };
-  const popup = { filter: () => popup, locator: () => rows, count: async () => state.popupCount };
-  const page = { locator: (selector: string) => selector === '[role="dialog"]' ? dialogPage("").page.locator(selector) : popup };
+function thinkButtonFixture() {
+  const state = { pressed: false, controlCount: 1, draft: "", connectors: [] as string[],
+    commands: [] as string[], keys: [] as string[], clicks: 0 };
+  const control = { getAttribute: async (): Promise<string | null> => state.pressed ? "true" : "false",
+    click: async () => { state.clicks += 1; state.pressed = !state.pressed; },
+    waitFor: async () => { if (!state.controlCount) throw new Error("Think button is unavailable"); } };
+  const controls = { count: async () => state.controlCount, first: () => control,
+    or() { return this; }, filter() { return this; } };
+  const page = { locator: (selector: string) => {
+    if (selector === '[role="dialog"]') return dialogPage("").page.locator(selector);
+    throw new Error(`Unexpected page locator: ${selector}`);
+  } };
   const composer = {
     filter: () => composer, first: () => composer, locator: () => composerForm,
     evaluate: async () => ({ text: state.draft.trim(), connectors: [...state.connectors] }),
     focus: async () => {},
     fill: async (text: string) => { state.draft = text; state.connectors = []; },
     pressSequentially: async (text: string) => { state.commands.push(text); state.draft += text; },
-    press: async (key: string) => {
-      if (key === "ArrowDown") state.highlighted = true;
-      if (key === "Enter") {
-        if (state.draft !== "/think" || !state.highlighted) throw new Error("Unexpected composer submission");
-        state.enters += 1; state.pressed = !state.pressed; state.controlPresent = true; state.draft = "";
-        if (state.loseConnector) state.connectors = [];
-      }
-    },
+    press: async (key: string) => { state.keys.push(key); },
   };
-  const composerForm = { getByRole: () => ({ filter: () => controls }), locator: () => composer, page: () => page };
-  return { state, composer, composerForm, page };
+  const composerForm = {
+    locator: (selector: string) => selector === CHATGPT_THINK_BUTTON_SELECTOR ? controls : composer,
+    getByRole: () => controls,
+    page: () => page,
+  };
+  return { state, composer, composerForm, page, control };
 }
 
-test("Think slash toggles only when needed, preserves connectors, and normal Luna clears it", async () => {
-  const { state, composerForm } = thinkSlashFixture();
+test("Think toggle preserves connectors and normal Luna clears it", async () => {
+  const { state, composer } = thinkButtonFixture();
   state.connectors = ["Codex Native2"];
   const checkpoints: string[] = [];
 
-  await setChatGptThinkMode(composerForm as never, true, async checkpoint => { checkpoints.push(checkpoint); });
+  await setChatGptThinkMode(composer as never, true, async checkpoint => { checkpoints.push(checkpoint); });
   expect(state.pressed).toBeTrue();
-  expect(state.commands).toEqual(["/think"]);
+  expect(state.commands).toEqual([]);
   expect(state.connectors).toEqual(["Codex Native2"]);
-  await setChatGptThinkMode(composerForm as never, true);
-  expect(state.commands).toEqual(["/think"]);
-  await setChatGptThinkMode(composerForm as never, false, async checkpoint => { checkpoints.push(checkpoint); });
+  await setChatGptThinkMode(composer as never, true);
+  expect(state.commands).toEqual([]);
+  await setChatGptThinkMode(composer as never, false, async checkpoint => { checkpoints.push(checkpoint); });
   expect(state.pressed).toBeFalse();
-  expect(state.commands).toEqual(["/think", "/think"]);
+  expect(state.commands).toEqual([]);
   expect(state.draft).toBe("");
-  expect(checkpoints.filter(checkpoint => !checkpoint.startsWith("think-slash-"))).toEqual(["think-enabled", "think-disabled"]);
+  expect(checkpoints).toEqual(["think-enabled", "think-disabled"]);
+  expect(state.clicks).toBe(2);
+  expect(state.keys).toEqual([]);
 });
 
-test("Think slash requires one command and verifies a newly exposed control", async () => {
-  const ui = thinkSlashFixture();
-  ui.state.controlPresent = false;
-  await setChatGptThinkMode(ui.composerForm as never, true);
+test("missing, ambiguous or unverified Think buttons never type or submit a command", async () => {
+  for (const scenario of ["missing", "ambiguous", "invalid-state", "draft"] as const) {
+    const ui = thinkButtonFixture();
+    ui.state.connectors = ["Codex Native2"];
+    if (scenario === "missing") ui.state.controlCount = 0;
+    if (scenario === "ambiguous") ui.state.controlCount = 2;
+    if (scenario === "invalid-state") ui.control.getAttribute = async () => null;
+    if (scenario === "draft") ui.state.draft = "Keep this draft";
+    const before = { ...ui.state };
+    await expect(setChatGptThinkMode(ui.composer as never, true)).rejects.toThrow({
+      missing: "Think button is unavailable", ambiguous: "2 visible Think controls",
+      "invalid-state": "no semantic pressed state", draft: "requires an empty prompt draft",
+    }[scenario]);
+    expect(ui.state).toEqual(before);
+  }
+});
+
+test("Think waits for its button to mount without typing a command", async () => {
+  const ui = thinkButtonFixture();
+  ui.state.controlCount = 0;
+  ui.control.waitFor = async () => { ui.state.controlCount = 1; };
+  await setChatGptThinkMode(ui.composer as never, true);
   expect(ui.state.pressed).toBeTrue();
-  const ambiguous = thinkSlashFixture();
-  ambiguous.state.optionCount = 2;
-  await expect(setChatGptThinkMode(ambiguous.composerForm as never, true)).rejects.toThrow("exactly one command option");
-  expect(ambiguous.state.enters).toBe(0);
-  const unavailable = thinkSlashFixture();
-  unavailable.state.controlPresent = false;
-  unavailable.state.optionCount = 0;
-  await expect(setChatGptThinkMode(unavailable.composerForm as never, true)).rejects.toThrow("Think command is unavailable");
-  expect(unavailable.state.enters).toBe(0);
+  expect(ui.state.clicks).toBe(1);
+  expect(ui.state.commands).toEqual([]);
+  expect(ui.state.keys).toEqual([]);
 });
 
-test("Think attachment runs after fresh connector selection and rechecks retained and Browser-only turns", async () => {
+test("a failed Think toggle does not attempt a second action or alter the draft", async () => {
+  const ui = thinkButtonFixture();
+  ui.state.connectors = ["Codex Native2"];
+  ui.control.click = async () => { throw new Error("Toggle failed"); };
+  await expect(setChatGptThinkMode(ui.composer as never, true)).rejects.toThrow("Toggle failed");
+  expect(ui.state.commands).toEqual([]);
+  expect(ui.state.connectors).toEqual(["Codex Native2"]);
+  expect(ui.state.draft).toBe("");
+});
+
+test("Think attachment preserves the plugin on first and follow-up messages and supports Browser-only turns", async () => {
   const attach = (ChatGptBrowserWorker.prototype as unknown as { attachPrompt: (...args: unknown[]) => Promise<void> }).attachPrompt;
-  for (const [localTools, retained] of [[true, false], [true, true], [false, false]]) {
-    const ui = thinkSlashFixture();
+  for (const [localTools, retained] of [[true,true],[true,false],[false,true],[false,false]]) {
+    const ui = thinkButtonFixture();
     let connectorSelections = 0;
     const submitted: boolean[] = [];
     const worker = {
@@ -2720,25 +2857,47 @@ test("Think attachment runs after fresh connector selection and rechecks retaine
       ui.state.pressed = false;
       await attach.call(worker, ui.page, "follow-up task", localTools, undefined, undefined, false, undefined, retained, true);
       expect(submitted).toEqual([true, true]);
-      expect(ui.state.commands).toEqual(["/think", "/think"]);
+      expect(ui.state.commands).toEqual([]);
       expect(connectorSelections).toBe(localTools ? 1 : 0);
     }
   }
 });
 
-test("Think attachment rolls back a lost connector and never inserts the prompt", async () => {
-  const ui = thinkSlashFixture();
-  ui.state.loseConnector = true;
+test("Think attachment does not select a plugin or insert a prompt when its button is unavailable", async () => {
+  const ui = thinkButtonFixture();
+  ui.state.controlCount = 0;
+  let insertions = 0;
+  let selections = 0;
+  const worker = {
+    activeComposer: async () => ui.composer,
+    selectConnector: async () => { selections += 1; return ui.composer; },
+    insertPromptText: async () => { insertions += 1; },
+    assertPromptAttached: async () => {},
+    clearChatGptComposerState: async () => { ui.state.draft = ""; ui.state.connectors = []; },
+  };
+  const attach = (ChatGptBrowserWorker.prototype as unknown as { attachPrompt: (...args: unknown[]) => Promise<void> }).attachPrompt;
+  await expect(attach.call(worker, ui.page, "task", true, undefined, undefined, false, undefined, false, true))
+    .rejects.toThrow("Think button is unavailable");
+  expect(ui.state.pressed).toBeFalse();
+  expect(ui.state.commands).toEqual([]);
+  expect(ui.state.keys).toEqual([]);
+  expect(selections).toBe(0);
+  expect(insertions).toBe(0);
+});
+
+test("Think attachment rolls back when connector selection disables Think", async () => {
+  const ui = thinkButtonFixture();
   let insertions = 0;
   let cleanup = 0;
   const worker = {
-    selectConnector: async () => { ui.state.connectors = ["Codex Native2"]; return ui.composer; },
+    activeComposer: async () => ui.composer,
+    selectConnector: async () => { ui.state.pressed = false; ui.state.connectors = ["Codex Native2"]; return ui.composer; },
     insertPromptText: async () => { insertions += 1; },
     clearChatGptComposerState: async () => { cleanup += 1; ui.state.draft = ""; ui.state.connectors = []; },
   };
   const attach = (ChatGptBrowserWorker.prototype as unknown as { attachPrompt: (...args: unknown[]) => Promise<void> }).attachPrompt;
   await expect(attach.call(worker, ui.page, "must not be inserted", true, undefined, undefined, false, undefined, false, true))
-    .rejects.toThrow("selected connectors");
+    .rejects.toThrow("did not preserve Think mode");
   expect(insertions).toBe(0);
   expect(cleanup).toBe(1);
 });
@@ -3517,6 +3676,39 @@ test("browser preflight separates model context from one-message transport limit
   }
 });
 
+test("GPT-6 staged input enforces its measured account and effort ceiling before submission", () => {
+  const pro = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  for (const effort of ["medium", "high", "xhigh"] as const) {
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      239_999, 40_000, "gpt-5.6-sol", effort, pro, 200_000, 6, undefined, "6",
+    )).not.toThrow();
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      240_000, 40_000, "gpt-5.6-sol", effort, pro, 200_000, 6, undefined, "6",
+    )).toThrow("240,000-token six-part ceiling");
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      222_386, 40_000, "gpt-5.6-sol", effort, pro, 200_000, 2, undefined, "6",
+    )).toThrow("222,386-token two-part ceiling");
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      119_999, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 200_000, 6, undefined, "6",
+    )).not.toThrow();
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      120_000, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 200_000, 6, undefined, "6",
+    )).toThrow("120,000-token six-part ceiling");
+    expect(() => assertChatGptWebMultipartInputWithinLimits(
+      120_000, 40_000, "gpt-5.6-sol", effort, { ...pro, proAvailable: false }, 200_000, 2, undefined, "6",
+    )).toThrow("120,000-token two-part ceiling");
+  }
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    100_000, 40_000, "gpt-5.6-sol", "low", pro, 200_000, 6, undefined, "6",
+  )).toThrow("GPT-6 Instant uses standard context");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    333_578, 60_000, "gpt-5.6-sol", "high", pro, 250_000, 6, undefined, "5.6",
+  )).not.toThrow();
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    336_578, 60_000, "gpt-5.6-sol", "max", pro, 250_000, 6, undefined, "6",
+  )).not.toThrow();
+});
+
 test("Bigger Context fits mixed-density whole records within both token and composer limits", () => {
   const capabilities = { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false, experimentalBiggerContext: true };
   const dense = "a!b@c#d$e%f^g&h*".repeat(3_750);
@@ -3659,7 +3851,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false },
     40_000,
     2,
-  )).toThrow("unavailable for Luna");
+  )).not.toThrow();
 });
 
 test("Bigger Context stages use the lowest account mode that can carry the stage", () => {
@@ -3692,12 +3884,12 @@ test("Bigger Context stages use the lowest account mode that can carry the stage
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 500_000).effort).toBe("low");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 600_000).effort).toBe("max");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 104_000, 1_200_000).effort).toBe("max");
-  expect(() => resolveChatGptWebMultipartStagingMode(
+  expect(resolveChatGptWebMultipartStagingMode(
     "gpt-5.6-luna",
     { localToolsEnabled: false, solAvailable: false, extraHighAvailable: false, proAvailable: false },
     10_000,
     20_000,
-  )).toThrow("Luna-only");
+  ).effort).toBe("low");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     100_000,
     30_000,
@@ -4095,7 +4287,7 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   const missing = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -4171,7 +4363,7 @@ test("suspending DOM health for proven MCP progress restarts the missing-respons
   const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -4192,7 +4384,7 @@ test("clearing the missing-response window preserves whether a response was ever
   const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
   const present = {
     responsePresent: true,
-    running: true,
+    running: false,
     currentText: "partial",
     completionActionVisible: false,
   };
@@ -4272,14 +4464,14 @@ test("live external progress still records that a response DOM was observed", ()
   const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
 
   expect(tracker.update({
     responsePresent: true,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
     externalProgressLive: true,
@@ -4596,7 +4788,7 @@ test("embedded chart hydration cannot replace Markdown answer content with rende
     + '<span>  components/</span>\n<span>    Header.jsx</span>\n'
     + '<span>  App.jsx</span></span></code></div></div>').body;
   expect(chatGptHtmlToMarkdown(contentFor(codeCard).innerHTML)).toBe([
-    '```text', 'src/', '  components/', '    Header.jsx', '  App.jsx', '```',
+    '```', 'src/', '  components/', '    Header.jsx', '  App.jsx', '```',
   ].join("\n"));
 
   const files = createDocument('<p>Report: <span data-state="closed">'
@@ -4848,7 +5040,7 @@ test("a staged Bigger Context part gets an acknowledgement window sized to its p
 
   // No MCP activity exists while an inert part is being ingested, so the response and send budgets
   // bound the same exchange.
-  expect(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS).toBe(browserStageTimeouts.multipartStageSend);
+  expect(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS).toBe(browserStageTimeouts.send);
   expect(browserStageTimeouts.multipartStageAcknowledgement).toBe(CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS);
 
 });

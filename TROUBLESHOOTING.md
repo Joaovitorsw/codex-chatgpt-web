@@ -37,6 +37,26 @@ If the models still do not appear:
 A green step 3 followed by a browser-turn error means installation succeeded. Repeating step 3 will
 not repair an unrelated ChatGPT browser or model-turn failure.
 
+### Windows: Cannot bind the local port (EACCES)
+
+`Cannot bind 127.0.0.1:17841: listen EACCES: permission denied` means Windows refused access to
+the port. Possible causes include a reserved port range, another service holding the address
+exclusively, or security software. The error alone does not identify the cause.
+
+Check reserved ranges and listeners in PowerShell:
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+Get-NetTCPConnection -LocalPort 17841 -ErrorAction SilentlyContinue | Select-Object LocalAddress, State, OwningProcess
+```
+
+If 17841 falls inside a listed range, include that range in your report. Hyper-V, WSL, Docker and
+Windows Sandbox can manage such reservations. If a listener appears, its OwningProcess identifies
+the process to investigate. If neither check explains it, include both outputs and an
+**Activity → Export safe log**. Reinstalling the launcher does not resolve an operating-system
+reservation or another service's exclusive binding. Do not stop networking services or change
+port reservations based only on the EACCES message.
+
 ## `openai_base_url changed after setup` or a model is "not supported"
 
 The launcher deliberately refuses to overwrite a route changed by another tool. Only one program
@@ -116,9 +136,10 @@ window does not automatically transfer that session.
   running.
 - If the account offers **Try another way**, an alternate authentication method can avoid a
   platform-passkey limitation.
-- Passkey-only macOS accounts have a known open issue: [#209](https://github.com/miuuyy/codex-chatgpt-web/issues/209).
-  If no alternate method exists, follow that issue rather than repeatedly deleting the browser
-  profile; there is no safe generic workaround to claim yet.
+- On macOS, choose **Use passkey** to open a separate Chrome window. Sign in to ChatGPT there
+  using your passkey. Once ChatGPT opens, return to the launcher and choose **I’m signed in — continue**.
+  Keep that Chrome window open until you continue; the launcher closes it and verifies the imported
+  session. Your usual Chrome profile is not used. Google Chrome must be installed.
 
 If an ordinary login still fails, export a safe log immediately after one attempt. Include the OS,
 launcher version, account tier, sign-in provider, and whether the Temporary Chat composer ever
@@ -139,8 +160,9 @@ mean that the ChatGPT UI did not expose a structure the bridge can safely prove.
 
 Free and Go accounts normally expose Luna and Think without the paid-account effort selector. A
 missing paid selector on those accounts is not itself a sign-in failure.
-Keep **Settings → Bigger Context** off when using Luna or Think. If you enabled it on an older
-version and tasks fail before anything is sent to ChatGPT, turn it off and restart Codex.
+Luna and Think use rolling summaries with **Settings → Bigger Context** off. Experimental Bigger
+Context keeps the temporary conversation and sends large histories in parts. If earlier details
+are lost in long Free-account chats, turn Bigger Context off and restart Codex.
 
 ## Personalization or connector controls are not found
 
@@ -181,6 +203,20 @@ These fields only forward a permission request to Codex; its sandbox and approva
 decide whether the command can run. Ordinary commands do not require these optional fields.
 
 ### ChatGPT refuses a tool call or context compaction
+
+For deferred discovery, use `codex_tool_inventory`, then `codex_tool_search` when
+the requested capability is not loaded. Do not wrap `tool_search` in `codex_tool_call`
+or raw `exec`. For the supported `codex-browser` info, tab-list, URL, title and DOM
+queries, use `codex_browser_read`. This endpoint accepts only its declared operations;
+navigation, clicks, filling and arbitrary evaluation still use the action gateway.
+The read-only annotations describe the restricted endpoint; they do not preapprove
+actions or suppress the platform's review.
+
+These endpoints change the public MCP schema. After deploying this source, reload
+the current connector's tool schema using the supported ChatGPT connector workflow.
+Verify that its tools list actually contains `codex_tool_search` and
+`codex_browser_read` before testing a live Web turn. A passing local MCP test does
+not prove that the running launcher or ChatGPT's cached connector has been updated.
 
 Share the exact failed tool result and an **Activity → Export safe log**. An assistant saying
 "safety block" without a failed tool result does not establish the cause. **Allow all actions**

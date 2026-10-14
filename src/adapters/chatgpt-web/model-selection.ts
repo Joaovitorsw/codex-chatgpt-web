@@ -1,5 +1,5 @@
 import type { Locator } from "playwright-core";
-import { activateChatGptEffortMenu, parseChatGptEffortSliderState, readChatGptModelAnnouncements } from "../../chatgpt-session";
+import { activateChatGptEffortMenu, parseChatGptEffortSliderState, parseChatGptModelAnnouncement, readChatGptModelAnnouncements } from "../../chatgpt-session";
 import type { ChatGptWebAdapterEffort, ChatGptWebModelFamily } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
@@ -14,7 +14,7 @@ function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWeb
 
 function familyName(family: ChatGptWebModelFamily): RegExp {
   return family === "5.6" ? /^(?:GPT[-\s]?)?5\.6(?:\s+Sol)?(?:\s+Pro)?$/i
-    : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i;
+    : /^(?:Latest|最新|최신|(?:GPT[-\s]?)?6(?:\s+Astra)?(?:\s+Pro)?)$/i;
 }
 
 function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily): Locator {
@@ -111,16 +111,14 @@ export function chatGptModelFamilyMatches(
   family: ChatGptWebModelFamily,
   effort: ChatGptWebAdapterEffort,
 ): boolean {
-  // Latest uses 5.6 for the existing lower-effort multipart acknowledgements and 6 for Pro.
-  // Never interpret a future Latest Pro model as 6, or a lower effort as the final Pro response.
-  const expected = family === "6" && effort !== "max" ? "5.6" : family;
+  // Verify the selected family and its product; GPT-6 Sol staging remains GPT-6.
+  const expectedName = family === "6" && effort === "max" ? "astra" : "sol";
   const states = descriptions.flatMap(text => {
-    const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i
-      .exec(text.replace(/\s+/g, " ").trim());
-    return match ? [{ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() }] : [];
+    const state = parseChatGptModelAnnouncement(text);
+    return state ? [state] : [];
   });
-  return states.length > 0 && states.every(state => state.version === expected
-    && (!state.name || state.name === (expected === "5.6" ? "sol" : "astra"))
+  return states.length > 0 && states.every(state => state.version === family
+    && (!state.name || state.name === expectedName)
     && (effort === "max" ? /^Pro$/i.test(state.mode) : !/^Pro$/i.test(state.mode)));
 }
 

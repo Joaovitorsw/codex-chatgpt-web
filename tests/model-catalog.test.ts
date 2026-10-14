@@ -130,10 +130,12 @@ describe("native /models augmentation", () => {
         ["sol", proAvailable ? 111_193 : 90_000, proAvailable ? 95_000 : 80_000],
       ] as const) {
         const six = models.find(model => model.slug === `chatgpt-web/gpt-6-${suffix}`)!;
-        const expanded = proAvailable && suffix === "sol";
-        expect(six).toMatchObject({ context_window: expanded ? 240_000 : window,
-          max_context_window: expanded ? 240_000 : window, auto_compact_token_limit: expanded ? 220_000 : compact });
-        expect(six.description).toContain("standard context");
+        const expanded = suffix === "sol";
+        const expandedWindow = proAvailable ? 240_000 : 120_000;
+        const expandedCompact = proAvailable ? 220_000 : 110_000;
+        expect(six).toMatchObject({ context_window: expanded ? expandedWindow : window,
+          max_context_window: expanded ? expandedWindow : window, auto_compact_token_limit: expanded ? expandedCompact : compact });
+        expect(six.description).toContain(expanded ? "Plus and Pro" : "standard context");
         expect(models.find(model => model.slug === `chatgpt-web/gpt-5.6-${suffix}`)).toMatchObject({
           context_window: window * 3, auto_compact_token_limit: compact * 3,
         });
@@ -171,8 +173,8 @@ describe("native /models augmentation", () => {
       "gpt-5.6-sol",
       "chatgpt-web/gpt-6-sol",
       "chatgpt-web/gpt-5.6-sol",
-      "chatgpt-web/gpt-5.6-pro",
       "chatgpt-web/gpt-6-pro",
+      "chatgpt-web/gpt-6-sol-instant",
     ]);
     expect(models.find(model => model.slug === "chatgpt-web/light")?.priority).toBe(3);
   });

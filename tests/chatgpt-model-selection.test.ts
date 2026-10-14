@@ -3,7 +3,7 @@ import { chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adap
 
 test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
   for (const [label, accepted] of [
-    ["Latest", true], ["最新", true], ["최신", true], ["GPT-6 Pro", true],
+    ["Latest", true], ["最新", true], ["최신", true], ["6", true], ["GPT-6 Pro", true],
     ["GPT-5.6 Sol", false], ["GPT-7 Pro", false], ["Latest preview", false],
   ] as const) {
     const menu = { menu: {
@@ -51,9 +51,12 @@ test("model selection accepts the current 5.6 labels with or without the GPT pre
   }
 });
 
-test("family confirmation separates Latest staging from the actual Pro response", () => {
+test("family confirmation verifies the exact Sol or Pro version", () => {
   expect(chatGptModelFamilyMatches(["5.6 High, 3 of 5."], "5.6", "high")).toBe(true);
-  expect(chatGptModelFamilyMatches(["5.6 Extra High, 4 of 5."], "6", "xhigh")).toBe(true);
+  expect(chatGptModelFamilyMatches(["5.6 Extra High, 4 of 5."], "6", "xhigh")).toBe(false);
+  expect(chatGptModelFamilyMatches(["6 Instant, 1 of 5."], "6", "low")).toBe(true);
+  expect(chatGptModelFamilyMatches(["GPT-6 Sol Instant, 1 of 5."], "6", "low")).toBe(true);
+  expect(chatGptModelFamilyMatches(["GPT-6 Astra Instant, 1 of 5."], "6", "low")).toBe(false);
   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "max")).toBe(true);
   expect(chatGptModelFamilyMatches(["GPT-5.6 Sol Pro, 5 of 5."], "5.6", "max")).toBe(true);
   for (const descriptions of [[], ["Try Pro for more reasoning"], ["5.6 High, 3 of 5."], ["5.6 Pro, 5 of 5."],
@@ -62,4 +65,17 @@ test("family confirmation separates Latest staging from the actual Pro response"
   }
   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "5.6", "max")).toBe(false);
   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "xhigh")).toBe(false);
+});
+
+
+test("model verification accepts Unicode announcement punctuation without weakening identity", () => {
+  for (const separator of ["、", "，", "،", "؛", "：", "—", "。", ",", ";"]) {
+    expect(chatGptModelFamilyMatches([`6 Pro${separator}5 件中 5 番目。`], "6", "max")).toBeTrue();
+    expect(chatGptModelFamilyMatches([`GPT-5.6 Sol Pro${separator}translated position`], "5.6", "max")).toBeTrue();
+    expect(chatGptModelFamilyMatches([`6.1 Pro${separator}position`], "6", "max")).toBeFalse();
+    expect(chatGptModelFamilyMatches([`6 Sol Pro${separator}position`], "6", "max")).toBeFalse();
+    expect(chatGptModelFamilyMatches([`6 Pro${separator}position`, "5.6 Pro"], "6", "max")).toBeFalse();
+  }
+  expect(chatGptModelFamilyMatches(["\u2068６ Pro\u2069、position"], "6", "max")).toBeTrue();
+  expect(chatGptModelFamilyMatches(["6 Pro for better answers"], "6", "max")).toBeFalse();
 });

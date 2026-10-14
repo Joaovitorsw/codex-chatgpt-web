@@ -19,6 +19,7 @@ export interface LauncherState {
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
   biggerContextAvailable?: boolean;
+  composerPredictionsEnabled: boolean;
   experimentalSkillAttachments: boolean;
   experimentalContextAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
@@ -45,6 +46,7 @@ export interface BrowserState {
   url: string;
   title: string;
   authenticated: boolean;
+  passkeyPhase?: "opening" | "waiting" | "importing" | null;
   visible: boolean;
   surfaceActive: boolean;
   loading: boolean;
@@ -194,6 +196,7 @@ export interface LauncherApi {
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
+  setComposerPredictions(enabled: boolean): Promise<LauncherState>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
   setContextAttachments(enabled: boolean): Promise<LauncherState>;
   setAutoApproveToolCalls(enabled: boolean): Promise<LauncherState>;

@@ -61,10 +61,21 @@ export class ChatGptTraceFeed {
   // immediate-signature guard alone cannot catch that, so retain every non-continuation block
   // already delivered in this turn. Continuations remain append-only and are never coalesced.
   private readonly deliveredStableSignatures = new Set<string>();
+  private readonly progressObservers = new Set<() => void>();
+
+  observeProgress(observer: () => void): () => void {
+    this.progressObservers.add(observer);
+    return () => { this.progressObservers.delete(observer); };
+  }
+
+  recordProgress(): void {
+    for (const observer of this.progressObservers) observer();
+  }
 
   push(event: ChatGptTraceEvent): void {
     const normalized = event.continuation ? event.text : event.text.trim();
     if (!normalized) return;
+    this.recordProgress();
     const normalizedEvent = { ...event, text: normalized };
     const signature = `${normalizedEvent.kind}:${normalizedEvent.continuation === true ? "1" : "0"}:${normalizedEvent.text}`;
     if (signature === this.lastPushedSignature) return;
@@ -291,6 +302,7 @@ export class ChatGptTurnSession {
   private finalReasoning: string[] = [];
   private outstandingPrelude: AdapterEvent[] = [];
   private finalPrelude: AdapterEvent[] = [];
+  private finalConsumedByCompaction = false;
   private settledBrowserOutcome?: ChatGptBrowserOutcome;
   private settledPhysical = false;
   private attachedConversationKey: string | undefined;
@@ -423,6 +435,15 @@ export class ChatGptTurnSession {
 
   setFinalEvents(events: AdapterEvent[]): void {
     this.finalPrelude = [...events];
+  }
+
+  consumeDeliveredFinalResponseForCompaction(): void {
+    this.finalConsumedByCompaction = [...this.rounds.values()].some(round => round.completed
+      && round.events.some(event => event.type === "text_delta" && event.phase === "final_answer"));
+  }
+
+  finalResponseConsumedByCompaction(): boolean {
+    return this.finalConsumedByCompaction;
   }
 
   eventsForFinalReplay(): AdapterEvent[] {
@@ -584,19 +605,17 @@ export class ChatGptTurnSessions {
       ));
       if (activeOwner) {
         const [ownedKey, ownedSession] = activeOwner;
-        const supersedesActiveInstruction = instruction?.predecessors.has(ownedSession.instruction ?? "") === true;
-        if (supersedesActiveInstruction) {
-          // A user direction is a newer instruction in the same native conversation, not a
-          // second independent task. ChatGPT cannot submit it while the preceding answer is
-          // generating, so stop only that superseded browser response and serialize the new
-          // submission behind its physical cleanup. Ordinary reconnects/tool-result rounds have
-          // no predecessor relationship and remain non-interrupting.
-          this.entries.delete(ownedKey);
+        if (ownedSession.isActive() && instruction && ownedSession.instruction
+          && instruction.current !== ownedSession.instruction) {
+          if (!instruction.predecessors.has(ownedSession.instruction)) throw chatGptTurnSupersededError();
+          // Native steering can return the old tool result and a new instruction in one request.
+          // Waiting for the old browser here deadlocks before that result can be consumed. Retire
+          // its capability and rebuild from the complete canonical history, including that result.
+          // Keep the old entry terminal so a delayed replay cannot restart superseded work.
+          const reason = chatGptTurnSupersededError();
+          ownedSession.supersededError = reason;
           this.forgetConversationHead(ownedSession);
-          await awaitWithAbort(
-            this.beginRetirement(ownedKey, ownedSession, chatGptTurnSupersededError()),
-            signal,
-          );
+          await awaitWithAbort(this.beginRetirement(ownedKey, ownedSession, reason), signal);
           continue;
         }
         // One ChatGPT conversation has exactly one live browser turn. A later native request can
@@ -688,7 +707,10 @@ export class ChatGptTurnSessions {
         throw new Error("ChatGPT retained-conversation ownership changed during retirement");
       }
     }
-    if (preserved) this.entries.set(preserved.executionKey, preserved.session);
+    if (preserved) {
+      preserved.session.consumeDeliveredFinalResponseForCompaction();
+      this.entries.set(preserved.executionKey, preserved.session);
+    }
     const release = matches.findLast(([, session]) => (
       session.runtime.releaseRetainedConversation !== undefined
     ))?.[1].runtime.releaseRetainedConversation;

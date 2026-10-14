@@ -218,6 +218,15 @@ Verify that its tools list actually contains `codex_tool_search` and
 `codex_browser_read` before testing a live Web turn. A passing local MCP test does
 not prove that the running launcher or ChatGPT's cached connector has been updated.
 
+In ChatGPT, open **Settings → Plugins → Codex Native2 → Update tools**
+(Portuguese: **Configurações → Plugins → Codex Native2 → Atualizar ferramentas**).
+Wait until the refresh button stops loading. Refreshing the connector does not reload
+the local MCP process: a process started before the source update can still advertise
+its previous tools. Reload the local runtime through the launcher's supported lifecycle
+after its HTTP and browser turn counts both reach zero, then refresh the connector again.
+Do not terminate an active turn merely to update its catalog. Verify the tools in a fresh
+Web turn; an existing turn can retain its earlier tool definitions.
+
 Share the exact failed tool result and an **Activity → Export safe log**. An assistant saying
 "safety block" without a failed tool result does not establish the cause. **Allow all actions**
 does not override ChatGPT's own safety checks.

@@ -2034,6 +2034,14 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        <SettingRow body={copy.memorySaverBody} label={copy.memorySaver}>
+          <Switch
+            checked={snapshot.state.memorySaver}
+            onChange={(checked) => void api!.setPreference("memorySaver", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
         <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}

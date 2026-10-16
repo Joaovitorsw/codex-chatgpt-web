@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { observeChatGptAttachmentUploads } from "./attachment-upload";
 import { chatGptResponseStructureLogEntries, chatGptResponseStructures } from "./browser-response-structure";
 import { BrowserDiagnosticHistory } from "./browser-diagnostic-history";
+import { chatGptUserMessageMatches } from "./browser-user-message";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
 import { detectChatGptLimitsPlan, readChatGptUsageAccount, readChatGptUsageModel, supportsChatGptUsageTracking, type ChatGptUsageModel } from "./limits";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page, type Request, type Response } from "playwright-core";
@@ -164,7 +165,6 @@ export const CHATGPT_MISSING_ACTION_SETTLE_MS = 5_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
 const MAX_CHATGPT_MODERN_CONNECTOR_ATTEMPTS = 2;
-const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
 const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
@@ -3964,32 +3964,47 @@ export class ChatGptBrowserWorker {
       // user ID was observed then, require the entire submitted text instead. A
       // surviving old group or any competing new turn remains foreign.
       const user = newUsers[0]!;
-      const replacement = identity && newUsers.length === 1
+      const expectedAssistant = user.startsWith("group:user:")
+        ? `group:assistant:${user.slice("group:user:".length)}` : undefined;
+      const replacement = newUsers.length === 1
         && binding.identity.startsWith("group:assistant:")
-        && user.startsWith("group:user:")
-        && identity === `group:assistant:${user.slice("group:user:".length)}`
+        && expectedAssistant !== undefined
+        && (identity === undefined || identity === expectedAssistant)
         && !state.turnIdentities.includes(binding.identity)
-        && state.turnIdentities.every(turn => acceptedTurns.has(turn) || turn === user || turn === identity);
+        && state.turnIdentities.every(turn => acceptedTurns.has(turn) || turn === user || turn === expectedAssistant);
       let matches = false;
+      let textComparison: unknown;
       if (replacement) {
-        const locator = page.locator(chatGptAssistantTurnSelector(identity!)).first();
-        matches = baseline.acceptedUserIdentity
-          ? user === baseline.acceptedUserIdentity
-          : Boolean(baseline.submittedText) && await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(locator.evaluate((group, submitted) => {
-          const bubbles = group.querySelectorAll<HTMLElement>("[data-user-message-bubble]");
-          const contents = bubbles.length === 1
-            ? bubbles[0]!.querySelectorAll<HTMLElement>("[data-search-result-target]")
-            : [];
-          const normalize = (text: string) => text.replace(/\r\n?/g, "\n");
-          // The bubble also contains Show more and accessibility spacing. Only its
-          // observed message-content target represents the submitted prompt.
-          return contents.length === 1 && normalize(contents[0]!.innerText) === normalize(submitted);
-        }, baseline.submittedText!), signal));
+        const locator = page.locator(`[data-turn-key=${JSON.stringify(user.slice("group:user:".length))}]`).first();
+        if (baseline.acceptedUserIdentity) {
+          matches = user === baseline.acceptedUserIdentity;
+        } else if (baseline.submittedText) {
+          matches = await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(locator.evaluate(
+            chatGptUserMessageMatches,
+            { submittedText: baseline.submittedText, connectorName: this.config?.appName },
+          ), signal));
+          textComparison = { matches };
+        }
         // The accepted user identity (or exact submitted text) establishes ownership.
         // Activity can replace its temporary group while still generating; requiring
         // a completed answer here mistakes that same unfinished turn for a foreign one.
+        // The accepted user may also mount before any assistant marker. Validate its
+        // ownership now, and retain the old binding below until an assistant appears.
       }
-      if (!matches) throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
+      if (!matches) {
+        // Record identities only: prompts and rendered answer text must not enter diagnostics.
+        console.warn("[chatgpt-web] assistant_rebind_rejected", JSON.stringify({
+          boundIdentity: binding.identity,
+          acceptedUserIdentity: baseline.acceptedUserIdentity,
+          candidateIdentity: identity,
+          newUsers,
+          acceptedTurns: [...acceptedTurns],
+          currentTurns: state.turnIdentities,
+          replacement: Boolean(replacement),
+          textComparison,
+        }));
+        throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
+      }
     }
     if (!identity || identity === binding.identity) return binding;
     return {
@@ -4182,14 +4197,14 @@ export class ChatGptBrowserWorker {
 
     await opener.click({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
     try {
-      // Current ChatGPT Apps are exposed here rather than through the legacy @mention menu.
-      // The visible suffix (for example, "teste") is metadata, so match the configured
-      // name as a prefix while retaining the exact app identity in the inserted app:// token.
+      // Multiple popups can coexist. Only an exact configured label in a visible row
+      // identifies the app; prefixes and the last row can belong to another machine.
       const appRows = page.locator('button[data-list-navigation-item="true"]').filter({ visible: true });
       const exactApp = appRows.filter({ has: page.getByText(this.config.appName, { exact: true }) });
-      const app = (await exactApp.count().catch(() => 0)) > 0
-        ? exactApp.last()
-        : appRows.filter({ hasText: this.config.appName }).last();
+      const count = await exactApp.count();
+      if (count === 0) return null;
+      if (count > 1) throw new Error(`ChatGPT exposed multiple visible rows named ${JSON.stringify(this.config.appName)}`);
+      const app = exactApp;
       if (!await app.isVisible().catch(() => false)) return null;
       await app.click({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
       const selectedComposer = await this.activeComposer(page, 30_000, abortSignal);
@@ -4239,7 +4254,8 @@ export class ChatGptBrowserWorker {
         if (modernComposer) return modernComposer;
       }
     }
-    const menuRows = page.locator('.__menu-item[tabindex="0"]');
+    const mentionQuery = `@${this.config.appName}`;
+    const menuRows = page.locator('.__menu-item:visible');
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
@@ -4260,7 +4276,7 @@ export class ChatGptBrowserWorker {
             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
           });
           await withBrowserTurnAbort(settleChatGptUi(), personalizationSignal);
-          await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
+          await composer.pressSequentially(mentionQuery, {
             delay: 25,
             signal: personalizationSignal,
             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
@@ -4279,9 +4295,9 @@ export class ChatGptBrowserWorker {
                 ? element.value : element.textContent ?? "",
               focused: element === document.activeElement,
             }), undefined, { timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: personalizationSignal });
-            if (mention.text !== CHATGPT_CONNECTOR_MENTION_QUERY) {
+            if (mention.text !== mentionQuery) {
               throw new ChatGptPromptAttachmentIntegrityError(
-                `ChatGPT did not preserve the connector mention (expectedChars=${CHATGPT_CONNECTOR_MENTION_QUERY.length}, actualChars=${mention.text.length}, focused=${mention.focused})`,
+                `ChatGPT did not preserve the connector mention (expectedChars=${mentionQuery.length}, actualChars=${mention.text.length}, focused=${mention.focused})`,
               );
             }
           }
@@ -4316,7 +4332,7 @@ export class ChatGptBrowserWorker {
         await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
-        await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
+        await composer.pressSequentially(mentionQuery, {
           delay: 25,
           signal: abortSignal,
           timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
@@ -4971,10 +4987,8 @@ export class ChatGptBrowserWorker {
     try {
       const appRows = page.locator('button[data-list-navigation-item="true"]').filter({ visible: true });
       const exactApp = appRows.filter({ has: page.getByText(this.config.appName, { exact: true }) });
-      const appButton = (await exactApp.count().catch(() => 0)) > 0
-        ? exactApp.first()
-        : appRows.filter({ hasText: this.config.appName }).first();
-      await appButton.waitFor({ state: "visible", timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+      await exactApp.waitFor({ state: "visible", timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+      if (await exactApp.count() !== 1) throw new Error(`ChatGPT exposed multiple visible rows named ${JSON.stringify(this.config.appName)}`);
       await captureDiagnostic?.("connector-modern-app-available");
       return true;
     } finally {

@@ -2,6 +2,7 @@ param(
   [switch]$Worker,
   [switch]$Force,
   [switch]$RunImageSmoke,
+  [switch]$MemorySaver,
   [int]$TimeoutMinutes = 30
 )
 
@@ -26,6 +27,7 @@ if (-not $Worker) {
   )
   if ($RunImageSmoke) { $workerArguments += '-RunImageSmoke' }
   if ($Force) { $workerArguments += '-Force' }
+  if ($MemorySaver) { $workerArguments += '-MemorySaver' }
   Start-Process -FilePath $pwsh -WindowStyle Hidden -ArgumentList $workerArguments -WorkingDirectory $repoRoot | Out-Null
   Write-Output "Safe restart queued. It will run after active Codex Web turns finish. Log: $logPath"
   exit 0
@@ -140,6 +142,17 @@ if ($ownedLauncherConsoles.Count -gt 0) {
     Stop-Process -Id ([int]$console.ProcessId) -Force -ErrorAction SilentlyContinue
   }
   Start-Sleep -Milliseconds 500
+}
+
+if ($MemorySaver) {
+  $statePath = Join-Path $env:APPDATA 'Codex Web GPT\launcher-state.json'
+  if (-not (Test-Path -LiteralPath $statePath)) { throw 'Launcher state was not found.' }
+  $launcherState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+  $launcherState | Add-Member -NotePropertyName memorySaver -NotePropertyValue $true -Force
+  $temporaryState = "$statePath.memory-saver.tmp"
+  [IO.File]::WriteAllText($temporaryState, ($launcherState | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $temporaryState -Destination $statePath -Force
+  Write-RestartLog 'Memory saver enabled for the replacement launcher.'
 }
 
 Write-RestartLog 'Starting a fresh silent local-production launcher.'

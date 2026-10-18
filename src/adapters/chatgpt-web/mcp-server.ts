@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -11,6 +11,7 @@ import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerRetirementDiagnostics, type BrokerToolResult } from "./turn-broker";
 import { observeMcpToolCalls } from "./mcp-observation";
+import { assertPresentedImage } from "./final-images";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -41,6 +42,15 @@ const GATEWAY_AGENT_WAIT_TOOL_NAMES = new Set([
 ]);
 
 const turnTokenSchema = z.string().min(20).max(256);
+const imageOutputOptionsSchema = z.strictObject({
+  width: z.number().int().min(1).max(2048).optional(),
+  height: z.number().int().min(1).max(2048).optional(),
+  max_colors: z.number().int().min(2).max(256).optional(),
+  binary_alpha: z.boolean().optional(),
+}).refine(value => Object.keys(value).length > 0 && (value.width === undefined) === (value.height === undefined), {
+  message: "output_options must be nonempty; width and height must be supplied together",
+});
+type ImageOutputOptions = z.infer<typeof imageOutputOptionsSchema>;
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 // Match Codex's default wait interval while returning before the MCP invocation deadline.
 export const CHATGPT_WEB_AGENT_WAIT_POLL_MS = 30_000;
@@ -138,13 +148,48 @@ function assertImageOutputPath(environment: ChatGptTurnEnvironment, outputPath: 
   return resolve(outputPath);
 }
 
-async function generateImageThroughLauncher(
-  traceId: string,
-  prompt: string,
-  outputPath: string,
-  signal?: AbortSignal,
-  launcherDescriptorPath?: string,
-): Promise<Record<string, unknown>> {
+const REFERENCE_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+
+function assertImageReferencePaths(environment: ChatGptTurnEnvironment, paths: string[]): string[] {
+  const allowedRoots = [...environment.roots, ...environment.writableRoots];
+  const canonicalRoots = allowedRoots.flatMap(root => {
+    try { return [realpathSync(root)]; }
+    catch { return []; }
+  });
+  return paths.map(path => {
+    if (!isAbsolute(path) || !/\.(png|jpe?g|webp)$/i.test(path)) {
+      throw new Error("reference_image_paths must contain absolute PNG, JPEG, or WebP paths");
+    }
+    if (!allowedRoots.some(root => pathWithin(root, path))) {
+      throw new Error("Reference image is outside the current Codex workspace and writable roots");
+    }
+    const canonicalPath = realpathSync(path);
+    const contained = canonicalRoots.some(root => pathWithin(root, canonicalPath));
+    if (!contained) throw new Error("Reference image realpath is outside the authorized workspace roots");
+    const stat = statSync(canonicalPath);
+    if (!stat.isFile() || stat.size < 1 || stat.size > REFERENCE_IMAGE_MAX_BYTES) {
+      throw new Error(`Reference image must be a nonempty file of at most ${REFERENCE_IMAGE_MAX_BYTES} bytes`);
+    }
+    const bytes = readFileSync(canonicalPath);
+    const mimeType = localImageMimeType(path);
+    const validPng = mimeType === "image/png" && bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"));
+    const validJpeg = mimeType === "image/jpeg" && bytes.subarray(0, 3).equals(Buffer.from("ffd8ff", "hex"));
+    const validWebp = mimeType === "image/webp" && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";
+    if (!validPng && !validJpeg && !validWebp) throw new Error("Reference image content does not match its PNG, JPEG, or WebP type");
+    return canonicalPath;
+  });
+}
+
+async function generateImageThroughLauncher(input: {
+  traceId: string;
+  prompt: string;
+  outputPath: string;
+  signal?: AbortSignal;
+  launcherDescriptorPath?: string;
+  outputOptions?: ImageOutputOptions;
+  referenceImagePaths?: string[];
+}): Promise<Record<string, unknown>> {
+  const { traceId, prompt, outputPath, signal, launcherDescriptorPath, outputOptions, referenceImagePaths } = input;
   const descriptorPath = launcherDescriptorPath
     || process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim()
     || loadConfig().browserHostDescriptorPath;
@@ -162,7 +207,7 @@ async function generateImageThroughLauncher(
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ traceId, prompt, outputPath }),
+    body: JSON.stringify({ traceId, prompt, outputPath, ...(outputOptions ? { outputOptions } : {}), ...(referenceImagePaths ? { referenceImagePaths } : {}) }),
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   const body = await response.json().catch(() => ({})) as Record<string, unknown>;
@@ -174,6 +219,23 @@ async function generateImageThroughLauncher(
   if (body.ok !== true || body.path !== outputPath || body.mimeType !== "image/png"
     || !Number.isSafeInteger(body.bytes) || Number(body.bytes) < 1) {
     throw new Error("Launcher returned invalid image generation evidence");
+  }
+  if (referenceImagePaths && body.referenceCount !== referenceImagePaths.length) {
+    throw new Error("Launcher reference count does not match requested reference_image_paths");
+  }
+  if (outputOptions && (body.processed !== true
+    || body.sourcePath !== outputPath.replace(/\.png$/i, ".source.png")
+    || !Number.isSafeInteger(body.sourceWidth) || Number(body.sourceWidth) < 1
+    || !Number.isSafeInteger(body.sourceHeight) || Number(body.sourceHeight) < 1
+    || !Number.isSafeInteger(body.width) || Number(body.width) < 1
+    || !Number.isSafeInteger(body.height) || Number(body.height) < 1
+    || !Number.isSafeInteger(body.colorCount) || Number(body.colorCount) < 0
+    || typeof body.binaryAlpha !== "boolean"
+    || (outputOptions.width !== undefined && (body.width !== outputOptions.width || body.height !== outputOptions.height))
+    || (outputOptions.width === undefined && (body.width !== body.sourceWidth || body.height !== body.sourceHeight))
+    || (outputOptions.max_colors !== undefined && Number(body.colorCount) > outputOptions.max_colors)
+    || (outputOptions.binary_alpha === true && body.binaryAlpha !== true))) {
+    throw new Error("Launcher returned image output that does not satisfy output_options");
   }
   return body;
 }
@@ -287,7 +349,7 @@ function localImageMimeType(path: string): string | undefined {
 
 function readWorkspaceImage(environment: ChatGptTurnEnvironment, inputPath: string, detail?: string) {
   if (!isAbsolute(inputPath)) throw new Error("Image path must be absolute");
-  const path = resolve(inputPath);
+  const path = realpathSync(resolve(inputPath));
   // Images produced by this bridge are stored per Codex thread outside an individual project
   // workspace. They are still local, user-owned, and scoped below `.codex/generated_images`, so
   // allow the viewer to reuse a previously generated result without asking the user to attach it
@@ -300,7 +362,11 @@ function readWorkspaceImage(environment: ChatGptTurnEnvironment, inputPath: stri
     ...environment.writableRoots,
     ...(generatedImagesRoot ? [generatedImagesRoot] : []),
   ];
-  if (!allowedRoots.some(root => pathWithin(root, path))) {
+  const canonicalRoots = allowedRoots.flatMap(root => {
+    try { return [realpathSync(root)]; }
+    catch { return []; }
+  });
+  if (!canonicalRoots.some(root => pathWithin(root, path))) {
     throw new Error("Image path is outside the current Codex workspace and bridge-generated image store");
   }
   const mimeType = localImageMimeType(path);
@@ -985,7 +1051,23 @@ export async function runChatGptMcpServer(options: {
         // Avoid an outer native tool round-trip for a local workspace image. Current
         // desktop clients can leave that round-trip pending indefinitely; the MCP
         // response format can carry the verified image directly to ChatGPT.
-        return readWorkspaceImage(claimed.environment, path, detail);
+        const imageResult = readWorkspaceImage(claimed.environment, path, detail);
+        const content = imageResult.content[0]!;
+        if (content.mimeType === "image/gif") return imageResult;
+        const canonicalPath = realpathSync(path);
+        const presentable = [...claimed.environment.roots, ...claimed.environment.writableRoots].some(root => {
+          try { return pathWithin(realpathSync(root), canonicalPath); }
+          catch { return false; }
+        });
+        if (!presentable) return imageResult;
+        const image = { data: content.data, mimeType: content.mimeType, alt: "Image" };
+        assertPresentedImage(image);
+        const receipt = await callTurnBroker<{ image_ref: string }>(options.brokerSocketPath, { method: "present_image", bindingId: claimed.bindingId, image }, 5_000, extra.signal);
+        return {
+          ...imageResult,
+          content: [...imageResult.content, { type: "text" as const, text: `To include this exact image in the final answer, put ${receipt.image_ref} as plain text on its own line. Do not wrap it in Markdown, a URL, or a code block. The bridge replaces the marker with the original image bytes; do not copy Base64 or use a local file link.` }],
+          structuredContent: { ...imageResult.structuredContent, image_ref: receipt.image_ref },
+        };
       },
     ),
   );
@@ -1000,6 +1082,9 @@ export async function runChatGptMcpServer(options: {
         prompt: z.string().min(1).max(20_000),
         output_path: z.string().min(1).max(4_096)
           .describe("Absolute, new .png path inside the active Codex workspace or writable roots."),
+        output_options: imageOutputOptionsSchema.optional().describe("Optional final PNG processing: paired width/height, maximum visible RGB colors, binary alpha. Preserves original as *.source.png; does not change the generator's native resolution."),
+        reference_image_paths: z.array(z.string().min(1).max(4_096)).min(1).max(5).optional()
+          .describe("Attach 1–5 local PNG/JPEG/WebP reference images as pixels, each at most 20 MiB. Absolute paths must be inside authorized workspace or writable roots."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -1009,13 +1094,18 @@ export async function runChatGptMcpServer(options: {
       extra,
       async claimed => {
         const outputPath = assertImageOutputPath(claimed.environment, input.output_path);
-        const generated = await generateImageThroughLauncher(
-          `asset_${randomBytes(18).toString("base64url")}`,
-          input.prompt,
+        const referenceImagePaths = input.reference_image_paths === undefined
+          ? undefined
+          : assertImageReferencePaths(claimed.environment, input.reference_image_paths);
+        const generated = await generateImageThroughLauncher({
+          traceId: `asset_${randomBytes(18).toString("base64url")}`,
+          prompt: input.prompt,
           outputPath,
-          extra.signal,
-          claimed.environment.launcherBrowserHostDescriptorPath,
-        );
+          signal: extra.signal,
+          launcherDescriptorPath: claimed.environment.launcherBrowserHostDescriptorPath,
+          outputOptions: input.output_options,
+          referenceImagePaths,
+        });
         return result({
           generated: true,
           path: generated.path,
@@ -1024,6 +1114,16 @@ export async function runChatGptMcpServer(options: {
           height: generated.height,
           bytes: generated.bytes,
           parent_turn_active: true,
+          ...(referenceImagePaths ? { reference_count: generated.referenceCount } : {}),
+          ...(input.output_options ? {
+            processed: true,
+            output_options: input.output_options,
+            source_path: generated.sourcePath,
+            source_width: generated.sourceWidth,
+            source_height: generated.sourceHeight,
+            color_count: generated.colorCount,
+            binary_alpha: generated.binaryAlpha,
+          } : {}),
         });
       },
     ),

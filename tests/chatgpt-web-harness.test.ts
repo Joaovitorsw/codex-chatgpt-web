@@ -396,6 +396,63 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test("delivers a tool-read image as inline final Markdown and replays the same bytes", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-inline-image-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = { adapter: "chatgpt-web", baseUrl: "browser://inline-image-test", chatgptWeb: { ...toolCapabilities, brokerSocketPath: socketPath } };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const imagePath = join(tempRoot, `final-image-${Date.now()}.png`);
+    writeFileSync(imagePath, Buffer.from(png, "base64"));
+    let starts = 0;
+    worker.run = async turn => {
+      starts++;
+      const prepared = await turn.prepare();
+      const token = /turn_token (turn_[A-Za-z0-9_-]+)/.exec(prepared.text)![1]!;
+      const client = new Client({ name: "final-image-browser-fixture", version: "1" });
+      const transport = new StdioClientTransport({ command: process.execPath, args: ["src/cli.ts", "mcp", "--broker-socket", socketPath], cwd: process.cwd(), stderr: "pipe" });
+      try {
+        await client.connect(transport);
+        const viewed = await client.callTool({ name: "codex_view_image", arguments: { turn_token: token, path: imagePath } });
+        expect(viewed.isError).not.toBe(true);
+        const ref = (viewed.structuredContent as { image_ref: string }).image_ref;
+        const answer = `Original bytes:\n\n${ref}`;
+        turn.onTextDelta(answer);
+        return answer;
+      } finally {
+        await client.close();
+        await transport.close();
+      }
+    };
+    try {
+      const request = canonicalCurrentWireRequest(environmentXml);
+      const adapter = createChatGptWebAdapter(provider);
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      const response = buildResponseJSON(events, "chatgpt-web/test");
+      const finalText = events.flatMap(event => event.type === "text_delta" && event.phase === "final_answer" ? [event.text] : []).join("");
+      expect(finalText).toContain(`![Image](data:image/png;base64,${png})`);
+      expect(finalText).not.toContain("CODEXIMAGE:");
+      expect(finalText).not.toContain(imagePath);
+      expect(JSON.stringify(response.output)).not.toContain('"input_image"');
+      const replay: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => replay.push(event));
+      expect(starts).toBe(1);
+      expect(replay).toEqual(events);
+      const nextRound = structuredClone(request);
+      nextRound.context.messages.push({ role: "assistant", content: [{ type: "text", text: "Observer resumed" }], timestamp: 5 });
+      (nextRound._rawBody as { input: unknown[] }).input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: "Observer resumed" }] });
+      const resumed: AdapterEvent[] = [];
+      await adapter.runTurn!(nextRound, { headers: new Headers() }, event => resumed.push(event));
+      expect(resumed.some(event => event.type === "text_delta" && event.phase === "final_answer" && event.text.includes(`data:image/png;base64,${png}`))).toBe(true);
+      expect(starts).toBe(1);
+    } finally {
+      worker.run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+      rmSync(imagePath, { force: true });
+    }
+  }, 30_000);
+
   test("parsed native page context starts a tool-capable turn and preserves its environment for follow-up", async () => {
     const socketPath = brokerTestEndpoint(`cgw-open-page-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
@@ -2847,7 +2904,7 @@ describe("ChatGPT outer-native harness v4", () => {
       // ChatGPT caches the complete tools/list contract under a connector identity.
       // An intentional hash change therefore requires an explicit connector refresh or identity migration.
       expect(createHash("sha256").update(canonicalJson(publicConnectorAbi)).digest("hex"))
-        .toBe("a1a8472b488efe202caf8301ea2e5d03566a32ad205558733198d0e21a01d7ed");
+        .toBe("cf5cb6928a5fe569d5c620affe2089aaa54564fefce8d165ab3ee7eb9b45bf62");
       expect(listed.tools.find(tool => tool.name === "codex_tool_call")?.description)
         .toContain("reserved codex.control.compaction_handoff operation, which is not listed by inventory");
       for (const tool of listed.tools) {

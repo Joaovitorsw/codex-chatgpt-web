@@ -3,6 +3,77 @@ import { chromium, type Locator, type Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/chatgpt-web/markdown";
 import { readFileSync } from "node:fs";
+import { chatGptUserMessageMatches } from "../src/adapters/chatgpt-web/browser-user-message";
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("connector prompt matching preserves text and rejects foreign or ambiguous mentions", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  const prompt = "Create a Codex chat.\nKeep  two spaces.";
+  const mention = '<span data-prompt-link-href="app://fixture">Codex Native2</span>';
+  const rendered = prompt.replaceAll("\n", "<br>");
+  const scenarios = [
+    { body: rendered, matches: true },
+    { body: mention + "  " + rendered, matches: true },
+    { body: mention + "  " + rendered.replace("two spaces", "different text"), matches: false },
+    { body: mention + "  " + rendered.replace("Keep  ", "Keep "), matches: false },
+    { body: mention + "   " + rendered, matches: false },
+    { body: mention + "  " + rendered + " ", matches: false },
+    { body: mention.replace("Native2", "Native2 DEV") + "  " + rendered, matches: false },
+    { body: "Codex Native2  " + rendered, matches: false },
+    { body: "Another request." + mention + "  " + rendered, matches: false },
+    { body: mention + mention + "  " + rendered, matches: false },
+    { body: mention + "  " + rendered, connectorName: "Other app", matches: false },
+  ];
+  try {
+    const page = await browser.newPage();
+    for (const scenario of scenarios) {
+      await page.setContent(`<main><div data-user-message-bubble><div data-search-result-target style="white-space:pre-wrap">${scenario.body}</div><button>Show more</button></div></main>`);
+      expect(await page.locator("main").evaluate(chatGptUserMessageMatches, {
+        submittedText: prompt,
+        connectorName: scenario.connectorName ?? "Codex Native2",
+      })).toBe(scenario.matches);
+    }
+    await page.locator("main").evaluate(node => { node.appendChild(node.firstElementChild!.cloneNode(true)); });
+    expect(await page.locator("main").evaluate(chatGptUserMessageMatches, {
+      submittedText: prompt, connectorName: "Codex Native2",
+    })).toBeFalse();
+  } finally {
+    await browser.close();
+  }
+}, 15_000);
+
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("rebinds a tool response after its accepted prompt remounts with the connector mention", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
+  type Binding = { identity: string; locator: Locator; acceptedTurnIdentities: string[] };
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { appName: "Codex Native2" },
+  }) as {
+    captureSubmissionBaseline(page: Page, submittedText: string): Promise<unknown>;
+    waitForNewAssistantTurn(page: Page, baseline: unknown, deadline: number): Promise<Binding>;
+    reconcileAssistantTurnBinding(page: Page, baseline: unknown, binding: Binding): Promise<Binding>;
+  };
+  const prompt = "List the Codex chats.\nPreserve  two spaces.";
+  try {
+    const page = await browser.newPage();
+    await page.setContent("<main></main>");
+    const baseline = await worker.captureSubmissionBaseline(page, prompt);
+    await page.locator("main").evaluate(node => {
+      node.innerHTML = '<div data-turn-key="fallback-turn-0"><span hidden data-chatgpt-agent-turn-start></span></div>';
+    });
+    const binding = await worker.waitForNewAssistantTurn(page, baseline, Date.now() + 2000);
+    await page.locator("main").evaluate((node, text) => {
+      node.innerHTML = `<div data-turn-key="persisted"><div data-user-message-bubble>
+        <div data-search-result-target><div style="white-space:pre-wrap"><p><a href="/plugins/test"><span data-prompt-link-href="app://fixture" data-appearance="inline-mention"><span style="display:block">Codex Native2</span></span></a><span>  ${text.replaceAll("\n", "<br>")}</span></p></div></div>
+        <button>Show more</button></div><span hidden data-chatgpt-agent-turn-start></span>
+        <div data-conversation-role="assistant"></div><div data-markdown-text-style="assistant-message"><p>Chats listed.</p></div>
+        <div class="turn-action-controls"><button>Copy</button></div></div>`;
+    }, prompt);
+    const rebound = await worker.reconcileAssistantTurnBinding(page, baseline, binding);
+    expect(rebound.identity).toBe("group:assistant:persisted");
+    expect(await rebound.locator.innerText()).toContain("Chats listed.");
+  } finally {
+    await browser.close();
+  }
+}, 15_000);
 
 test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("CodeMirror language invalidates the response cache and incomplete code is not delivered", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });

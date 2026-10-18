@@ -10,6 +10,7 @@ import {
 } from "./environment";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
+import type { PresentedImage } from "./final-images";
 
 function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
@@ -37,7 +38,7 @@ function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
 }
 
 export type ChatGptBrowserOutcome =
-  | { type: "final"; answer: string; mediaUrls?: string[] }
+  | { type: "final"; answer: string; mediaUrls?: string[]; presentedImages?: PresentedImage[] }
   | { type: "error"; error: Error };
 
 export interface ChatGptTraceEvent {
@@ -168,6 +169,7 @@ interface ChatGptTurnRuntimeBase {
   text: ChatGptTextFeed;
   /** URLs captured from final first-party ChatGPT image cards. */
   finalMediaUrls?: string[];
+  loadFinalImages?: () => Promise<PresentedImage[]>;
   usageInput?: CodexParsedRequest;
   conversationKey?: string;
   releaseRetainedConversation?: () => Promise<void>;
@@ -332,7 +334,10 @@ export class ChatGptTurnSession {
       },
     );
     this.browserOutcome = runtime.browser
-      .then(answer => ({ type: "final", answer, mediaUrls: runtime.finalMediaUrls ?? [] }) as ChatGptBrowserOutcome)
+      .then(async answer => {
+        const images = await runtime.loadFinalImages?.();
+        return { type: "final", answer, mediaUrls: runtime.finalMediaUrls ?? [], ...(images?.length ? { presentedImages: images } : {}) } as ChatGptBrowserOutcome;
+      })
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
       .then(outcome => {
       this.settledBrowserOutcome = outcome;

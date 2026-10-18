@@ -8,6 +8,8 @@ import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 
 const output = process.argv[2];
 const bridgeHome = process.argv[3];
+const outputOptions = process.argv[4] ? JSON.parse(process.argv[4]) as unknown : undefined;
+const referenceImagePaths = process.argv[5] ? JSON.parse(process.argv[5]) as unknown : undefined;
 if (!output || !isAbsolute(output) || !output.endsWith(".png") || existsSync(output)) {
   throw new Error("Pass a new absolute .png output path inside the current workspace");
 }
@@ -35,7 +37,9 @@ try {
     name: "codex_generate_image_asset",
     arguments: {
       turn_token: token, output_path: output,
-      prompt: "Actually generate one PNG: a single young Black Brazilian man game sprite, short coiled hair, green hoodie, dark shorts, sneakers, full body idle pose in three-quarter side view. Retro pixel art with crisp square pixel clusters, limited palette, readable silhouette. Native 64x64 canvas if supported; otherwise preserve pixel style. Real transparent background with binary alpha only 0 or 255, opaque character. One frame, centered with clear padding, unclipped head and feet. No antialiasing, text, labels, floor, shadows, checkerboard, scenery, or additional characters.",
+      ...(outputOptions === undefined ? {} : { output_options: outputOptions }),
+      ...(referenceImagePaths === undefined ? {} : { reference_image_paths: referenceImagePaths }),
+      prompt: (referenceImagePaths ? "Use the attached original character image as the actual visual reference. Preserve his face, hair, skin tone, green hoodie, dark shorts, sneakers and body proportions. Draw this SAME character celebrating with one hand raised. " : "") + "Actually generate one PNG: a single young Black Brazilian man game sprite, short coiled hair, green hoodie, dark shorts, sneakers, full body in three-quarter side view. Retro pixel art with crisp square pixel clusters, limited palette, readable silhouette. Real transparent background with binary alpha only 0 or 255, opaque character. One frame, centered with clear padding, unclipped head and feet. No antialiasing, text, labels, floor, shadows, checkerboard, scenery, or additional characters.",
     },
   }, undefined, { timeout: 420_000 });
   const evidence = result.structuredContent;

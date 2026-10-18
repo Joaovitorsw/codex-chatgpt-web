@@ -1,10 +1,12 @@
 const { spawn } = require("node:child_process");
 const { randomBytes } = require("node:crypto");
 const { createInterface } = require("node:readline");
+const { normalizeImageReferencePaths } = require("./image-reference-files.cjs");
 
 const BROWSER_HELPER_OPERATION_TIMEOUT_MS = Object.freeze({
   inspect: 180_000,
   limits: 180_000,
+  image_references: 120_000,
   verify: 300_000,
   // Smoke includes page hydration, model/effort selection, submission and a complete
   // streamed answer. A single 90-second wall-clock deadline was shorter than the
@@ -55,17 +57,31 @@ async function stopChild(child) {
   }
 }
 
-async function runBrowserHelperOperation({ helper, descriptorPath, appName, operation, payload = {}, logger, useSavedChats = false }) {
+async function runBrowserHelperOperation({ helper, descriptorPath, appName, operation, payload = {}, logger, useSavedChats = false, signal }) {
   if (!helper || typeof helper.executable !== "string" || typeof helper.script !== "string") {
     throw new Error("Browser helper verification command is invalid");
   }
   if (typeof descriptorPath !== "string" || !descriptorPath || typeof appName !== "string" || !appName) {
     throw new Error("Browser helper verification config is invalid");
   }
-  if (!["verify", "inspect", "smoke", "limits"].includes(operation)) {
+  if (!Object.hasOwn(BROWSER_HELPER_OPERATION_TIMEOUT_MS, operation)) {
     throw new Error(`Unsupported browser helper operation: ${String(operation)}`);
   }
+  signal?.throwIfAborted();
+  if (operation === "image_references") {
+    if (typeof payload?.targetId !== "string" || !payload.targetId.trim()) {
+      throw new Error("Browser helper image reference target is invalid");
+    }
+    const referenceImagePaths = normalizeImageReferencePaths(payload.referenceImagePaths);
+    if (!referenceImagePaths) throw new Error("Browser helper image reference paths are required");
+    payload = { ...payload, referenceImagePaths };
+  }
   const id = `${operation}-${randomBytes(12).toString("hex")}`;
+  const abortError = () => {
+    const error = new Error(`Browser helper ${operation} aborted`, { cause: signal?.reason });
+    error.name = "AbortError";
+    return error;
+  };
   const child = spawn(helper.executable, [helper.script], {
     env: {
       ...process.env,
@@ -78,6 +94,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
   let completed = false;
   let sent = false;
   let timer;
+  let onAbort;
   const output = createInterface({ input: child.stdout });
   const errors = createInterface({ input: child.stderr });
   errors.on("line", (line) => logger?.info("browser.connector_helper", { message: line.slice(0, 2_000) }));
@@ -103,6 +120,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
       error instanceof Error ? error : new Error(String(error)),
     ));
     output.on("line", (line) => {
+      if (completed) return;
       let message;
       try { message = JSON.parse(line); }
       catch {
@@ -149,6 +167,9 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
       () => finish(new Error(`Browser helper ${operation} timed out`)),
       BROWSER_HELPER_OPERATION_TIMEOUT_MS[operation],
     );
+    onAbort = () => finish(abortError());
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 
   let value;
@@ -157,17 +178,20 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
     value = await result;
   } catch (error) {
     primaryError = error instanceof Error ? error : new Error(String(error));
-  }
-  try {
-    await stopChild(child);
-  } catch (cleanupError) {
-    const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-    if (primaryError) throw new Error(`${primaryError.message}; browser helper cleanup failed: ${cleanup}`);
-    throw cleanupError;
   } finally {
-    output.close();
-    errors.close();
+    try {
+      await stopChild(child);
+    } catch (cleanupError) {
+      const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      if (primaryError) throw new Error(`${primaryError.message}; browser helper cleanup failed: ${cleanup}`);
+      throw cleanupError;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+      output.close();
+      errors.close();
+    }
   }
+  if (signal?.aborted) primaryError = abortError();
   if (primaryError) {
     primaryError.operationId = id;
     throw primaryError;

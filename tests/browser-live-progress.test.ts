@@ -167,7 +167,7 @@ test.each(["accepted", "late-accepted", "cancelled", "press-failed"])("a blocked
   expect(submitted).toBe(outcome === "accepted" || outcome === "late-accepted");
 });
 
-test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("real Enter accepts MCP while the renderer is still busy handling the key", async () => {
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("real Send accepts MCP while the renderer is still busy handling the click", async () => {
   const progress = new ChatGptExternalTurnProgress();
   let calls = 0;
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
@@ -178,7 +178,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("real Enter accepts MCP while
     }
     return new Response('<form data-chatgpt-composer><div id="prompt-textarea" contenteditable="true">test</div>'
       + '<button type="submit">Send</button></form><script>'
-      + 'document.querySelector("button").onkeydown=event=>{if(event.key!=="Enter")return;event.preventDefault();'
+      + 'document.querySelector("button").onclick=event=>{event.preventDefault();'
       + 'fetch("/invoke",{method:"POST"});const end=performance.now()+2500;while(performance.now()<end){}}</script>',
       { headers: { "content-type": "text/html" } });
   } });

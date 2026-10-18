@@ -1126,6 +1126,20 @@ describe("trusted Codex task environment continuity", () => {
     return { codexHome, request, rolloutPath };
   }
 
+  for (const complete of [true, false]) test(`resumes past a large ${complete ? "complete" : "partial"} rollout record`, () => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const large = JSON.stringify({ type: "response_item", payload: { text: "x".repeat(17 * 1024 * 1024) } });
+    writeFileSync(rolloutPath, complete ? `${large}\n` : large.slice(0, -1), { flag: "a" });
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+  });
+
+  test("rejects malformed complete large rollout records", () => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    writeFileSync(rolloutPath, `{"text":"${"x".repeat(17 * 1024 * 1024)}"\n`, { flag: "a" });
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("invalid complete JSONL record");
+  });
+
   test("recovers an ordinary resumed task from its exact current rollout with an empty bridge cache", () => {
     const { codexHome, request } = resumedRootFixture();
     request.context.tools = [{ name: "current_tool", description: "current", parameters: { type: "object" } }];
@@ -1809,6 +1823,9 @@ describe("trusted Codex task environment continuity", () => {
     const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
     // Historical XML never supplies authority. Both root and child threads must use
     // their current native cwd even when a retained historical envelope differs (#812).
+    expect(store.resolve(request).cwd).toBe(root);
+    const largeRecord = { type: "response_item", payload: { text: "😀".repeat(5 * 1024 * 1024) } };
+    writeRollout([session, largeRecord, history, boundary, childTurnContext()]);
     expect(store.resolve(request).cwd).toBe(root);
     body.input[0] = { ...inherited, content: [{ type: "input_text", text: "<environment_context>changed</environment_context>" }] };
     expect(() => store.resolve(request)).toThrow("differs from its native Codex record");

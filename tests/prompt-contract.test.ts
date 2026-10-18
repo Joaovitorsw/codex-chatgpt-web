@@ -29,6 +29,16 @@ function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexP
   };
 }
 
+test("delivered inline images do not resend Base64 as assistant prose", () => {
+  const parsed = request("high");
+  const data = Buffer.from("existing image bytes").toString("base64");
+  parsed.context.messages.splice(1, 0, { role: "assistant", content: [{ type: "text", text: `Before ![Existing](data:image/png;base64,${data}) after` }], timestamp: 1 });
+  const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  expect(compiled.text).not.toContain(data);
+  expect(compiled.text).toContain("Existing");
+  expect(compiled.text).toContain("previously delivered image");
+});
+
 test("inline and staged history escape Markdown delimiters without changing decoded code", () => {
   const parsed = request("high");
   const code = '```ts\nconst value = "`key`";\n``` '.repeat(20) + '\\u0060 \\` [text](https://example.com) 中文';

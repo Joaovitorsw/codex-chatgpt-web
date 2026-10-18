@@ -196,7 +196,7 @@ function firstRolloutRecord(fd: number, size: number): Record<string, unknown> {
 
 function latestTurnContext(fd: number, size: number): Record<string, unknown> | undefined {
   let position = size;
-  let carry = Buffer.alloc(0);
+  let fragments: Buffer[] = [];
   let firstSegmentAtEof = true;
   const fileEndsWithNewline = (() => {
     if (size === 0) return false;
@@ -210,7 +210,13 @@ function latestTurnContext(fd: number, size: number): Record<string, unknown> | 
     const chunk = Buffer.alloc(length);
     const count = readSync(fd, chunk, 0, length, position);
     if (count !== length) throw new Error("Codex rollout changed during authority lookup");
-    const data = Buffer.concat([chunk, carry]);
+    // Image/tool records can exceed the metadata bound. Keep chunks separate until
+    // a delimiter is found, avoiding repeated copies of a growing JSON record.
+    if (!chunk.includes(0x0a)) {
+      fragments.push(chunk);
+      continue;
+    }
+    const data = Buffer.concat([chunk, ...fragments.reverse()]);
     let lineEnd = data.length;
     for (let index = data.length - 1; index >= 0; index -= 1) {
       if (data[index] !== 0x0a) continue;
@@ -219,17 +225,13 @@ function latestTurnContext(fd: number, size: number): Record<string, unknown> | 
       firstSegmentAtEof = false;
       lineEnd = index;
       if (trailingPartial || line.length === 0) continue;
-      if (line.length > MAX_ROLLOUT_JSON_LINE_BYTES) {
-        throw new Error("Codex rollout JSONL record exceeds the bounded record size");
-      }
       const item = parseJsonLine(line);
       if (item.type === "turn_context") return record(item.payload);
     }
-    carry = Buffer.from(data.subarray(0, lineEnd));
-    if (carry.length > MAX_ROLLOUT_JSON_LINE_BYTES) {
-      throw new Error("Codex rollout JSONL record exceeds the bounded record size");
-    }
+    fragments = lineEnd > 0 ? [Buffer.from(data.subarray(0, lineEnd))] : [];
   }
+  if (firstSegmentAtEof && !fileEndsWithNewline) return undefined;
+  const carry = Buffer.concat(fragments.reverse());
   if (carry.length === 0) return undefined;
   const item = parseJsonLine(carry);
   return item.type === "turn_context" ? record(item.payload) : undefined;
@@ -244,7 +246,7 @@ function verifyHistoricalEnvironmentMessages(
   const pending = new Map(messages.map(message => [message.id, message.content]));
   if (pending.size !== messages.length) throw new Error("Codex environment history repeats a message id");
   let position = 0;
-  let carry = Buffer.alloc(0);
+  let fragments: Buffer[] = [];
   while (position < size) {
     const length = Math.min(ROLLOUT_READ_CHUNK_BYTES, size - position);
     const chunk = Buffer.alloc(length);
@@ -252,13 +254,14 @@ function verifyHistoricalEnvironmentMessages(
       throw new Error("Codex rollout changed during environment history lookup");
     }
     position += length;
-    const data = Buffer.concat([carry, chunk]);
+    fragments.push(chunk);
+    if (!chunk.includes(0x0a)) continue;
+    const data = Buffer.concat(fragments);
     let start = 0;
     for (let end = data.indexOf(0x0a); end >= 0; end = data.indexOf(0x0a, start)) {
       const line = data.subarray(start, end);
       start = end + 1;
       if (!line.length) continue;
-      if (line.length > MAX_ROLLOUT_JSON_LINE_BYTES) throw new Error("Codex rollout JSONL record exceeds the bounded record size");
       const item = parseJsonLine(line);
       const payload = record(item.payload);
       // Core writes task_started before this turn's environment update. Merely finding matching
@@ -274,8 +277,7 @@ function verifyHistoricalEnvironmentMessages(
       }
       pending.delete(payload.id);
     }
-    carry = Buffer.from(data.subarray(start));
-    if (carry.length > MAX_ROLLOUT_JSON_LINE_BYTES) throw new Error("Codex rollout JSONL record exceeds the bounded record size");
+    fragments = start < data.length ? [Buffer.from(data.subarray(start))] : [];
   }
   throw new Error("Codex rollout has no current task boundary for environment history");
 }

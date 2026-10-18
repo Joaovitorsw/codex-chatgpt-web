@@ -9,6 +9,7 @@ import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
 import { isChatGptWebMultipartPartCount, validateChatGptInputFiles, type CompiledChatGptWebPrompt } from "./prompt";
 import { ChatGptMirroredTurnProgress } from "./turn-progress";
+import { uploadImageReferences } from "./image-reference-upload";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
 
 interface RunMessage {
@@ -67,7 +68,15 @@ interface LimitsMessage {
   config: VerifyMessage["config"];
 }
 
-type MaintenanceMessage = VerifyMessage | InspectMessage | SmokeMessage | LimitsMessage;
+interface ImageReferencesMessage {
+  type: "image_references";
+  id: string;
+  config: VerifyMessage["config"];
+  targetId: string;
+  referenceImagePaths: string[];
+}
+
+type MaintenanceMessage = VerifyMessage | InspectMessage | SmokeMessage | LimitsMessage | ImageReferencesMessage;
 type InputMessage = RunMessage
   | MaintenanceMessage
   | { type: "prepared_selected_ack"; id: string; prepared: CompiledChatGptWebPrompt }
@@ -381,11 +390,30 @@ function maintenanceWorker(message: MaintenanceMessage): ChatGptBrowserWorker {
   return ChatGptBrowserWorker.forProvider(provider);
 }
 
-async function maintain(message: InspectMessage | SmokeMessage | LimitsMessage): Promise<void> {
+async function maintain(message: InspectMessage | SmokeMessage | LimitsMessage | ImageReferencesMessage): Promise<void> {
+  if (typeof message.id !== "string" || !/^[A-Za-z0-9_-]{6,128}$/.test(message.id)) {
+    throw new Error("Browser helper maintenance identity is invalid");
+  }
   if (abortControllers.has(message.id)) throw new Error(`Browser helper maintenance operation already exists: ${message.id}`);
   const abortController = new AbortController();
   abortControllers.set(message.id, abortController);
   try {
+    if (message.type === "image_references") {
+      if (typeof message.config?.appName !== "string" || !message.config.appName.trim()
+        || message.config.appName.trim().length > 80
+        || typeof message.config.browserHostDescriptorPath !== "string" || !message.config.browserHostDescriptorPath.trim()) {
+        throw new Error("Browser helper maintenance config is invalid");
+      }
+      const value = await uploadImageReferences({
+        browserHostDescriptorPath: message.config.browserHostDescriptorPath,
+        targetId: message.targetId,
+        referenceImagePaths: message.referenceImagePaths,
+        signal: abortController.signal,
+      });
+      abortController.signal.throwIfAborted();
+      writeProtocol({ type: "result", id: message.id, value });
+      return;
+    }
     const worker = maintenanceWorker(message);
     const value = message.type === "inspect"
       ? await worker.inspectSession(message.detectCapabilities)
@@ -515,7 +543,7 @@ input.on("line", line => {
       id: message.id,
       message: error instanceof Error ? error.message : String(error),
     }));
-  } else if (message.type === "inspect" || message.type === "smoke" || message.type === "limits") {
+  } else if (message.type === "inspect" || message.type === "smoke" || message.type === "limits" || message.type === "image_references") {
     void maintain(message).catch(error => writeProtocol({
       type: "error",
       id: message.id,

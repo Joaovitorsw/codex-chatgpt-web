@@ -10,6 +10,7 @@ import {
 import type { ChatGptTurnEnvironment } from "./environment";
 import { chatGptToolTimeoutError } from "./adapter-error";
 import { subagentModelObservation } from "./mcp-observation";
+import { assertPresentedImage, presentedImageRef, type PresentedImage } from "./final-images";
 
 interface BrokerRetirementFailure {
   code: "codex_tool_timeout";
@@ -98,6 +99,7 @@ interface SafeTurnControl {
 }
 
 interface TurnChannel {
+  finalImages: PresentedImage[];
   traceId: string;
   externalOwner: boolean;
   environment: PendingTurn;
@@ -131,6 +133,8 @@ interface BrokerRequest {
     | "release"
     | "invoke"
     | "owner_status"
+    | "owner_final_images"
+    | "present_image"
     | "owner_register"
     | "owner_register_safe"
     | "owner_update"
@@ -168,6 +172,7 @@ interface BrokerRequest {
   finalAnswer?: string;
   contract?: "native" | "safe";
   failure?: BrokerRetirementFailure;
+  image?: PresentedImage;
 }
 
 interface BrokerResponse {
@@ -273,6 +278,7 @@ function assertSurfaceNonce(value: unknown): asserts value is string {
 }
 
 export interface TurnBrokerOwner {
+  finalImages(token: string): PresentedImage[] | Promise<PresentedImage[]>;
   register(environment: ChatGptTurnEnvironment, ttlMs?: number, traceId?: string): Promise<string>;
   registerSafe(
     environment: ChatGptTurnEnvironment,
@@ -359,6 +365,7 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     const token = opaqueId(handlePrefix);
     const channel: TurnChannel = {
+      finalImages: [],
       traceId,
       externalOwner,
       environment: {
@@ -443,6 +450,13 @@ export class TurnBroker implements TurnBrokerOwner {
         ? { expiresAt: channel.environment.expiresAt }
         : {}),
     };
+  }
+
+  finalImages(token: string): PresentedImage[] {
+    this.prune();
+    const channel = this.channels.get(token);
+    if (!channel) throw new Error("turn token is invalid or expired");
+    return structuredClone(channel.finalImages);
   }
 
   async nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> {
@@ -978,13 +992,17 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_final_images", "present_image", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
 
   private async dispatch(request: BrokerRequest, socketSignal?: AbortSignal): Promise<unknown> {
     this.prune();
+    if (request.method === "owner_final_images") {
+      if (!request.token) throw new Error("turn owner token is required");
+      return this.finalImages(request.token);
+    }
     if (request.method === "safe_start") {
       if (!request.token) throw new Error("Zero Risk request_id is required");
       return this.startSafeTurn(request.token);
@@ -1215,6 +1233,21 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     if (request.method === "resolve") return { environment: binding.channel.environment };
     this.assertSafeHarnessRunning(binding.channel);
+    if (request.method === "present_image") {
+      if (binding.channel.completionCommitted) throw new Error("Turn completion already committed");
+      assertPresentedImage(request.image);
+      const presented = request.image;
+      const images = binding.channel.finalImages;
+      const duplicate = images.some(image => image.data === presented.data && image.mimeType === presented.mimeType);
+      if (!duplicate) {
+        while (images.length >= 4 || images.reduce((total, image) => total + image.data.length, presented.data.length) > 32 * 1024 * 1024) {
+          images.shift();
+        }
+        images.push(structuredClone(presented));
+        binding.channel.activityRevision += 1;
+      }
+      return { image_ref: presentedImageRef(presented) };
+    }
     if (binding.channel.compactionRequested) {
       const result = binding.channel.compactionResult;
       if (!result) throw new Error("Codex context compaction control result is unavailable");
@@ -1431,6 +1464,13 @@ export async function callTurnBroker<T>(
  */
 export class RemoteTurnBroker implements TurnBrokerOwner {
   constructor(readonly socketPath: string) {}
+
+  async finalImages(token: string): Promise<PresentedImage[]> {
+    const images = await callTurnBroker<PresentedImage[]>(this.socketPath, { method: "owner_final_images", token });
+    if (!Array.isArray(images)) throw new Error("Invalid final image response");
+    for (const image of images) assertPresentedImage(image);
+    return images;
+  }
 
   async assertCompatible(): Promise<void> {
     let status: { protocolVersion?: unknown; acceptingExternalOwners?: unknown };

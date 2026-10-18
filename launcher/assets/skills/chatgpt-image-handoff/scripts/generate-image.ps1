@@ -1,7 +1,9 @@
 param(
   [Parameter(Mandatory = $true)][string]$Prompt,
   [Parameter(Mandatory = $true)][string]$OutputPath,
-  [string]$TraceId = "asset_$([Guid]::NewGuid().ToString('N'))"
+  [string]$TraceId = "asset_$([Guid]::NewGuid().ToString('N'))",
+  [hashtable]$OutputOptions,
+  [string[]]$ReferenceImagePaths
 )
 $ErrorActionPreference = 'Stop'
 if (-not [IO.Path]::IsPathRooted($OutputPath) -or [IO.Path]::GetExtension($OutputPath) -ne '.png') { throw 'OutputPath must be an absolute new .png path.' }
@@ -13,8 +15,20 @@ $descriptor = Get-Content -Raw -LiteralPath $descriptorPath | ConvertFrom-Json
 $endpoint = [string]$descriptor.control.endpoint; $token = [string]$descriptor.control.token
 if ([string]::IsNullOrWhiteSpace($endpoint) -or [string]::IsNullOrWhiteSpace($token)) { throw 'The launcher descriptor has no authenticated image-generation control channel.' }
 $parent = Split-Path -Parent $OutputPath; if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
-$headers = @{ Authorization = "Bearer $token" }; $body = @{ traceId = $TraceId; prompt = $Prompt; outputPath = $OutputPath } | ConvertTo-Json -Compress
+$headers = @{ Authorization = "Bearer $token" }; $payload = @{ traceId = $TraceId; prompt = $Prompt; outputPath = $OutputPath }
+if ($PSBoundParameters.ContainsKey('OutputOptions')) { $payload.outputOptions = $OutputOptions }
+if ($PSBoundParameters.ContainsKey('ReferenceImagePaths')) { $payload.referenceImagePaths = $ReferenceImagePaths }
+$body = $payload | ConvertTo-Json -Compress
 $result = Invoke-RestMethod -Method Post -Uri "$endpoint/v1/image/generate" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 360
+if ($PSBoundParameters.ContainsKey('ReferenceImagePaths') -and $result.referenceCount -ne @($ReferenceImagePaths).Count) { throw 'The launcher did not confirm the requested image references. Its runtime may need updating.' }
 if ($result.ok -ne $true -or -not (Test-Path -LiteralPath $OutputPath)) { throw 'ChatGPT Web did not return a verified local PNG.' }
 $file = Get-Item -LiteralPath $OutputPath; if ($file.Length -lt 1) { throw 'The generated PNG is empty.' }
-[pscustomobject]@{ ok = $true; path = $file.FullName; bytes = $file.Length; width = $result.width; height = $result.height; mimeType = $result.mimeType } | ConvertTo-Json -Compress
+$evidence = @{ ok = $true; path = $file.FullName; bytes = $file.Length; width = $result.width; height = $result.height; mimeType = $result.mimeType }
+if ($PSBoundParameters.ContainsKey('ReferenceImagePaths')) { $evidence.referenceCount = $result.referenceCount }
+if ($result.processed -eq $true) {
+  $evidence.processed = $true; $evidence.sourcePath = $result.sourcePath
+  $evidence.sourceWidth = $result.sourceWidth; $evidence.sourceHeight = $result.sourceHeight
+  $evidence.colorCount = $result.colorCount; $evidence.binaryAlpha = $result.binaryAlpha
+  $evidence.outputOptions = $result.outputOptions
+}
+[pscustomobject]$evidence | ConvertTo-Json -Compress

@@ -1,5 +1,4 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
@@ -22,6 +21,7 @@ import {
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
+import { materializeFinalImages, type PresentedImage } from "./final-images";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
@@ -307,65 +307,10 @@ function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (
   emit({ type: "done", stopReason: "tool_use", endTurn: false, usage });
 }
 
-function existingThreadImageFallback(
-  parsed: CodexParsedRequest,
-  answer: string,
-  observedTurnText = answer,
-): string | undefined {
-  // Only recover an asset when ChatGPT explicitly emitted its image marker and the same native
-  // thread has exactly one already-generated local image. This is intentionally not a filesystem
-  // search: it cannot surface an unrelated asset from a different project or conversation.
-  // The image marker is sometimes exposed by ChatGPT as live commentary while the concise
-  // final answer contains only confirmation text.  Both sources belong to the same completed
-  // browser turn; inspecting both keeps the recovery scoped without guessing from user prose.
-  if (!/^!\s*imagem\b/im.test(observedTurnText)) return undefined;
-  const threadId = extractChatGptTurnIdentity(parsed).threadId;
-  const home = process.env.USERPROFILE?.trim();
-  if (!threadId || !home) return undefined;
-  const root = join(home, ".codex", "generated_images", threadId);
-  try {
-    const images = readdirSync(root)
-      .filter(name => /\.(?:png|jpe?g|webp|gif)$/i.test(name))
-      .map(name => join(root, name))
-      .filter(path => statSync(path).isFile())
-      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
-    return images.length === 1 ? images[0] : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * A Windows path in Markdown can render on the desktop host yet is unreachable from a mobile
- * Codex client.  Encode only the already-verified, thread-scoped local fallback so the bridge
- * transports the same image to every client without starting a server or fetching remote media.
- */
-function localImageBase64(path: string): string | undefined {
-  try {
-    const extension = path.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
-    const mime = extension === "jpg" || extension === "jpeg"
-      ? "image/jpeg"
-      : extension === "webp"
-        ? "image/webp"
-        : extension === "gif"
-          ? "image/gif"
-          : extension === "png"
-            ? "image/png"
-            : undefined;
-    if (!mime) return undefined;
-    // Keep the MIME validation above even though Responses image-generation output carries raw
-    // Base64. It prevents a renamed non-image file from crossing the bridge as visual media.
-    return readFileSync(path).toString("base64");
-  } catch {
-    return undefined;
-  }
-}
-
 function emitBrowserCompletion(
   outcome: ChatGptBrowserOutcome,
   usage: CodexUsage,
   emit: (event: AdapterEvent) => void,
-  existingLocalImage?: string,
 ): void {
   if (outcome.type === "error") throw outcome.error;
   // Preserve first-party media as a structured response event rather than leaving Codex to
@@ -389,16 +334,6 @@ function emitBrowserCompletion(
         emit({ type: "text_delta", text: `\n\n![${label}](${url})\n`, phase: "final_answer" });
       }
     } catch { /* untrusted Markdown URL: keep it as text only */ }
-  }
-  if (existingLocalImage) {
-    const result = localImageBase64(existingLocalImage);
-    if (result) {
-      // A generated-image output item is persisted by Codex but is not rendered by every native
-      // client when it originates from a routed provider.  Return the same verified bytes through
-      // the structured image-message channel used for native tool image results instead.  This is
-      // intentionally a data URL: a Windows file URL cannot reach the mobile Codex client.
-      emit({ type: "image_url", url: `data:image/png;base64,${result}`, alt: "Imagem já existente neste chat", phase: "final_answer" });
-    }
   }
   emit({ type: "done", stopReason: "stop", endTurn: true, usage });
 }
@@ -890,6 +825,7 @@ export function createChatGptWebAdapter(
       return {
         mode: "tools",
         token: token.promise,
+        loadFinalImages: async () => broker.finalImages(await token.promise),
         externalProgress,
         browser: browserTurn.browser,
         physicalSettlement: browserTurn.physicalSettlement,
@@ -1026,6 +962,7 @@ export function createChatGptWebAdapter(
     return {
       mode: "tools",
       token: token.promise,
+      loadFinalImages: async () => broker.finalImages(await token.promise),
       externalProgress,
       browser: browserTurn.browser,
       physicalSettlement: browserTurn.physicalSettlement,
@@ -1381,7 +1318,6 @@ export function createChatGptWebAdapter(
               { type: "final", answer: summary },
               estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
               emit,
-              existingThreadImageFallback(parsed, summary),
             );
             chatGptWebTurnRetryPolicy.clear(retryKey);
             return;
@@ -1440,8 +1376,8 @@ export function createChatGptWebAdapter(
               ))
               .map(event => event.text)
               .join("");
-            const emitFinalText = (deltas: string[]): void => {
-              const visible = deltas.filter(delta => delta.length > 0);
+            const emitFinalText = (deltas: string[], images: PresentedImage[] = []): void => {
+              const visible = deltas.filter(delta => delta.length > 0).map(delta => materializeFinalImages(delta, images));
               if (visible.length === 0 || bufferStructuredOutput) return;
               const authoritative = visible.join("");
               // A reconnect can replay an already journaled final item. Suppress only an exact
@@ -1494,7 +1430,7 @@ export function createChatGptWebAdapter(
                 // before ChatGPT starts an MCP call or resumes thinking. Keep those bytes in the
                 // canonical text feed, but publish a final Codex item only after the browser outcome
                 // and completion fence prove the turn has actually ended.
-                emitFinalText([settled.answer]);
+                emitFinalText([settled.answer], settled.presentedImages);
               }
               if (session.runtime.text.value() !== settled.answer) {
                 throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
@@ -1510,7 +1446,6 @@ export function createChatGptWebAdapter(
                 settled,
                 estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
                 buffer,
-                existingThreadImageFallback(parsed, settled.answer, [...trace.map(event => event.text), settled.answer].join("\n")),
               ));
               session.completeRound(roundKey);
               chatGptWebTurnRetryPolicy.clear(retryKey);
@@ -1626,7 +1561,6 @@ export function createChatGptWebAdapter(
                 emitNewTrace(session.runtime.trace.drain());
                 publishPendingTextAsCommentary();
                 session.setFinalReasoning(roundReasoning);
-                session.setFinalEvents(session.roundEvents(roundKey));
                 if (turnToken) await broker.revoke(turnToken);
                 if (completedOutcome.type === "error") throw completedOutcome.error;
                 if (session.runtime.text.value() !== completedOutcome.answer) {
@@ -1636,13 +1570,13 @@ export function createChatGptWebAdapter(
                 if (bufferStructuredOutput) {
                   emitRoundBatch(buffer => emitTextDeltas([completedOutcome.answer], buffer));
                 } else {
-                  emitFinalText([completedOutcome.answer]);
+                  emitFinalText([completedOutcome.answer], completedOutcome.presentedImages);
                 }
+                session.setFinalEvents(session.roundEvents(roundKey));
                 emitRoundBatch(buffer => emitBrowserCompletion(
                   completedOutcome,
                   estimateChatGptWebUsage(currentUsageInput(parsed), { answer: completedOutcome.answer, reasoning: roundReasoning }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
                   buffer,
-                  existingThreadImageFallback(parsed, completedOutcome.answer, [...roundReasoning, completedOutcome.answer].join("\n")),
                 ));
                 session.completeRound(roundKey);
                 chatGptWebTurnRetryPolicy.clear(retryKey);

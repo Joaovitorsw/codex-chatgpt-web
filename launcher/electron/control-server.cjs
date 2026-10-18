@@ -1,6 +1,8 @@
 const { createServer } = require("node:http");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
+const { normalizeImageOutputOptions } = require("./image-output.cjs");
+const { normalizeImageReferencePaths } = require("./image-reference-files.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_MANUAL_START_BODY_BYTES = 3 * 1024 * 1024;
@@ -121,7 +123,7 @@ class BrowserControlServer {
     try {
       const body = await readJson(
         request,
-        manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : MAX_BODY_BYTES,
+        manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : isImageGeneration ? 64 * 1024 : MAX_BODY_BYTES,
       );
       if (isProxyResolution) {
         const url = new URL(body?.url);
@@ -152,6 +154,8 @@ class BrowserControlServer {
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
       if (isImageGeneration) {
+        const outputOptions = normalizeImageOutputOptions(body?.outputOptions);
+        const referenceImagePaths = normalizeImageReferencePaths(body?.referenceImagePaths);
         if (!body || typeof body !== "object" || !/^[A-Za-z0-9_-]{6,128}$/.test(body.traceId || "")) {
           throw new Error("image generation traceId is invalid");
         }
@@ -173,6 +177,8 @@ class BrowserControlServer {
             prompt: body.prompt,
             outputPath: body.outputPath,
             signal: generation.signal,
+            ...(outputOptions ? { outputOptions } : {}),
+            ...(referenceImagePaths ? { referenceImagePaths } : {}),
           });
         } finally {
           response.off("close", onClose);

@@ -3,6 +3,8 @@ const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
 const { clipboard, WebContentsView, nativeImage, nativeTheme, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { imageOutputDestination, saveImageOutput } = require("./image-output-files.cjs");
+const { normalizeImageReferencePaths } = require("./image-reference-files.cjs");
 const {
   runBrowserHelperOperation,
   verifyConnectorWithBrowserHelper,
@@ -120,13 +122,10 @@ const IMAGE_GENERATION_SEND_SELECTOR = [
   'button[aria-label="Enviar mensagem"]',
 ].join(", ");
 const IMAGE_GENERATION_RESULT_SELECTOR = [
+  '[data-testid="generated-image-preview"] img',
+  '[data-testid="generated-image-gallery"] img',
   '[data-message-author-role="assistant"] img',
   '[data-turn="assistant"] img',
-  '[data-testid^="conversation-turn-"] img',
-  '[data-testid*="image" i] img',
-  'main img[src^="blob:"]',
-  'main img[src*="/backend-api/files/"]',
-  'main img[src*="oaidalleapiprodscus"]',
 ].join(", ");
 const IMAGE_GENERATION_TIMEOUT_MS = 5 * 60 * 1000;
 const IMAGE_GENERATION_POLL_MS = 1_000;
@@ -846,7 +845,7 @@ class BrowserHost {
     return tab;
   }
 
-  async generateImageAsset({ traceId, prompt, outputPath, signal }) {
+  async generateImageAsset({ traceId, prompt, outputPath, signal, outputOptions, referenceImagePaths }) {
     requireAutomaticBrowserInspection(this, "ChatGPT image generation");
     if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 20_000) {
       throw new Error("Image generation prompt is invalid");
@@ -857,6 +856,8 @@ class BrowserHost {
     if (!/^[A-Za-z0-9_-]{6,128}$/.test(traceId || "")) {
       throw new Error("Image generation trace id is invalid");
     }
+    const { options } = imageOutputDestination(outputPath, outputOptions);
+    const references = normalizeImageReferencePaths(referenceImagePaths);
 
     await this.ready();
     signal?.throwIfAborted();
@@ -948,6 +949,27 @@ class BrowserHost {
       })()`, true);
       if (!inserted) throw new Error("ChatGPT image prompt was not preserved in the composer");
 
+      if (references) {
+        this.writeDescriptor();
+        const heartbeat = setInterval(() => { tab.lastHeartbeatAt = Date.now(); }, 5_000);
+        let result;
+        try {
+          result = await this.runBrowserHelperOperation({
+            helper: this.helper, descriptorPath: this.descriptorPath,
+            appName: this.connectorName(), operation: "image_references",
+            payload: { targetId: contents.getOrCreateDevToolsTargetId(), referenceImagePaths: references }, logger: this.logger,
+            signal,
+          });
+        } finally { clearInterval(heartbeat); }
+        signal?.throwIfAborted();
+        if (result?.value?.referenceCount !== references.length) {
+          throw new Error("ChatGPT did not confirm all image references; prompt was not sent");
+        }
+        const uploadedSources = await contents.executeJavaScript(`Array.from(document.images)
+          .map(image => image.currentSrc || image.src).filter(Boolean)`, true);
+        baselineSources.push(...uploadedSources);
+      }
+
       const userTurnsBeforeSend = await contents.executeJavaScript(`document.querySelectorAll(
         '[data-message-author-role="user"], [data-turn="user"], [data-user-message-bubble]'
       ).length`, true);
@@ -1006,6 +1028,8 @@ class BrowserHost {
         generated = await contents.executeJavaScript(`(() => {
           const candidates = Array.from(document.querySelectorAll(
             ${javaScriptLiteral(IMAGE_GENERATION_RESULT_SELECTOR)}
+          )).filter(image => !image.closest(
+            '[data-message-author-role="user"], [data-turn="user"], [data-user-message-bubble], form, [data-composer-attachments]'
           )).map(image => ({
             src: image.currentSrc || image.src || '',
             width: image.naturalWidth || 0,
@@ -1056,16 +1080,11 @@ class BrowserHost {
       }
       const decoded = nativeImage.createFromBuffer(bytes);
       if (decoded.isEmpty()) throw new Error("ChatGPT generated image could not be decoded");
-      const png = decoded.toPNG();
-      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-      fs.writeFileSync(outputPath, png, { flag: "wx" });
-      return {
-        path: outputPath,
-        mimeType: "image/png",
-        width: decoded.getSize().width,
-        height: decoded.getSize().height,
-        bytes: png.length,
-      };
+      const output = saveImageOutput({
+        png: decoded.toPNG(), outputPath, outputOptions: options,
+        sourceWidth: decoded.getSize().width, sourceHeight: decoded.getSize().height,
+      });
+      return { ...output, ...(references ? { referenceCount: references.length } : {}) };
     } finally {
       if (this.turnTabs.get(tab.id) === tab) this.removeTurnTab(tab, true);
       this.selectedTabId = this.turnTabs.has(previousSelectedTabId) ? previousSelectedTabId : "home";

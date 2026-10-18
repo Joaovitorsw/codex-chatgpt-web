@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { selectedSkillFile, skillFileTokens, type ChatGptSkillFile } from "./skill-attachments";
+import { summarizeDeliveredImages } from "./final-images";
 import {
   CHATGPT_WEB_GPT6_INSTANT_BIGGER_CONTEXT_ERROR,
   chatGptWebImageTokenReserve,
@@ -422,7 +423,7 @@ export function countChatGptContextImages(messages: readonly CodexMessage[]): nu
 
 function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
   return content.map(part => {
-    if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "text") return { type: "text", text: summarizeDeliveredImages(part.text) };
     if (part.type === "thinking") return { type: "thinking_summary", text: part.thinking };
     return {
       type: "tool_call",

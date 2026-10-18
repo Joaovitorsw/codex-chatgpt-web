@@ -3,6 +3,66 @@ const assert = require("node:assert/strict");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
 
+test("image references are validated and forwarded as files before browser work", async t => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-control-reference-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const reference = path.join(root, "original.png");
+  fs.writeFileSync(reference, Buffer.from("89504e470d0a1a0a00000000", "hex"));
+  const calls = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} }, getPreferences: () => ({}),
+    getBrowserHost: () => ({ generateImageAsset: async input => {
+      calls.push(input); return { path: input.outputPath, referenceCount: input.referenceImagePaths?.length };
+    } }),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = referenceImagePaths => fetch(`${endpoint}/v1/image/generate`, {
+    method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ traceId: "reference_test", prompt: "same character", outputPath: path.join(root, "next.png"), referenceImagePaths }),
+  });
+  try {
+    for (const invalid of [[], ["relative.png"], [path.join(root, "missing.png")], [reference, reference]]) {
+      assert.equal((await send(invalid)).status, 400);
+      assert.equal(calls.length, 0);
+    }
+    const response = await send([reference]);
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls[0].referenceImagePaths, [fs.realpathSync(reference)]);
+    assert.equal((await response.json()).referenceCount, 1);
+    assert.equal((await send(undefined)).status, 200);
+    assert.equal(calls[1].referenceImagePaths, undefined);
+  } finally { await server.close(); }
+});
+
+test("image generation validates and forwards final output options before invoking the host", async () => {
+  const calls = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => ({ generateImageAsset: async input => { calls.push(input); return { path: input.outputPath }; } }),
+    getPreferences: () => ({}),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = body => fetch(`${endpoint}/v1/image/generate`, {
+    method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ traceId: "output_test_32", prompt: "test icon", outputPath: "/tmp/icon.png", ...body }),
+  });
+  try {
+    for (const outputOptions of [null, {}, { width: 32 }, { height: 32 }, { width: -1, height: 32 }, { max_colors: 257 }, { binary_alpha: "yes" }, { extra: true }]) {
+      const response = await send({ outputOptions });
+      assert.equal(response.status, 400);
+      assert.equal(calls.length, 0);
+    }
+    const outputOptions = { width: 32, height: 32, max_colors: 16, binary_alpha: true };
+    assert.equal((await send({ outputOptions })).status, 200);
+    assert.deepEqual(calls[0].outputOptions, outputOptions);
+    assert.equal((await send({})).status, 200);
+    assert.equal(calls[1].outputOptions, undefined);
+  } finally { await server.close(); }
+});
+
 test("live task progress is owner-bound, preserves elapsed time, and clears on release", async () => {
   const tab = { id: "task-one", traceId: "trace-one", helperPid: process.pid, status: "running", interactionMode: "automatic" };
   const other = { ...tab, id: "task-two", traceId: "trace-two", helperPid: process.pid + 1 };

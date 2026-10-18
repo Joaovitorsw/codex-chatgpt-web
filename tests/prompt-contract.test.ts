@@ -29,10 +29,18 @@ function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexP
   };
 }
 
-test("delivered inline images do not resend Base64 as assistant prose", () => {
+test("local GIF delivery requires the viewer receipt instead of a file link or static conversion", () => {
+  const compiled = compileChatGptWebPrompt(request("high"), { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true }, "turn_12345678901234567890123456789012");
+  expect(compiled.text).toContain("animated GIF");
+  expect(compiled.text).toContain("image_ref");
+  expect(compiled.text).toContain("plain text on its own line");
+  expect(compiled.text).toContain("Do not flatten");
+});
+
+test.each(["png", "gif"])("delivered inline %s images do not resend Base64 as assistant prose", format => {
   const parsed = request("high");
   const data = Buffer.from("existing image bytes").toString("base64");
-  parsed.context.messages.splice(1, 0, { role: "assistant", content: [{ type: "text", text: `Before ![Existing](data:image/png;base64,${data}) after` }], timestamp: 1 });
+  parsed.context.messages.splice(1, 0, { role: "assistant", content: [{ type: "text", text: `Before ![Existing](data:image/${format};base64,${data}) after` }], timestamp: 1 });
   const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true });
   expect(compiled.text).not.toContain(data);
   expect(compiled.text).toContain("Existing");

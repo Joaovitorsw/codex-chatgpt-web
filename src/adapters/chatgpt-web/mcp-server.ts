@@ -1053,7 +1053,6 @@ export async function runChatGptMcpServer(options: {
         // response format can carry the verified image directly to ChatGPT.
         const imageResult = readWorkspaceImage(claimed.environment, path, detail);
         const content = imageResult.content[0]!;
-        if (content.mimeType === "image/gif") return imageResult;
         const canonicalPath = realpathSync(path);
         const presentable = [...claimed.environment.roots, ...claimed.environment.writableRoots].some(root => {
           try { return pathWithin(realpathSync(root), canonicalPath); }
@@ -1063,10 +1062,14 @@ export async function runChatGptMcpServer(options: {
         const image = { data: content.data, mimeType: content.mimeType, alt: "Image" };
         assertPresentedImage(image);
         const receipt = await callTurnBroker<{ image_ref: string }>(options.brokerSocketPath, { method: "present_image", bindingId: claimed.bindingId, image }, 5_000, extra.signal);
+        const structuredContent = { ...imageResult.structuredContent, image_ref: receipt.image_ref };
         return {
           ...imageResult,
-          content: [...imageResult.content, { type: "text" as const, text: `To include this exact image in the final answer, put ${receipt.image_ref} as plain text on its own line. Do not wrap it in Markdown, a URL, or a code block. The bridge replaces the marker with the original image bytes; do not copy Base64 or use a local file link.` }],
-          structuredContent: { ...imageResult.structuredContent, image_ref: receipt.image_ref },
+          content: [
+            ...(content.mimeType === "image/gif" ? [{ type: "text" as const, text: JSON.stringify(structuredContent) }] : imageResult.content),
+            { type: "text" as const, text: `To include this exact image in the final answer, put ${receipt.image_ref} as plain text on its own line. Do not wrap it in Markdown, a URL, or a code block. The bridge replaces the marker with the original image bytes; do not copy Base64 or use a local file link.${content.mimeType === "image/gif" ? " The original GIF is registered for final delivery, preserving its frames and timing. This tool returns a text receipt instead of a GIF image preview for connector compatibility; that is successful registration, not missing output. Do not flatten, resize, or transcode the GIF merely to display it." : ""}` },
+          ],
+          structuredContent,
         };
       },
     ),

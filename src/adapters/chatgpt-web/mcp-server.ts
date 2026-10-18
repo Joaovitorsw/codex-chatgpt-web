@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
+import { loadConfig } from "../../config";
 import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
@@ -142,8 +143,11 @@ async function generateImageThroughLauncher(
   prompt: string,
   outputPath: string,
   signal?: AbortSignal,
+  launcherDescriptorPath?: string,
 ): Promise<Record<string, unknown>> {
-  const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
+  const descriptorPath = launcherDescriptorPath
+    || process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim()
+    || loadConfig().browserHostDescriptorPath;
   if (!descriptorPath) throw new Error("The launcher browser descriptor is unavailable for image generation");
   const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8")) as {
     control?: { endpoint?: string; token?: string };
@@ -1010,6 +1014,7 @@ export async function runChatGptMcpServer(options: {
           input.prompt,
           outputPath,
           extra.signal,
+          claimed.environment.launcherBrowserHostDescriptorPath,
         );
         return result({
           generated: true,

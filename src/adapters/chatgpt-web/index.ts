@@ -600,6 +600,9 @@ export function createChatGptWebAdapter(
     turnCapabilities: ChatGptWebCapabilities,
     hooks: { onCompactionProgress?: () => void } = {},
   ): ChatGptTurnRuntime => {
+    if (environment && retainedLauncherDescriptor) {
+      environment = { ...environment, launcherBrowserHostDescriptorPath: retainedLauncherDescriptor };
+    }
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
       throw new Error(

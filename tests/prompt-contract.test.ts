@@ -70,6 +70,17 @@ test("history handle cleanup works on decoded text and preserves native call ide
   expect(cleaned.literal).toBe(context.literal);
 });
 
+test("Web prompts prioritize authenticated image handoff without changing read-only routing", () => {
+  const parsed = request("high");
+  parsed.context.tools = [{ name: "codex_generate_image_asset", description: "Generate an image", parameters: { type: "object" } }];
+  const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const web = compileChatGptWebPrompt(parsed, capabilities, "turn_12345678901234567890123456789012");
+  expect(web.text).toContain("For raster generation in this Web-backed turn, use the chatgpt-image-handoff skill first");
+  expect(web.text).toContain("A tunnel/MCP HTTP 429 is a transport failure, not evidence of an image-generation quota");
+  const readOnly = compileChatGptWebPrompt(parsed, { ...capabilities, localToolsEnabled: false });
+  expect(readOnly.text).not.toContain("use the chatgpt-image-handoff skill first");
+});
+
 test("Full-mode Pro prompts pass one stable turn token directly to native actions", () => {
   const token = "turn_12345678901234567890123456789012";
   const parsed = request("max");

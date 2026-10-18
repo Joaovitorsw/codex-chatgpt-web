@@ -15,6 +15,7 @@ export interface ChatGptTurnEnvironment {
   writableRoots: string[];
   sandboxPolicy: ChatGptSandboxPolicy;
   tools: CodexTool[];
+  launcherBrowserHostDescriptorPath?: string;
 }
 
 export interface ChatGptTurnIdentity {

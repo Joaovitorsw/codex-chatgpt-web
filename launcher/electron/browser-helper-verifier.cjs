@@ -61,7 +61,8 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
   if (!helper || typeof helper.executable !== "string" || typeof helper.script !== "string") {
     throw new Error("Browser helper verification command is invalid");
   }
-  if (typeof descriptorPath !== "string" || !descriptorPath || typeof appName !== "string" || !appName) {
+  if (typeof descriptorPath !== "string" || !descriptorPath || typeof appName !== "string" || !appName
+    || typeof useSavedChats !== "boolean") {
     throw new Error("Browser helper verification config is invalid");
   }
   if (!Object.hasOwn(BROWSER_HELPER_OPERATION_TIMEOUT_MS, operation)) {
@@ -137,7 +138,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
           ...payload,
           type: operation,
           id,
-          config: { appName, browserHostDescriptorPath: descriptorPath, useSavedChats: useSavedChats === true },
+          config: { appName, browserHostDescriptorPath: descriptorPath, useSavedChats },
         }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
         return;
       }

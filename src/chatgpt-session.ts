@@ -130,7 +130,10 @@ export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
 export function parseChatGptModelAnnouncement(text: string): {
   version: string; name?: string; mode: string;
 } | undefined {
-  const normalized = text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
+  // The active header can concatenate separate model and effort labels:
+  // "5.6 Sol" + "5.6 Pro". Only collapse an identical repeated version.
+  const normalized = text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim()
+    .replace(/^((?:GPT[-\s]?)?(\d+(?:\.\d+)?)\s+(?:Sol|Astra))\s+(?:GPT[-\s]?)?\2\s+/i, "$1 ");
   const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^\p{P}]+)(?:\p{P}|$)/iu.exec(normalized);
   if (!match) return undefined;
   return { version: match[1]!, ...(match[2] ? { name: match[2].toLowerCase() } : {}), mode: match[3]!.trim() };
@@ -183,11 +186,18 @@ export const CHATGPT_USER_TURN_SELECTOR = [
 ].join(", ");
 
 /** The new renderer groups both roles under the user's stable turn key. */
-export function chatGptAssistantTurnSelector(identity: string): string {
+export function chatGptTurnContainerSelector(identity: string): string {
   const prefix = "group:assistant:";
   return identity.startsWith(prefix)
-    ? `[data-turn-key=${JSON.stringify(identity.slice(prefix.length))}]:has([data-conversation-role="assistant"], [data-chatgpt-agent-turn-start])`
+    ? `[data-turn-key=${JSON.stringify(identity.slice(prefix.length))}]`
     : `[data-turn-id=${JSON.stringify(identity)}]`;
+}
+
+export function chatGptAssistantTurnSelector(identity: string): string {
+  const container = chatGptTurnContainerSelector(identity);
+  return identity.startsWith("group:assistant:")
+    ? `${container}:has([data-conversation-role="assistant"], [data-chatgpt-agent-turn-start])`
+    : container;
 }
 
 export interface ChatGptEffortSliderState {
@@ -530,10 +540,17 @@ export async function assertNewChatPage(page: Page, useSavedChats = false): Prom
   }
 }
 
-export async function detectChatGptAccountCapabilities(
+type ChatGptCapabilityProbeOptions = {
+  selectorTimeoutMs?: number;
+  stableAbsenceMs?: number;
+  signal?: AbortSignal;
+};
+
+/** Wait for a hydrated model control without selecting a model or opening its menu. */
+export async function waitForChatGptEffortControl(
   page: Page,
-  options: { selectorTimeoutMs?: number; stableAbsenceMs?: number } = {},
-): Promise<ChatGptWebAccountCapabilities & { extraHighAvailable: boolean }> {
+  options: ChatGptCapabilityProbeOptions = {},
+): Promise<Locator | undefined> {
   const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
   const composer = composers.last();
   const composerForm = composer.locator("xpath=ancestor::form[1]");
@@ -543,11 +560,13 @@ export async function detectChatGptAccountCapabilities(
   let absenceSince: number | undefined;
   let presenceObservations = 0;
   while (true) {
+    options.signal?.throwIfAborted();
     const effortVisible = await effortButton.isVisible();
+    options.signal?.throwIfAborted();
     if (effortVisible) {
       presenceObservations += 1;
       absenceSince = undefined;
-      if (presenceObservations >= 2) break;
+      if (presenceObservations >= 2) return effortButton;
       await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
       continue;
     }
@@ -564,46 +583,45 @@ export async function detectChatGptAccountCapabilities(
       // ChatGPT can mount a usable composer before the account's model list arrives.
       // A short absence is not a capability result; use the complete inspection budget.
       if (absenceSince !== undefined && Date.now() - absenceSince >= stableAbsenceMs) {
-        return { solAvailable: false, extraHighAvailable: false, proAvailable: false };
+        options.signal?.throwIfAborted();
+        return undefined;
       }
       throw new Error("ChatGPT account capability probe did not reach a stable composer state");
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
   }
-  const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
-  const menuVisible = await menu.isVisible().catch(() => false);
-  const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
-  if (!menuVisible && menuExpanded !== "true") await effortButton.press("Enter");
+}
+
+/** Read only the selected model's rendered range; callers own selection and menu cleanup. */
+export async function readChatGptEffortCapabilities(
+  { sliderContainer, slider }: Pick<ChatGptEffortActivation, "sliderContainer" | "slider">,
+  options: Pick<ChatGptCapabilityProbeOptions, "selectorTimeoutMs" | "signal"> = {},
+): Promise<ChatGptWebAccountCapabilities & { extraHighAvailable: boolean }> {
+  options.signal?.throwIfAborted();
+  const timeout = options.selectorTimeoutMs ?? 70_000;
+  // Model radio rows can hydrate before the effort control. They carry no evidence
+  // of the account's reasoning range, so an absent slider must fail, not cache false.
+  await sliderContainer.waitFor({ state: "visible", timeout, signal: options.signal });
+  await slider.waitFor({ state: "attached", timeout, signal: options.signal });
+  const { available } = await readChatGptEffortSnapshot(sliderContainer);
+  options.signal?.throwIfAborted();
+  return { solAvailable: true, extraHighAvailable: available[3] === true, proAvailable: available[4] === true };
+}
+
+export async function detectChatGptAccountCapabilities(
+  page: Page,
+  options: ChatGptCapabilityProbeOptions = {},
+): Promise<ChatGptWebAccountCapabilities & { extraHighAvailable: boolean }> {
+  const effortButton = await waitForChatGptEffortControl(page, options);
+  if (!effortButton) return { solAvailable: false, extraHighAvailable: false, proAvailable: false };
   try {
-    const { sliderContainer } = chatGptEffortSlider(page);
-    const timeout = options.selectorTimeoutMs ?? 70_000;
-    try {
-      // The container is stable; its semantic slider is replaced during hydration.
-      // readChatGptEffortSnapshot performs an atomic, bounded retry inside it.
-      await sliderContainer.waitFor({ state: "visible", timeout });
-      await readChatGptEffortSnapshot(sliderContainer);
-    } catch (error) {
-      const label = await effortButton.getAttribute("aria-label").catch(() => null);
-      const structuralPicker = await effortButton.getAttribute("data-codex-intelligence-trigger").catch(() => null);
-      if (structuralPicker !== "true"
-        && label !== "Select ChatGPT model"
-        && label !== "Selecionar modelo do ChatGPT") throw error;
-      const compactSolOption = page.getByRole("menuitemradio")
-        .filter({ hasText: "GPT-5.6 Sol" })
-        .filter({ visible: true })
-        .last();
-      if (!await compactSolOption.isVisible().catch(() => false)) throw error;
-      return { solAvailable: true, extraHighAvailable: false, proAvailable: false };
-    }
-    const { available } = await readChatGptEffortSnapshot(sliderContainer);
+    const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
+    const menuVisible = await menu.isVisible().catch(() => false);
+    const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
+    if (!menuVisible && menuExpanded !== "true") await effortButton.press("Enter");
+    const capabilities = await readChatGptEffortCapabilities(chatGptEffortSlider(page), options);
     const proOption = menu.getByRole("menuitemradio", { name: /^Pro$/i, exact: true }).filter({ visible: true });
-    // The exact Pro row is account-entitlement evidence. ChatGPT can temporarily render that
-    // row disabled while the picker hydrates or while the current conversation surface cannot
-    // switch modes. Do not erase GPT-6 Pro from Codex's installed catalog because of that
-    // transient UI state; selectModelAndEffort still fails closed if Pro is not selectable when
-    // an actual turn starts.
-    const proAvailable = await proOption.count() === 1;
-    return { solAvailable: true, extraHighAvailable: available[3] === true, proAvailable };
+    return { ...capabilities, proAvailable: capabilities.proAvailable || await proOption.count() === 1 };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }

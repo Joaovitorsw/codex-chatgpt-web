@@ -77,7 +77,7 @@ describe("native /models augmentation", () => {
       expect(model).toMatchObject({
         slug: route.slug,
         display_name: route.displayName,
-        tool_mode: null,
+        tool_mode: "code_mode_only",
         default_reasoning_level: route.codexEffort,
         multi_agent_version: "v2",
         supported_in_api: true,
@@ -229,7 +229,7 @@ describe("native /models augmentation", () => {
       "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol",
       "chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high",
     ]);
-    expect(web.every(model => model.tool_mode === null)).toBe(true);
+    expect(web.every(model => model.tool_mode === "code_mode_only")).toBe(true);
     expect(web.every(model => model.multi_agent_version === "v2")).toBe(true);
     expect(web.filter(model => model.visibility === "hide").every(model => (model.supported_reasoning_levels as unknown[]).length === 1)).toBe(true);
     expect(web.map(model => ({
@@ -366,7 +366,7 @@ describe("native /models augmentation", () => {
       .filter(model => String(model.slug).startsWith("chatgpt-web/"));
     expect(web.length).toBe(7);
     expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
-    expect(web.every(model => model.tool_mode === null)).toBe(true);
+    expect(web.every(model => model.tool_mode === "code_mode_only")).toBe(true);
   });
 
   test("uses a ChatGPT-visible template even when it is not available to API-key auth", () => {

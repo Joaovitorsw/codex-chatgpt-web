@@ -113,13 +113,14 @@ export function chatGptModelFamilyMatches(
 ): boolean {
   // Verify the selected family and its product; GPT-6 Sol staging remains GPT-6.
   const expectedName = family === "6" && effort === "max" ? "astra" : "sol";
+  const expectedMode = { low: "instant", medium: "medium", high: "high", xhigh: "extra high", max: "pro" }[effort];
   const states = descriptions.flatMap(text => {
     const state = parseChatGptModelAnnouncement(text);
     return state ? [state] : [];
   });
   return states.length > 0 && states.every(state => state.version === family
     && (!state.name || state.name === expectedName)
-    && (effort === "max" ? /^Pro$/i.test(state.mode) : !/^Pro$/i.test(state.mode)));
+    && state.mode.toLowerCase() === expectedMode);
 }
 
 export async function assertChatGptModelFamily(

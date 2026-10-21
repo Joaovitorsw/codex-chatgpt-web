@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
+import { isNativeAgentsMdContext } from "../../responses/native-context";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 import { isAcceptedCompactionContinuation, recoverCompactionInstruction } from "./compaction-continuation";
 
@@ -180,6 +181,7 @@ export function unattributedChatGptEnvironmentMessages(
 function contextualUserMessage(value: Record<string, unknown>): boolean {
   const text = rawMessageText(value).trim();
   return hasEnvironmentContextFragment(value)
+    || isNativeAgentsMdContext(value)
     || isNativeOpenPageContext(value)
     || /^<subagent_notification>[\s\S]*<\/subagent_notification>$/.test(text)
     || isReadableCompactionSummaryText(text)
@@ -298,6 +300,8 @@ function isTerminalDirectUserRevision(
   const metadata = clientTurnMetadata(parsed);
   const index = input.findLastIndex(value => record(value)?.id === revision.itemId);
   if (index < 0) return false;
+  const recovered = recoverCompactionInstruction(parsed, extractChatGptTurnIdentity(parsed));
+  if (recovered && index > recovered.summaryIndex) return false;
   const item = record(input[index]);
   if (item?.type !== "message" || item.role !== "user" || !isNativeInstruction(item, metadata)) return false;
   // The last direct user message is the sole candidate for this retry. A later
@@ -314,15 +318,23 @@ function isTerminalDirectUserRevision(
   });
 }
 
-function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnId?: string): ChatGptTurnUserRevision | undefined {
+function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnId?: string, recoverCheckpoint = true): ChatGptTurnUserRevision | undefined {
   const body = record(parsed._rawBody);
   const input = Array.isArray(body?.input) ? body.input : [];
   const metadata = clientTurnMetadata(parsed);
+  const recovered = recoverCheckpoint ? recoverCompactionInstruction(parsed, extractChatGptTurnIdentity(parsed)) : undefined;
   for (let index = input.length - 1; index >= 0; index -= 1) {
     const revision = userRevision(input[index], expectedTurnId, metadata);
-    if (revision) return revision;
+    if (revision) {
+      // v1 retains the older human message but drops a synthetic delegation. Recover the
+      // actual task only for an exact producer-authenticated retained representation before
+      // our checkpoint. New steering and rewritten history keep their normal validation.
+      return recovered?.sourceWasDelegation && index < recovered.summaryIndex
+        && isAcceptedCompactionContinuation(parsed, extractChatGptTurnIdentity(parsed), revision)
+        ? recovered.source : revision;
+    }
   }
-  return recoverCompactionInstruction(parsed, extractChatGptTurnIdentity(parsed))?.source;
+  return recovered?.source;
 }
 
 function userRevision(value: unknown, expectedTurnId?: string, metadata?: Record<string, unknown>): ChatGptTurnUserRevision | undefined {
@@ -344,19 +356,27 @@ export function chatGptTurnUserRevisionHistory(parsed: CodexParsedRequest): Chat
   const body = record(parsed._rawBody);
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   const metadata = clientTurnMetadata(parsed);
-  const revisions = (Array.isArray(body?.input) ? body.input : []).flatMap(value => {
+  const recovered = recoverCompactionInstruction(parsed, extractChatGptTurnIdentity(parsed));
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const prefix = recovered?.sourceWasDelegation ? input.slice(0, recovered.summaryIndex) : [];
+  const retained = prefix.map(value => userRevision(value, turnId, metadata)).filter(value => value !== undefined).at(-1);
+  const recoverDelegation = recovered?.sourceWasDelegation && (!retained
+    || isAcceptedCompactionContinuation(parsed, extractChatGptTurnIdentity(parsed), retained));
+  const revisions = input.slice(recoverDelegation ? recovered!.summaryIndex + 1 : 0).flatMap(value => {
     const revision = userRevision(value, turnId, metadata);
     return revision ? [revision] : [];
   });
-  if (revisions.length > 0) return revisions;
-  const recovered = recoverCompactionInstruction(parsed, extractChatGptTurnIdentity(parsed));
-  return recovered ? [recovered.source] : [];
+  if (recoverDelegation) return [recovered!.source, ...revisions];
+  return revisions.length > 0 ? revisions : recovered ? [recovered.source] : [];
 }
 
 /** A remote compaction may summarize an instruction from an earlier turn. */
-export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision {
+export function extractChatGptCompactionSourceRevision(
+  parsed: CodexParsedRequest,
+  options: { recoverCheckpoint?: boolean } = {},
+): ChatGptTurnUserRevision {
   if (!parsed._compactionRequest) throw new Error("ChatGPT web compaction source requires a compaction request");
-  const revision = latestChatGptTurnUserRevision(parsed, extractChatGptTurnIdentity(parsed).turnId);
+  const revision = latestChatGptTurnUserRevision(parsed, extractChatGptTurnIdentity(parsed).turnId, options.recoverCheckpoint !== false);
   if (!revision) throw new Error("ChatGPT web compaction requires a source user message");
   return revision;
 }
@@ -414,6 +434,43 @@ export function extractChatGptContinuationEnvironmentClaim(parsed: CodexParsedRe
 }
 
 /**
+ * Pre-turn native compaction can rebuild the current preamble before retained older
+ * instructions, without a bridge-owned checkpoint. These items are claims only;
+ * the rollout reader must match both against its latest native replacement history.
+ */
+export function extractChatGptNativeCompactionEnvironment(parsed: CodexParsedRequest): {
+  claim: ChatGptEnvironmentClaim;
+  items: Record<string, unknown>[];
+} | undefined {
+  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  if (!turnId) return undefined;
+  const claims = input.flatMap((value, index) => {
+    const item = record(value);
+    return hasEnvironmentContextFragment(item) && (itemTurnId(item) === undefined || itemTurnId(item) === turnId)
+      ? [{ item, index }] : [];
+  });
+  if (claims.length !== 1) return undefined;
+  const { item, index } = claims[0]!;
+  const kinds = record(item.internal_chat_message_metadata_passthrough)?.content_item_kinds;
+  if (itemTurnId(item) !== turnId || typeof item.id !== "string" || !item.id
+    || !Array.isArray(kinds) || !kinds.includes("environments.environment_context")) return undefined;
+  const checkpoints = input.flatMap((value, index) => {
+    const item = record(value);
+    return item?.type === "compaction" ? [{ item, index }] : [];
+  });
+  if (checkpoints.length !== 1) return undefined;
+  const checkpoint = checkpoints[0]!;
+  const activeIndex = input.findLastIndex(value => isNativeInstruction(record(value), clientTurnMetadata(parsed)));
+  if (checkpoint.index <= index || activeIndex <= checkpoint.index
+    || itemTurnId(input[activeIndex]) !== turnId
+    || typeof checkpoint.item.id !== "string" || !checkpoint.item.id
+    || typeof checkpoint.item.encrypted_content !== "string" || !checkpoint.item.encrypted_content) return undefined;
+  return { claim: extractChatGptContinuationEnvironmentClaim(parsed), items: [item, checkpoint.item] };
+}
+
+/**
  * Steering can separate the original environment/instruction pair from the active instruction.
  * Git workspace metadata need not list every native filesystem root. Return that earlier claim
  * only for a same-turn pair; the store must compare it with the current canonical rollout.
@@ -454,12 +511,13 @@ export function extractChatGptSteeringEnvironmentClaim(parsed: CodexParsedReques
 
 /**
  * Native world-state diffs omit unchanged cwd/shell at midnight but repeat the filesystem
- * profile. Recognize the observed unrestricted calendar fragment as a claim only: the store
+ * profile. Recognize the calendar fragment as a claim only: the store
  * still requires this exact turn's native rollout and corroborating current sandbox metadata.
  * Unknown profiles/fields are deliberately not classified as permission-neutral updates.
  */
 export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedRequest): {
   workspaceRoots: string[][];
+  filesystemProfiles: string[];
 } | undefined {
   const metadata = clientTurnMetadata(parsed);
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
@@ -472,19 +530,25 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
 
   let deltas = 0;
   const workspaceRoots: string[][] = [];
+  const filesystemProfiles: string[] = [];
   for (let index = activeIndex + 1; index < input.length; index += 1) {
     const item = record(input[index]);
     if (!hasEnvironmentContextFragment(item)) continue;
     if (item.role !== "user" || itemTurnId(item) !== turnId || typeof item.id !== "string" || !item.id) return undefined;
     const text = rawMessageText(item).trim();
-    // Match the whole native fragment, not just the presence of a disabled profile: another
+    // Match the whole native fragment, not just the presence of a permission profile: another
     // profile, a malformed cwd, or any additional permission declaration must fail closed.
-    const match = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*(?:<workspace_roots>((?:\s*<root>[^<>]+<\/root>\s*)+)<\/workspace_roots>\s*)?<permission_profile type="disabled">\s*<file_system type="unrestricted"\s*\/>\s*<\/permission_profile>\s*<\/filesystem>\s*<\/environment_context>$/.exec(text);
+    // Native midnight updates can also repeat a worker inventory. Its exact name-only
+    // shape is contextual; it grants neither filesystem authority nor child ownership.
+    const match = /^<environment_context>\s*<current_date>\d{4}-\d{2}-\d{2}<\/current_date>\s*(?:<timezone>[^<>]+<\/timezone>\s*)?<filesystem>\s*(?:<workspace_roots>((?:\s*<root>[^<>]+<\/root>\s*)+)<\/workspace_roots>\s*)?(<permission_profile type="(?:disabled|managed)">[\s\S]*?<\/permission_profile>)\s*<\/filesystem>\s*(?:<subagents>\s*(?:<agent name="[^<>"\r\n]+"\s*\/>\s*)*<\/subagents>\s*)?<\/environment_context>$/.exec(text);
     if (!match
       || !sandboxMetadataMatchesEnvironment(canonicalSandboxMetadata(metadata), text)
       || [metadata.sandbox_mode, metadata.sandbox].some(value => (
         value !== undefined && !sandboxMetadataMatchesEnvironment(value, text)
       ))) return undefined;
+    // Compare the complete rendered profile against the native record in the store.
+    // Only insignificant whitespace between XML tags is normalized.
+    filesystemProfiles.push(match[2]!.replace(/>\s+</g, "><"));
     if (match[1]) {
       let roots: string[];
       try { roots = [...match[1].matchAll(/<root>([^<]+)<\/root>/g)].map(root => decodeXmlText(root[1]!.trim())); }
@@ -497,7 +561,7 @@ export function extractChatGptCalendarEnvironmentDelta(parsed: CodexParsedReques
   // A native delta may precede the first assistant response (#812). Its current-turn
   // attribution permits verification, never authority: all repeated roots must agree
   // with the current rollout before the store can accept this update.
-  return deltas > 0 ? { workspaceRoots } : undefined;
+  return deltas > 0 ? { workspaceRoots, filesystemProfiles } : undefined;
 }
 
 function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string, metadata?: Record<string, unknown>): string | undefined {

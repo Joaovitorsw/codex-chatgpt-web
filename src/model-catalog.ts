@@ -136,9 +136,7 @@ export function buildChatGptWebModel(
     ...(multiAgentVersion === undefined
       ? {}
       : { multi_agent_version: multiAgentVersion }),
-    // Code mode collapses the outer registry into an exec gateway; routed models need the regular
-    // Responses tool surface so MCP namespaces, deferred tool_search, and custom tools reach us.
-    tool_mode: null,
+    tool_mode: route.interactionMode === "manual" ? null : template.tool_mode ?? null,
     upgrade: null,
     default_reasoning_level: route.codexEffort,
     supported_reasoning_levels: efforts.map(effort => reasoningLevel(template, effort,

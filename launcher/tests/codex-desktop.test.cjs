@@ -7,6 +7,16 @@ test("Windows Store Codex is recognized when its desktop executable is ChatGPT.e
   assert.equal(isDesktopExecutable("C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT_26_x64__publisher\\app\\ChatGPT.exe", "win32"), false);
 });
 
+test("a surviving renderer does not suppress reopening after a shutdown failure", async () => {
+  const f = fixture([row(10)]);
+  f.lifecycle.close = async () => {
+    f.setInventory([{ ...row(11, 10), commandLine: "ChatGPT.exe --type=renderer" }]);
+    throw new Error("shutdown failed");
+  };
+  await assert.rejects(f.lifecycle.withRestart(async () => {}), /shutdown failed/);
+  assert.equal(f.calls.filter(call => call[0] === "launch").length, 1);
+});
+
 const executable = "C:\\Program Files\\WindowsApps\\OpenAI.Codex_1.0_x64__abc\\app\\Codex.exe";
 const row = (pid, ppid = 1, exe = executable) => ({ pid, ppid, executable: exe, started: `start-${pid}` });
 function fixture(initial = [row(10), row(11, 10), row(20)]) {

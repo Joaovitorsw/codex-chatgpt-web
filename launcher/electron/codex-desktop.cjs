@@ -209,7 +209,8 @@ class CodexDesktopLifecycle {
 
   async reopen() {
     if (!this.prepared || this.reopened) return;
-    if (!this.desktops(await this.bounded(() => this.inventory())).length) {
+    const running = this.desktops(await this.bounded(() => this.inventory()));
+    if (!running.some(process => !/--type(?:=|\s)/i.test(process.commandLine || ""))) {
       await this.bounded(() => this.launch(this.launchInfo));
     }
     this.reopened = true;

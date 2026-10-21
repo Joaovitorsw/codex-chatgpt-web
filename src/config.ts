@@ -258,7 +258,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     experimentalSkillAttachments: false,
     experimentalContextAttachments: false,
     experimentalFreshConversationPerTurn: false,
-    useSavedChats: false,
+    useSavedChats: true,
     subagentUseSavedChats: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: true,
@@ -570,7 +570,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.useSavedChats !== undefined && typeof parsed.useSavedChats !== "boolean") {
     throw new Error(`Invalid useSavedChats in ${path}`);
   }
-  const useSavedChats = parsed.useSavedChats === true;
+  const useSavedChats = parsed.useSavedChats !== false;
   if (parsed.subagentUseSavedChats !== undefined && typeof parsed.subagentUseSavedChats !== "boolean") {
     throw new Error(`Invalid subagentUseSavedChats in ${path}`);
   }

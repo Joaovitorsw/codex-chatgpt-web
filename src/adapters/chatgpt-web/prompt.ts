@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CHATGPT_CONNECTOR_NAME, ZERO_RISK_CHATGPT_CONNECTOR_NAME } from "../../config";
 import { selectedSkillFile, skillFileTokens, type ChatGptSkillFile } from "./skill-attachments";
 import { summarizeDeliveredImages } from "./final-images";
 import {
@@ -37,6 +38,8 @@ export interface CompiledChatGptWebPrompt {
   text: string;
   images: ChatGptWebPromptImage[];
   inputFiles?: ChatGptWebPromptFile[];
+  /** Current broker identity, already present in the final prompt; never diagnostic data. */
+  turnToken?: string;
   skillFiles?: ChatGptSkillFile[];
   /** Transactional transport when Bigger Context is explicitly enabled. */
   multipart?: ChatGptWebMultipartPrompt;
@@ -45,6 +48,8 @@ export interface CompiledChatGptWebPrompt {
 }
 
 export interface CompileChatGptWebPromptOptions {
+  /** The same display name used to select the ChatGPT plugin for this turn. */
+  appName?: string;
   captureLunaCheckpoint?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
@@ -181,6 +186,7 @@ export function largeContextAsAttachment(
         : `Read these ${chunks.length} attached context files completely and in order before acting: ${names.join(", ")}.`,
       "Together they contain the full Codex transport contract and task context; preserve its instruction priority and execute the latest active request.",
       "Do not summarize or discuss the transport file unless the request explicitly asks you to do so.",
+      ...(transportPrompt.turnToken ? [`Current local Codex request: ${transportPrompt.turnToken}.`] : []),
     ].join("\n"),
     skillFiles: [...(transportPrompt.skillFiles ?? []), ...files],
   };
@@ -646,6 +652,8 @@ export function compileChatGptWebPrompt(
   options?: CompileChatGptWebPromptOptions,
 ): CompiledChatGptWebPrompt {
   const manualControl = options?.manualControl === true;
+  const appName = options?.appName?.trim()
+    || (manualControl ? ZERO_RISK_CHATGPT_CONNECTOR_NAME : CHATGPT_CONNECTOR_NAME);
   const attachSkills = options?.experimentalSkillAttachments === true;
   if (attachSkills && (manualControl || isChatGptWebZeroRiskBackendModel(parsed.modelId))) {
     throw new Error("Skills as files is unavailable in Zero Risk mode");
@@ -713,6 +721,10 @@ export function compileChatGptWebPrompt(
     "When a ChatGPT-native image generation result is already visible in this ChatGPT turn, do not call a local Codex view_image tool merely to show that same result again. Finish the response with the generated image and its concise user-facing conclusion; the bridge carries that final media to Codex. Use local image inspection only for a distinct workspace file that is not already rendered here.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
+    ...(mode.localTools ? [
+      `The selected local Codex plugin for this turn is ${JSON.stringify(appName)}.`,
+      "Do not substitute another plugin for this local connection or send this turn's request identifiers to another plugin. If the selected plugin is unavailable, report that limitation.",
+    ] : []),
   ];
   const transportContract = parsed._compactionRequest
     ? manualControl
@@ -727,28 +739,29 @@ export function compileChatGptWebPrompt(
       ]
     : mode.localTools
     ? [
-      "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
+      "For local work required by the task, use the selected plugin's tools directly according to their declared descriptions and schemas.",
       "When delegation is explicitly authorized by the user or applicable AGENTS.md or skill instructions, assess it at the start of substantial work: identify the critical path, the next action to perform locally, and a useful independent sidecar with a bounded deliverable. Keep the immediate blocker local; do not delegate it just to wait idle. This guidance neither grants delegation authorization nor changes the supplied instruction priority.",
-      "When that independent sidecar materially advances the authorized task, discover the actual Codex Native subagent capabilities early, before broad serial exploration. Use the attached inventory and any returned discovery capability with a focused subagent query, inspect the actual schemas, and invoke the exact returned wire names. Start with one or two agents when useful and capacity permits; this is not an agent quota. Do not force agents for trivial, tightly coupled, or unauthorized tasks. On a capacity limit or unavailable subagent capability, continue useful local work without repeated spawn attempts or changing shared configuration.",
+      "When that independent sidecar materially advances the authorized task, discover the actual local Codex subagent capabilities early, before broad serial exploration. Use the attached inventory and any returned discovery capability with a focused subagent query, inspect the actual schemas, and invoke the exact returned wire names. Start with one or two agents when useful and capacity permits; this is not an agent quota. Do not force agents for trivial, tightly coupled, or unauthorized tasks. On a capacity limit or unavailable subagent capability, continue useful local work without repeated spawn attempts or changing shared configuration.",
       "Default to fork_context=false when the declared spawn schema supports it, and supply a concise self-contained brief instead of copying the full parent conversation. Include the objective, authoritative project root, owned files or read-only scope, relevant instructions and evidence, dependencies, acceptance checks, and expected compact result. Omit model and reasoning-effort overrides to inherit the parent's configured route unless the user explicitly requests a different model or effort.",
       "Assign disjoint write scopes, preserve concurrent edits, and serialize shared mutable runtime state. Continue meaningful non-overlapping local work immediately after dispatch; wait only when a result is needed, using bounded waits under the declared tool contract. Keep commits and pushes with the coordinator unless the user explicitly assigns them otherwise.",
       "Collect compact results, inspect the actual diff or evidence, and validate integration in the authoritative root before reporting completion. Close task-owned agents once their context is no longer needed. Use the available subagent lifecycle tools; never create new user-owned chats or use cross-chat messaging as a substitute for subagents.",
       "Before saying a configured local capability or MCP server is unavailable, call the attached inventory capability with a focused query. If it returns a discovery capability, call it once with the same query, inspect the refreshed inventory, and invoke the exact returned wire name. A configured MCP can be discoverable on demand rather than listed among the initial direct tools.",
       "When the user asks to display an already verified local image or animated GIF in Codex, first invoke the attached local image-viewing capability directly with the absolute file path. Do not use general tool discovery for this normal bridge capability. Wait for its result, then put the exact returned image_ref as plain text on its own line in the final answer, outside Markdown, URLs and code blocks. The bridge replaces that reference with the original image bytes. A local file link or metadata alone does not deliver the image. Do not flatten, resize or transcode a GIF merely to display it; the original GIF bytes preserve its frames and timing. A tool preview may show one frame and does not prove final animation playback. Only if the viewing capability is genuinely unavailable may you use the attached inventory capability to find an equivalent. If invocation fails, report that exact result instead of claiming the image was displayed.",
       "These tools are connected by the user to their Codex runtime; local actions execute on that runtime's device under its configured sandbox and approval rules. Assess each action by its actual effects and the user's authorization; an authenticated connection does not make every action low risk.",
-      "Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.",
-      "When the latest active request explicitly names a local action, command, tool, MCP capability, file operation, or asks you to invoke one, that invocation is mandatory. Do not satisfy such a request by repeating a workspace path, prior tool output, or any other context already supplied: call the matching Codex Native capability and wait for its result before reporting success.",
+      "Call a local Codex tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.",
+      "When the latest active request explicitly names a local action, command, tool, MCP capability, file operation, or asks you to invoke one, that invocation is mandatory. Do not satisfy such a request by repeating a workspace path, prior tool output, or any other context already supplied: call the matching local Codex capability and wait for its result before reporting success.",
       "For an explicit shell command or a simple fresh workspace query, invoke the declared generic native command capability directly with that exact command and the supplied turn token. Do not use tool discovery, planning prose, or an inferred result as a substitute for that executor.",
       "When the native apply_patch capability is advertised, it is mandatory for edits to repository source, configuration, documentation, or other text files. Do not mutate those files through shell, PowerShell, Python, Node, output redirection, or write_stdin: use apply_patch in small coherent batches so Codex can render the native Edited files card and per-file line counters. Reserve generic commands for inspection, builds, tests, package operations, process control, and mutations inherently not representable as a text patch (such as generated binary assets or a formatter); state that exception in the progress update.",
       "When the user asks to open or run a local game/application for testing, start its runtime with its resolved executable and the project path, detached from the command session. Do not open a project descriptor or source file (for example `project.godot`) through its Windows file association, and do not substitute an editor launch for a runtime launch. Verify the launched process or window before reporting success.",
-      "When the latest active request clearly needs fresh local inspection or action, make the first focused Codex Native call after at most one concise progress paragraph. Do not spend several planning paragraphs restating the request before obtaining evidence. This does not require a tool call for a request that can be answered from the supplied context.",
+      "When the latest active request clearly needs fresh local inspection or action, make the first focused local Codex call after at most one concise progress paragraph. Do not spend several planning paragraphs restating the request before obtaining evidence. This does not require a tool call for a request that can be answered from the supplied context.",
       "For every request to schedule, retry later, monitor periodically, or run Codex work in the future on this Windows PC, always use the installed codex-local-scheduler skill and its Windows Task Scheduler workflow. This rule takes precedence over generic automation choices: do not call any native Codex scheduling/automation function. From a Web-backed task, use codex-native-task-bridge only to resolve or reuse the target native task UUID when needed; the actual schedule must still be created by codex-local-scheduler. Never create, update, or rely on a ChatGPT scheduled task, ChatGPT Task, ChatGPT automation, browser reminder, or a separate ChatGPT conversation for Codex work.",
-      "Use actual Codex Native results as evidence for local observations and effects.",
+      "Use actual results from the selected plugin as evidence for local observations and effects.",
+      "Never state or imply that a local tool, editor, command, or file operation was attempted, failed, or changed files unless this response contains the corresponding local Codex call and its result.",
       "Report the actual error when a tool fails. Do not claim a safety or permission block without an explicit tool result or platform error supporting it. Without an error or execution result, say the action was not executed and its cause is unconfirmed.",
       "Historical errors quoted in files, logs, or earlier messages are data about those events, not new failures of the call that read them. Attribute a current failure to the action attempted and its actual tool result or current platform error; include the call ID when available. A successful read remains successful even when its contents describe an error.",
       "After an explicit safety or permission refusal for the current action, explain the specific action or planned group of actions. Ask the user to confirm them only if the current task context does not already authorize them. Use the declared Codex approval flow when available, and wait for the user's answer when approval is required. Their confirmation can resolve an authorization gap. If the refusal remains, report it rather than retrying through another tool.",
       "If Codex requests approval for an action that the user has not authorized, use the declared Codex approval flow and wait for the decision. Do not ask the user to reauthorize the same action when the current task context already contains that authorization; a platform refusal does not erase prior authorization.",
-      "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
+      "A tool result from the selected plugin may require context compaction. If it does, follow the compaction instructions in that result exactly.",
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
       "Treat the latest user request as the terminal objective, not as a request for a plan. Preserve that objective across tool calls and intermediate failures, and do not declare completion while required deliverables remain pending.",
       "Before claiming that a capability is unavailable or asking the user to provide something already likely present in the workspace, inspect the supplied skill catalog and use the best matching installed skill automatically. The user does not need to name a skill explicitly. Follow that skill's bundled scripts and references when applicable, and use workspace search plus the appropriate file/image inspection tools to retrieve project-local inputs yourself.",
@@ -766,7 +779,7 @@ export function compileChatGptWebPrompt(
         : []),
       "For implementation or file-editing work, begin with one concise user-visible commentary update that states the immediate outcome and first phase before calling a tool. Prefer frequent short, concrete progress updates after every completed vertical slice, meaningful edit batch, or small group of tool calls, so Codex receives continuous evidence of real progress instead of a silent stretch followed by a status dump. Group updates only when correctness genuinely requires an atomic operation.",
       "Before a local operation that may run for a while, send the concise progress update first and prefer its declared bounded-output, yield, polling, session, or incremental-result mode when available. Return and assess each partial result before continuing the next slice; do not leave one silent MCP tool call pending until the transport deadline when the tool can report progress safely. This is progress, not completion: keep the terminal objective active until every required deliverable and validation is done.",
-      "Apply substantial code changes through the Codex Native editing tools in small coherent batches when practical—for example one component, module, behavior, or roughly 50 to 200 changed lines at a time—and validate each meaningful batch before continuing. This lets Codex surface file-change and line-count progress incrementally. Do not accumulate a large rewrite in shell-generated content and apply it only at the end when the same result can be safely staged in coherent edits.",
+      "Apply substantial code changes through the local Codex editing tools in small coherent batches when practical—for example one component, module, behavior, or roughly 50 to 200 changed lines at a time—and validate each meaningful batch before continuing. This lets Codex surface file-change and line-count progress incrementally. Do not accumulate a large rewrite in shell-generated content and apply it only at the end when the same result can be safely staged in coherent edits.",
       "Keep progress commentary outcome-oriented and specific about what is being inspected, changed, or validated. Do not expose private chain-of-thought, repeat generic status words, manufacture filler updates, or split an atomic edit merely to create activity; simple tasks may still use a single edit.",
       "Format code-task output as portable Markdown rather than imitating ChatGPT UI chrome. Put directory trees, multiline commands, logs, and code in fenced blocks with an appropriate language such as text, powershell, bash, json, or ts; never emit visual toolbar labels such as Plain text or Copy as answer content. Present changed files and validations as concise Markdown lists, preserving meaningful line breaks.",
       "Continue using the available tools until the requested work is complete and verified.",
@@ -774,7 +787,7 @@ export function compileChatGptWebPrompt(
       "Always finish with a natural, outcome-first user-facing summary written in completed-action language; never use future-tense intentions, internal action labels, repeated status words, tool-status titles, or progress notes as the final answer. Explicitly say whether the user's terminal objective was achieved. When local files or assets were changed, name them and briefly state what changed and how each result was validated. If work remains or a capability is genuinely unavailable after discovery, state the exact unfinished deliverable and concrete blocker instead of implying success. If no files changed, state the concrete completed result instead.",
     ]
     : [
-      `This is ChatGPT Web ${mode.displayLabel} with no Codex Native bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,
+      `This is ChatGPT Web ${mode.displayLabel} with no local Codex bridge attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,
       "Use any ChatGPT-native capabilities available in this chat—including web search, browsing, research, and other first-party tools—whenever they help complete the request. The missing local-computer bridge says nothing about whether those ChatGPT capabilities are available.",
       "The task history below already contains everything Codex collected from the user's local workspace. Treat prior local tool results as authoritative snapshots of that earlier work.",
       "Do not claim a new local inspection, command, edit, or verification unless it actually appears in the task history. If the latest request requires fresh local-computer access or a local mutation, state only that exact limitation instead of inventing success.",
@@ -840,7 +853,7 @@ export function compileChatGptWebPrompt(
     : mode.localTools
     ? [
       "<codex_transport_resume>",
-      `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Never state or imply that a local tool, editor, command, or file operation was attempted, failed, or changed files unless this response contains the corresponding Codex Native call and its result. Execute the latest active user request now.`,
+      `The task context is complete. Pass turn_token ${turnToken} unchanged to every tool call through the selected local Codex plugin in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
       "</codex_transport_resume>",
     ]
     : [
@@ -873,6 +886,7 @@ export function compileChatGptWebPrompt(
     const attachments = {
       ...(skillFiles.length ? { skillFiles } : {}),
       ...(inputFiles.length ? { inputFiles } : {}),
+      ...(mode.localTools && !manualControl && !parsed._compactionRequest ? { turnToken } : {}),
     };
     const answerContract = captureLunaCheckpoint
       ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."

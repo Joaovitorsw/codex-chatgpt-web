@@ -19,6 +19,14 @@ function prompt(text: string): CompiledChatGptWebPrompt {
 }
 
 describe("large context attachment transport", () => {
+  test("keeps the current native token in the visible submission when context becomes an attachment", () => {
+    const turnToken = "turn_12345678901234567890123456789012";
+    const original = `Context ${turnToken} ${"x".repeat(CHATGPT_CONTEXT_ATTACHMENT_THRESHOLD_CHARS)}`;
+    const result = largeContextAsAttachment({ ...prompt(original), turnToken }, true);
+    expect(result.text).toContain(turnToken);
+    expect(result.turnToken).toBe(turnToken);
+    expect(result.skillFiles?.[0]?.text).toBe(original);
+  });
   test("moves a large inline envelope to one text attachment", () => {
     const original = "x".repeat(CHATGPT_CONTEXT_ATTACHMENT_THRESHOLD_CHARS);
     const result = largeContextAsAttachment(prompt(original), true);

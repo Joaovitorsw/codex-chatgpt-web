@@ -24,6 +24,19 @@ function request(text: string): CodexParsedRequest {
   };
 }
 
+test("usage counts the configured plugin name carried by the submitted prompt", () => {
+  const parsed = request("Inspect the repository.");
+  const caps = { ...capabilities, localToolsEnabled: true };
+  const appName = `Codex ${"測試_".repeat(16)}`;
+  const token = `turn_${"0".repeat(32)}`;
+  const compiled = compileChatGptWebPrompt(parsed, caps, token, { appName });
+  const expected = estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
+  expect(expected).not.toBe(estimateChatGptWebInputTokens(parsed, caps));
+  for (const biggerContext of [false, true]) {
+    expect(estimateChatGptWebUsage(parsed, {}, caps, biggerContext, false, appName).inputTokens).toBe(expected);
+  }
+});
+
 test.each([
   ["highly compressible", "a".repeat(480_000)],
   ["ordinary repeated words", `${"word ".repeat(79_999)}word`],

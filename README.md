@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.9/codex-web-gpt-6.1.9-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.9/codex-web-gpt-6.1.9-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.9/codex-web-gpt-6.1.9-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.13/codex-web-gpt-6.1.13-win-x64.exe"><img src="assets/readme/download-windows.svg" width="224" height="64" alt="Windows · x64"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.13/codex-web-gpt-6.1.13-mac-arm64.dmg"><img src="assets/readme/download-macos.svg" width="224" height="64" alt="macOS · Apple silicon"></a>&nbsp;
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.13/codex-web-gpt-6.1.13-linux-x64.AppImage"><img src="assets/readme/download-linux.svg" width="224" height="64" alt="Linux · x64"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.9/codex-web-gpt-6.1.9-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">Todas as versões</a>
+  <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.13/codex-web-gpt-6.1.13-mac-x64.dmg">macOS Intel</a> · <a href="https://github.com/miuuyy/codex-chatgpt-web/releases/latest">Todas as versões</a>
 </p>
 
 <p align="center">
@@ -133,7 +133,7 @@ está explicitamente ativado; essa opção clica apenas em **Permitir uma vez**,
 Use **Atividade** para diagnósticos locais seguros e **Configurações → Executar doctor** para verificar
 o fluxo completo. Nas configurações também é possível cancelar um turno retido ou remover a integração
 do Codex antes da desinstalação. **Salvar chats no ChatGPT** mantém as conversas no histórico e vem
-desativado por padrão, independentemente de **Novo chat do navegador a cada turno**. Defina
+ativado por padrão em novas instalações, independentemente de **Novo chat do navegador a cada turno**. Defina
 `CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS=1` apenas quando cada checkpoint precisar de captura de tela.
 
 Subagentes Web liberam a aba ao terminar cada resposta. Um follow-up abre outro chat com o histórico

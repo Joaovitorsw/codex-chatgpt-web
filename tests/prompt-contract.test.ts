@@ -236,6 +236,53 @@ test("Web delegation supplies lean explicit briefs and inherits the parent model
   expect(compiled.text).toContain("unless the user explicitly requests a different model or effort");
 });
 
+test("authorized useful delegation requires an actual native spawn rather than planning prose", () => {
+  const compiled = compileChatGptWebPrompt(
+    request("high"),
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+  );
+  const transport = compiled.text.split("<codex_context_json>")[0]!;
+  expect(transport).toContain("Standing delegation instructions in the supplied AGENTS.md apply to this task");
+  expect(transport).toContain("make the actual local Codex spawn call before broad serial investigation");
+  expect(transport).toContain("Planning to delegate, describing roles, or running several shell commands is not a spawned agent");
+  expect(transport).toContain("ChatGPT's hosted agents do not replace local Codex subagents");
+  expect(transport).toContain('query="spawn_agent"');
+  expect(transport).toContain("A successful domain lookup such as Godot does not discover delegation tools");
+  expect(transport).toContain("the inventory filter matches literal text, not a semantic task description");
+});
+
+test("Godot delegation separates source review from shared editor and import state", () => {
+  const compiled = compileChatGptWebPrompt(
+    request("high"),
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+  );
+  const transport = compiled.text.split("<codex_context_json>")[0]!;
+  expect(transport).toContain("For substantial Godot work");
+  expect(transport).toContain("independent source/resource review, regression-test inspection, or asset-contract checks");
+  expect(transport).toContain("Keep the Godot editor, MCP project binding, imports, running game, and viewport capture under one owner");
+  expect(transport).toContain("Do not let a worker launch the engine or edit shared files without an explicit disjoint scope");
+  expect(transport).toContain("A one-file fix with no useful independent check may stay local");
+});
+
+test.each([false, true])("delegation discovery remains visible after the task context (multipart=%s)", multipart => {
+  const parsed = request("high");
+  parsed.context.tools = [{ name: "spawn_agent", namespace: "multi_agent_v1", description: "Start a bounded worker", parameters: { type: "object" } }];
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+    multipart ? { experimentalMultipartParts: 2 } : undefined,
+  );
+  const text = compiled.multipart?.commit ?? compiled.text;
+  const resume = text.slice(text.lastIndexOf("<codex_transport_resume>"));
+  expect(resume).toContain('query="spawn_agent"');
+  expect(resume).toContain("multi_agent_v1__spawn_agent");
+  expect(resume).toContain("before completing all independent work yourself");
+  expect(resume).toContain("supplied delegation authorization");
+});
+
 test("Web delegation keeps local progress and collects and closes task-owned agents", () => {
   const compiled = compileChatGptWebPrompt(
     request("max"),

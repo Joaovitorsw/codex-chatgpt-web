@@ -13,7 +13,7 @@ import {
 } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { estimateTokens } from "../../lib/token-estimate";
-import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
+import { namespacedToolName, type CodexAssistantContentPart, type CodexContentPart, type CodexMessage, type CodexParsedRequest } from "../../types";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import {
@@ -742,6 +742,9 @@ export function compileChatGptWebPrompt(
       "For local work required by the task, use the selected plugin's tools directly according to their declared descriptions and schemas.",
       "When delegation is explicitly authorized by the user or applicable AGENTS.md or skill instructions, assess it at the start of substantial work: identify the critical path, the next action to perform locally, and a useful independent sidecar with a bounded deliverable. Keep the immediate blocker local; do not delegate it just to wait idle. This guidance neither grants delegation authorization nor changes the supplied instruction priority.",
       "When that independent sidecar materially advances the authorized task, discover the actual local Codex subagent capabilities early, before broad serial exploration. Use the attached inventory and any returned discovery capability with a focused subagent query, inspect the actual schemas, and invoke the exact returned wire names. Start with one or two agents when useful and capacity permits; this is not an agent quota. Do not force agents for trivial, tightly coupled, or unauthorized tasks. On a capacity limit or unavailable subagent capability, continue useful local work without repeated spawn attempts or changing shared configuration.",
+      'Discover delegation separately from domain tools: call the selected local plugin\'s declared inventory tool with query="spawn_agent" and include_schema=true. A successful domain lookup such as Godot does not discover delegation tools; the inventory filter matches literal text, not a semantic task description. If that focused lookup returns a discovery capability, use the declared discovery route and repeat the focused inventory lookup once. If spawn is available, invoke its exact returned wire_name through the declared local tool-call route. Discover wait_agent and close_agent separately when needed. Do not infer missing subagent support from a Godot-only inventory page.',
+      "Standing delegation instructions in the supplied AGENTS.md apply to this task without a repeated human request. When authorized independent work is useful and a local subagent capability is available, make the actual local Codex spawn call before broad serial investigation, then continue the coordinator's independent work. Planning to delegate, describing roles, or running several shell commands is not a spawned agent. ChatGPT's hosted agents do not replace local Codex subagents: use the selected local plugin's declared native subagent tools so Codex receives the real lifecycle events. If delegation cannot run, report the observed capability or capacity failure; never invent a worker or its result.",
+      "For substantial Godot work, consider independent source/resource review, regression-test inspection, or asset-contract checks while the coordinator diagnoses and implements the main fix. Keep the Godot editor, MCP project binding, imports, running game, and viewport capture under one owner. Do not let a worker launch the engine or edit shared files without an explicit disjoint scope. A one-file fix with no useful independent check may stay local; shared engine state alone does not prevent a bounded read-only source review. Keep the worker brief limited to the relevant scripts/resources, observed symptom, project version, and a concrete finding to return.",
       "Default to fork_context=false when the declared spawn schema supports it, and supply a concise self-contained brief instead of copying the full parent conversation. Include the objective, authoritative project root, owned files or read-only scope, relevant instructions and evidence, dependencies, acceptance checks, and expected compact result. Omit model and reasoning-effort overrides to inherit the parent's configured route unless the user explicitly requests a different model or effort.",
       "Assign disjoint write scopes, preserve concurrent edits, and serialize shared mutable runtime state. Continue meaningful non-overlapping local work immediately after dispatch; wait only when a result is needed, using bounded waits under the declared tool contract. Keep commits and pushes with the coordinator unless the user explicitly assigns them otherwise.",
       "Collect compact results, inspect the actual diff or evidence, and validate integration in the authoritative root before reporting completion. Close task-owned agents once their context is no longer needed. Use the available subagent lifecycle tools; never create new user-owned chats or use cross-chat messaging as a substitute for subagents.",
@@ -832,6 +835,14 @@ export function compileChatGptWebPrompt(
       "</codex_zero_risk_request_json>",
     ]
     : [];
+  const delegationResume = mode.localTools && !parsed._compactionRequest
+    ? [
+      `Native delegation/discovery registry index: ${JSON.stringify((parsed.context.tools ?? [])
+        .filter(tool => tool.toolSearch || /(?:^|__)(?:spawn_agent|wait_agent|close_agent|send_input|resume_agent)$/.test(tool.name))
+        .map(tool => namespacedToolName(tool.namespace, tool.name)))}. This is capability metadata, not permission; deferred tools may require discovery.`,
+      'Delegation checkpoint: apply the supplied delegation authorization and assess independent work before completing all independent work yourself. For substantial authorized work with a useful independent source, test, or resource check (including Godot), first query the local inventory with query="spawn_agent"; a domain-only lookup is insufficient. Invoke the exact available native spawn tool with a compact scope and inherited model, then continue local work. Keep trivial or inseparable work local. Do not substitute ChatGPT hosted agents, describe uncreated agents, or reopen user-owned chats.',
+    ]
+    : [];
   const transportResume = parsed._compactionRequest
     ? manualControl
       ? [
@@ -847,12 +858,14 @@ export function compileChatGptWebPrompt(
     : manualControl
     ? [
       "<codex_transport_resume>",
+      ...delegationResume,
       "The task context is complete. Execute the latest active user request now.",
       "</codex_transport_resume>",
     ]
     : mode.localTools
     ? [
       "<codex_transport_resume>",
+      ...delegationResume,
       `The task context is complete. Pass turn_token ${turnToken} unchanged to every tool call through the selected local Codex plugin in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
       "</codex_transport_resume>",
     ]

@@ -3667,6 +3667,75 @@ function manualTurnFixture() {
   return { fixture, clipboardWrites };
 }
 
+function manualChatSurfaceFixture(savedChats) {
+  const { fixture } = manualTurnFixture();
+  const methods = require("node:vm").runInNewContext(
+    `({ ${BrowserHost.prototype.createManualTurnTab.toString()} })`,
+    {
+      randomBytes: require("node:crypto").randomBytes,
+      MAX_BROWSER_TABS: 5,
+      TEMPORARY_CHAT_URL: "https://chatgpt.com/?temporary-chat=true",
+      manualPromptDigest: prompt => createHash("sha256").update(prompt, "utf8").digest("hex"),
+      enforceDarkChatGpt() {},
+      WebContentsView: class {
+        webContents = { setZoomFactor() {} };
+      },
+    },
+  );
+  Object.assign(fixture, {
+    createManualTurnTab: methods.createManualTurnTab,
+    getUseSavedChats: () => savedChats,
+    state: { zoomFactor: 1 },
+    window: { contentView: { addChildView() {} } },
+    presentTurnView() {},
+    bindShellZoomShortcuts() {},
+    bindManualTurnContents() {},
+    initializeManualTurnTab() {},
+  });
+  return fixture;
+}
+
+for (const savedChats of [false, true]) {
+  for (const useSavedChats of [undefined, false, true]) {
+    test(`manual chat URL honors override=${useSavedChats} with global=${savedChats}`, () => {
+      const fixture = manualChatSurfaceFixture(savedChats);
+      const options = useSavedChats === undefined ? {} : { useSavedChats };
+      const expectedUrl = (useSavedChats ?? savedChats)
+        ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true";
+      const tabIds = [];
+      for (const compaction of [false, false, true]) {
+        const traceId = `manual_policy_${tabIds.length}`;
+        const lease = fixture.beginManualTurn(
+          traceId, process.pid, "full child context", undefined, undefined, { ...options, compaction },
+        );
+        const tab = fixture.turnTabs.get(lease.tabId);
+        assert.equal(tab.url, expectedUrl);
+        assert.equal(tab.manualSubmitTimeoutMs, compaction ? 120_000 : 60_000);
+        assert.equal(lease.reused, false);
+        assert.equal(tabIds.includes(lease.tabId), false);
+        assert.equal(fixture.getUseSavedChats(), savedChats);
+        tabIds.push(lease.tabId);
+        fixture.confirmManualSent(lease.tabId);
+        fixture.markManualTurnStarted(traceId, process.pid);
+        fixture.endManualTurn(traceId, process.pid, "completed");
+        assert.equal(fixture.turnTabs.size, 0);
+      }
+    });
+  }
+}
+
+test("manual retries cannot change a saved surface into a temporary child", () => {
+  const fixture = manualChatSurfaceFixture(true);
+  const lease = fixture.beginManualTurn("manual_policy_retry", process.pid, "same prompt");
+  try {
+    assert.throws(() => fixture.beginManualTurn(
+      "manual_policy_retry", process.pid, "same prompt", undefined, undefined, { useSavedChats: false },
+    ), /different chat policy/);
+  } finally {
+    fixture.removeTurnTab(fixture.turnTabs.get(lease.tabId));
+  }
+});
+
 test("manual start is idempotent and never exposes its private prompt in snapshots", () => {
   const { fixture, clipboardWrites } = manualTurnFixture();
   const first = fixture.beginManualTurn("manual_trace_1", process.pid, "private prompt", "a".repeat(64));
@@ -3689,7 +3758,7 @@ test("manual confirmation deadlines end at Sent so slow model startup can still 
     "compaction prompt",
     undefined,
     undefined,
-    true,
+    { compaction: true },
   );
   const ordinaryTab = fixture.turnTabs.get(ordinary.tabId);
   const compactionTab = fixture.turnTabs.get(compaction.tabId);

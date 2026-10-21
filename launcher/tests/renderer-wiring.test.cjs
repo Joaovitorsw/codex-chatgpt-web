@@ -172,13 +172,13 @@ test("setup preserves session-check failures and never installs without verified
     let installs = 0;
     let syncedSkills = null;
     let browser = { authenticated: false, status: "error", message: "ChatGPT session verification failed (HTTP 503)." };
-    const state = { browserInteractionMode: "automatic", coreSetupComplete: true, bundledSkillSelection: null };
+    const state = { browserInteractionMode: "automatic", coreSetupComplete: false, bundledSkillSelection: null };
     const run = async () => { installs++; return { mode: "browser-only", stdout: "" }; };
     vm.runInNewContext(source, {
       handle: (_name, handler) => { setup = handler; }, IS_DEV_PROFILE: dev,
       stateStore: { read: () => state, update() {} },
       browserHost: { probeAuthentication: async () => browser, returnToIdle: async () => {} },
-      runtimeHost: { setupCore: run, setupDevCore: run, runtimeConfigSnapshot: () => ({ config: {} }) },
+      runtimeHost: { currentOperation: () => null, setupCore: run, setupDevCore: run, runtimeConfigSnapshot: () => ({ config: {} }) },
       BUNDLED_SKILLS_PATH: "/fixture/skills", LAUNCHER_PROFILE: { codexHome: "/fixture/codex" },
       listBundledSkills: () => ["alpha-skill"],
       validateBundledSkillSelection: value => value,
@@ -192,6 +192,8 @@ test("setup preserves session-check failures and never installs without verified
     await assert.rejects(setup, /Sign in to/);
     assert.equal(installs, 0);
     browser = { authenticated: true, status: "ready", message: "ChatGPT is ready" };
+    await assert.rejects(setup, /Run the browser smoke test/);
+    state.browserInteractionMode = "manual";
     assert.equal((await setup(null, { bundledSkills: [] })).ok, true);
     assert.equal(installs, 1);
     assert.deepEqual(syncedSkills, []);
@@ -208,7 +210,7 @@ test("packaged setup recovers a persisted login before smoke and installation", 
   assert.match(smokeHandler, /if \(!browser\.authenticated\)/);
   assert.match(smokeHandler, /await browserHost\.smokeTest\(\)/);
   assert.doesNotMatch(appSource, /disabled=\{busy \|\| !browser\?\.authenticated\}/);
-  assert.match(appSource, /if \(!manualInteraction && !browserSetupGateComplete\)[\s\S]*?await api!\.smokeTest\(\)[\s\S]*?await api!\.setupCore/);
+  assert.match(appSource, /if \(!snapshot\.state\.coreSetupComplete && !manualInteraction && !browserSetupGateComplete\)[\s\S]*?await api!\.smokeTest\(\)[\s\S]*?await api!\.setupCore/);
   assert.doesNotMatch(appSource, /disabled=\{busy \|\| \(!browserSetupGateComplete/);
 });
 
@@ -361,6 +363,12 @@ test("macOS passkey sign-in is additive to the unchanged embedded login action",
   assert.match(electronMain, /launcher:browser-passkey-login[\s\S]*?browserHost\.openPasskeyLogin\(\)/);
   assert.match(electronMain, /loginWithPasskey: onProgress => runtimeHost\.capturePasskeyLogin\(onProgress\)/);
   assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000\)[\s\S]*?runSessionInspection\(false\)/);
+});
+
+test("signed-out browser action opens login instead of only showing the selected tab", () => {
+  assert.match(appSource, /const openBrowserLogin = async \(\) =>[\s\S]*?api!\.openLogin\(\)/);
+  assert.match(appSource, /<PrimaryButton disabled=\{passkeyActive\} onClick=\{\(\) => void \(manualInteraction \|\| browser\?\.authenticated \? toggle\(\) : openBrowserLogin\(\)\)\}/);
+  assert.match(appSource, /\{!manualInteraction && browser\?\.authenticated !== true \? \([\s\S]*?className="toolbar-text-button"[\s\S]*?onClick=\{\(\) => void openBrowserLogin\(\)\}/);
 });
 
 test("passkey buttons show launch progress, wait for Chrome, and preserve import progress after remount", async () => {

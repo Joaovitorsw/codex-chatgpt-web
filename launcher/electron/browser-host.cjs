@@ -1094,7 +1094,7 @@ class BrowserHost {
     }
   }
 
-  createManualTurnTab(traceId, helperPid, conversationKey, prompt, manualSubmitTimeoutMs) {
+  createManualTurnTab(traceId, helperPid, conversationKey, prompt, manualSubmitTimeoutMs, { useSavedChats } = {}) {
     if (this.turnTabs.size >= MAX_BROWSER_TABS
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
@@ -1115,6 +1115,7 @@ class BrowserHost {
         backgroundThrottling: false,
       },
     });
+    const savedChats = useSavedChats ?? this.getUseSavedChats();
     const tab = {
       id,
       surfaceId: null,
@@ -1128,7 +1129,8 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: this.getUseSavedChats() ? "https://chatgpt.com/" : TEMPORARY_CHAT_URL,
+      url: savedChats ? "https://chatgpt.com/" : TEMPORARY_CHAT_URL,
+      useSavedChats: savedChats,
       loading: true,
       message: "Paste the copied prompt, add any images yourself because Zero Risk cannot transfer them, choose a model and effort, then press Sent",
       interactionMode: "manual",
@@ -2654,7 +2656,7 @@ class BrowserHost {
     this.clipboard.writeText(prompt);
   }
 
-  beginManualTurn(traceId, helperPid, prompt, conversationKey, resumePrompt, compaction = false) {
+  beginManualTurn(traceId, helperPid, prompt, conversationKey, resumePrompt, { compaction = false, useSavedChats } = {}) {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
     }
@@ -2668,6 +2670,9 @@ class BrowserHost {
       throw new Error(`Manual resume prompt must contain between 1 and ${MAX_MANUAL_PROMPT_CHARS} characters`);
     }
     if (typeof compaction !== "boolean") throw new Error("Manual compaction flag must be boolean");
+    if (useSavedChats !== undefined && typeof useSavedChats !== "boolean") {
+      throw new Error("Manual useSavedChats flag must be boolean");
+    }
     const manualSubmitTimeoutMs = compaction
       ? MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS
       : MANUAL_SUBMIT_TIMEOUT_MS;
@@ -2706,6 +2711,9 @@ class BrowserHost {
       if (sameTrace.manualSubmitTimeoutMs !== manualSubmitTimeoutMs) {
         throw new Error(`Zero Risk turn ${traceId} was retried with a different compaction mode`);
       }
+      if (useSavedChats !== undefined && sameTrace.useSavedChats !== useSavedChats) {
+        throw new Error(`Zero Risk turn ${traceId} was retried with a different chat policy`);
+      }
       const retryPrompt = sameTrace.manualConversationReused ? resumePrompt : prompt;
       if (typeof retryPrompt !== "string"
         || sameTrace.promptDigest !== manualPromptDigest(retryPrompt)) {
@@ -2735,6 +2743,9 @@ class BrowserHost {
     }
     let tab = retained[0];
     if (tab) {
+      if (useSavedChats !== undefined && tab.useSavedChats !== useSavedChats) {
+        throw new Error(`Zero Risk turn ${traceId} cannot resume a different chat policy`);
+      }
       if (typeof resumePrompt !== "string" || !resumePrompt) {
         throw new Error("A retained Zero Risk conversation requires an incremental resume prompt");
       }
@@ -2759,6 +2770,7 @@ class BrowserHost {
         conversationKey,
         prompt,
         manualSubmitTimeoutMs,
+        { useSavedChats },
       );
       try {
         this.writeManualPrompt(prompt);

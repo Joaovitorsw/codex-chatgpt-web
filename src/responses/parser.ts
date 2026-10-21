@@ -155,7 +155,7 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
     if (namespace) tool.namespace = namespace;
     out.push(tool);
   };
-  const pushFreeform = (t: Record<string, unknown>) => {
+  const pushFreeform = (t: Record<string, unknown>, namespace?: string) => {
     const tool: CodexTool = {
       name: t.name as string,
       description: (t.description as string) ?? "",
@@ -170,6 +170,7 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
         required: ["input"],
       },
       freeform: true,
+      ...(namespace ? { namespace } : {}),
     };
     out.push(tool);
   };
@@ -186,7 +187,7 @@ function buildTools(tools: unknown[] | undefined): CodexTool[] | undefined {
       for (const inner of t.tools as unknown[]) {
         if (!isObj(inner) || typeof inner.name !== "string") continue;
         if (inner.type === "function") pushFn(inner, ns);
-        else if (t.name === DEFAULT_FUNCTION_NAMESPACE && inner.type === "custom") pushFreeform(inner);
+        else if (t.name === DEFAULT_FUNCTION_NAMESPACE && inner.type === "custom") pushFreeform(inner, t.name);
       }
     }
     else if (t.type === "custom" && typeof t.name === "string") {
@@ -493,10 +494,11 @@ export function parseRequest(body: unknown): CodexParsedRequest {
       }
 
       if (effectiveType === "custom_tool_call") {
-        const call = item as { id?: string; call_id: string; name: string; input: string };
+        const call = item as { id?: string; call_id: string; name: string; namespace?: string; input: string };
         const toolCall: CodexToolCall = {
           type: "toolCall", id: call.call_id, name: call.name,
           arguments: { input: call.input ?? "" },
+          ...(call.namespace ? { namespace: call.namespace } : {}),
         };
         assistantHolderWithReasoning().content.push(toolCall);
         continue;

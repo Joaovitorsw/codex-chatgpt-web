@@ -589,6 +589,7 @@ test("manual launcher control separates idempotent start from reconnectable Sent
       ...owner,
       prompt: "private prompt",
       compaction: true,
+      useSavedChats: false,
     })).resolves.toMatchObject({
       tabId: "manual-tab",
       reused: false,
@@ -609,7 +610,7 @@ test("manual launcher control separates idempotent start from reconnectable Sent
       "/v1/manual/wait-terminal",
       "/v1/manual/end",
     ]);
-    expect(requests[0]?.body).toEqual({ ...owner, prompt: "private prompt", compaction: true });
+    expect(requests[0]?.body).toEqual({ ...owner, prompt: "private prompt", compaction: true, useSavedChats: false });
   } finally {
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
   }

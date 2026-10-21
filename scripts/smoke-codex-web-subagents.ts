@@ -1,224 +1,361 @@
-import {
-  existsSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { loadConfig } from "../src/config";
+import { defaultBrokerEndpoint, getConfigDir, loadConfig } from "../src/config";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 
-const codexArg = process.argv.slice(2).find(argument => !argument.startsWith("--"));
-const codex = resolve(codexArg ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
-if (!existsSync(codex)) throw new Error(`Codex executable is missing: ${codex}`);
-
-const runtimeConfig = loadConfig();
-if (runtimeConfig.browserHost !== "launcher") {
-  throw new Error("Live Web subagent smoke requires the launcher-owned browser host");
-}
-if (runtimeConfig.subagentProtocol !== "compatibility-v1") {
-  throw new Error("Live Web subagent smoke requires one consistent Compatibility V1 runtime configuration");
-}
-if (!runtimeConfig.solAvailable) {
-  throw new Error("Live Web subagent smoke requires the authenticated Sol model surface");
+type ObjectRecord = Record<string, unknown>;
+interface RolloutRecord { type?: string; payload?: ObjectRecord }
+interface ExpectedEvidence { cwd: string; model: string; version: string; parentToken: string; childToken: string }
+interface SmokeOptions {
+  codex?: string; bridgeHome?: string; bridgeUrl?: string; codexHome?: string;
+  outputDir?: string; launcherLog?: string; model: string; effort: string;
+  sourceRuntime: boolean; help: boolean;
 }
 
-const bundled = spawnSync(codex, ["debug", "models", "--bundled"], {
-  encoding: "utf8",
-  stdio: ["ignore", "pipe", "pipe"],
-  timeout: 15_000,
-});
-if (bundled.status !== 0) {
-  throw new Error(`Could not read bundled Codex models: ${bundled.error?.message || bundled.stderr}`);
-}
+const HELP = `Live Web parent/child smoke (runs real authenticated ChatGPT turns).
+Usage: bun run scripts/smoke-codex-web-subagents.ts [codex.exe] [options]
+  --codex PATH          Windows Codex binary; default: PATH (Bun.which)
+  --source-runtime      Use working-tree adapter + live launcher RemoteTurnBroker (default)
+  --bridge-home DIR     Read bridge config.json here; never write it
+  --codex-home DIR      Codex rollout/state authority; default: current CODEX_HOME or ~/.codex
+  --launcher-log FILE   Required live launcher JSONL log (including rotated .1)
+  --output-dir DIR      Fresh evidence directory; default outputs/web-subagents-<timestamp>
+  --model SLUG          Default chatgpt-web/gpt-6-sol; child must inherit it
+  --effort LEVEL        Default medium
+  --help               No bridge, browser or Codex execution
 
-const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-live-subagents-"));
-const codexHome = join(root, "codex");
-mkdirSync(codexHome, { recursive: true });
-const catalogPath = join(root, "models.json");
-const catalogConfig = structuredClone(runtimeConfig);
-catalogConfig.subagentProtocol = "compatibility-v1";
-writeFileSync(
-  catalogPath,
-  `${JSON.stringify(augmentNativeModelCatalog(JSON.parse(bundled.stdout), catalogConfig))}\n`,
-);
+Source mode builds the current browser helper under the evidence directory and uses
+createLauncherDevAdapter with the production broker, then startServer on port 0
+with its own private broker endpoint. No shared install, service or browser restart.
+Root useSavedChats must be true. Child policy is owned by the source adapter.
+CODEX_HOME and CODEX_SQLITE_HOME are set only for this process and its Codex child.
+For source mode use the same canonical state directory as the CLI. An external
+bridge must already resolve that exact home; a client override cannot change a
+running server's authority. This script does not migrate/copy auth or state.
+All overrides are CLI -c values; the user's config.toml is never written.
+Artifacts include config overrides, stdout/stderr, copied rollouts, diagnostics,
+launcher events, and report.json, including failures. No evidence is deleted.
+`;
 
-const bridgeBaseUrl = `http://${runtimeConfig.host}:${runtimeConfig.port}/v1`;
-writeFileSync(join(codexHome, "config.toml"), [
-  'model = "chatgpt-web/medium"',
-  'model_provider = "live_bridge"',
-  `model_catalog_json = ${JSON.stringify(catalogPath)}`,
-  "",
-  "[model_providers.live_bridge]",
-  'name = "Live codex-chatgpt-web bridge"',
-  `base_url = ${JSON.stringify(bridgeBaseUrl)}`,
-  'env_key = "CODEX_WEB_LIVE_SMOKE_KEY"',
-  'wire_api = "responses"',
-  "supports_websockets = false",
-  "",
-  "[agents]",
-  "max_depth = 2",
-  "",
-  "[features]",
-  "multi_agent = true",
-  "multi_agent_v2 = false",
-  "",
-].join("\n"));
-
-const expectedVersion = (JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as {
-  version?: unknown;
-}).version;
-if (typeof expectedVersion !== "string" || !expectedVersion) {
-  throw new Error("Repository package.json has no version");
-}
-
-const prompt = [
-  "Use the available agent tools; do not read package.json in the parent yourself.",
-  "Spawn exactly one child with model chatgpt-web/high, reasoning_effort high, and no forked history.",
-  "Ask it to read package.json through its repository tools and return CHILD_RESULT followed by the",
-  "exact version. Wait for that exact child id even if it has already completed, then return",
-  "LIVE_WEB_SUBAGENT_OK followed by the same version.",
-  "Do not use fallback models. If any requested model or agent operation is unavailable, fail explicitly.",
-].join(" ");
-
-interface RolloutRecord {
-  type?: string;
-  payload?: Record<string, unknown>;
-}
-
-function rolloutFiles(directory: string): string[] {
-  const result: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) result.push(...rolloutFiles(path));
-    else if (entry.isFile() && entry.name.endsWith(".jsonl")) result.push(path);
-  }
-  return result;
-}
-
-function records(path: string): RolloutRecord[] {
-  return readFileSync(path, "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .map(line => JSON.parse(line) as RolloutRecord);
-}
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function subagentDepth(meta: RolloutRecord | undefined): number {
-  const source = object(meta?.payload?.source);
-  const subagent = object(source?.subagent);
-  const spawn = object(subagent?.thread_spawn);
-  return typeof spawn?.depth === "number" ? spawn.depth : 0;
-}
-
-function responseItems(entries: RolloutRecord[]): Record<string, unknown>[] {
-  return entries
-    .filter(entry => entry.type === "response_item")
-    .flatMap(entry => object(entry.payload) ? [entry.payload!] : []);
-}
-
-function compactOutput(value: string): string {
-  return value.length <= 8_000 ? value : value.slice(-8_000);
-}
-
-try {
-  const processHandle = Bun.spawn([
-    codex,
-    "exec",
-    "--skip-git-repo-check",
-    "--json",
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--model",
-    "chatgpt-web/medium",
-    prompt,
-  ], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      CODEX_HOME: codexHome,
-      CODEX_WEB_LIVE_SMOKE_KEY: "loopback-live-smoke",
-    },
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    processHandle.kill();
-  }, 8 * 60_000);
-  const [exitCode, stdout, stderr] = await Promise.all([
-    processHandle.exited,
-    new Response(processHandle.stdout).text(),
-    new Response(processHandle.stderr).text(),
+export function parseSmokeOptions(args: string[]): SmokeOptions {
+  const options: SmokeOptions = { model: "chatgpt-web/gpt-6-sol", effort: "medium", sourceRuntime: true, help: false };
+  const keys = new Map<string, keyof SmokeOptions>([
+    ["--codex", "codex"], ["--bridge-home", "bridgeHome"], ["--bridge-url", "bridgeUrl"],
+    ["--codex-home", "codexHome"], ["--output-dir", "outputDir"], ["--launcher-log", "launcherLog"],
+    ["--model", "model"], ["--effort", "effort"],
   ]);
-  clearTimeout(timeout);
-  if (timedOut) throw new Error("Live Web subagent smoke timed out after 8 minutes");
-
-  const files = existsSync(join(codexHome, "sessions")) ? rolloutFiles(join(codexHome, "sessions")) : [];
-  const sessions = files.map(path => {
-    const entries = records(path);
-    const meta = entries.find(entry => entry.type === "session_meta");
-    const context = entries.find(entry => entry.type === "turn_context");
-    const completion = entries.find(entry => entry.type === "event_msg"
-      && object(entry.payload)?.type === "task_complete");
-    return { path, entries, meta, context, completion, depth: subagentDepth(meta) };
-  });
-  const rootSession = sessions.find(session => session.depth === 0);
-  const childSession = sessions.find(session => session.depth === 1);
-  const failures: string[] = [];
-  if (exitCode !== 0) failures.push(`Codex exited ${exitCode}`);
-  if (!rootSession) failures.push("missing root rollout");
-  if (!childSession) failures.push("missing depth-1 Web child rollout");
-
-  for (const [label, session, expectedModel] of [
-    ["root", rootSession, "chatgpt-web/medium"],
-    ["child", childSession, "chatgpt-web/high"],
-  ] as const) {
-    const context = object(session?.context?.payload);
-    if (context?.cwd !== process.cwd()) failures.push(`${label} did not inherit the repository cwd`);
-    if (context?.model !== expectedModel) failures.push(`${label} used ${String(context?.model)}, expected ${expectedModel}`);
-    if (context?.multi_agent_version !== "v1") failures.push(`${label} did not run on Compatibility V1`);
-    const completion = object(session?.completion?.payload);
-    if (object(completion?.error)) failures.push(`${label} completed with ${JSON.stringify(completion?.error)}`);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--help" || arg === "-h") { options.help = true; continue; }
+    if (arg === "--source-runtime") { options.sourceRuntime = true; continue; }
+    const key = keys.get(arg);
+    if (key) {
+      const value = args[++i];
+      if (!value || value.startsWith("--")) throw new Error(`Missing value for ${arg}`);
+      Object.assign(options, { [key]: value });
+    } else if (!arg.startsWith("--") && !options.codex) options.codex = arg;
+    else throw new Error(`Unknown option: ${arg}`);
   }
-
-  for (const [label, session] of [["root", rootSession]] as const) {
-    const items = session ? responseItems(session.entries) : [];
-    const waits = items.filter(item => item.type === "function_call" && item.name === "wait_agent");
-    const waitOutputs = items.filter(item => item.type === "function_call_output"
-      && typeof item.output === "string"
-      && (item.output.includes("completed") || item.output.includes("errored")));
-    if (waits.length === 0) failures.push(`${label} never called targeted wait_agent`);
-    if (waitOutputs.length === 0) failures.push(`${label} never received a terminal agent status`);
-  }
-
-  const rootCompletion = object(rootSession?.completion?.payload);
-  const finalMessage = typeof rootCompletion?.last_agent_message === "string"
-    ? rootCompletion.last_agent_message
-    : "";
-  if (!finalMessage.includes("LIVE_WEB_SUBAGENT_OK") || !finalMessage.includes(expectedVersion)) {
-    failures.push(`root did not return the acceptance marker for version ${expectedVersion}`);
-  }
-
-  if (failures.length > 0) {
-    throw new Error(
-      `${failures.join("; ")}\nCodex stdout:\n${compactOutput(stdout)}\nCodex stderr:\n${compactOutput(stderr)}`,
-    );
-  }
-  process.stdout.write(
-    `LIVE_WEB_SUBAGENT_CHAIN_OK root=chatgpt-web/medium child=chatgpt-web/high version=${expectedVersion}\n`,
-  );
-} finally {
-  rmSync(root, { recursive: true, force: true });
+  if (options.bridgeUrl) throw new Error("Full live evidence requires --source-runtime; an external bridge has no correlated browser diagnostics");
+  return options;
 }
+
+function object(value: unknown): ObjectRecord | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectRecord : undefined;
+}
+
+export function parseRollout(text: string, path: string): RolloutRecord[] {
+  return text.split("\n").flatMap((line, index) => {
+    if (!line.trim()) return [];
+    try { return [JSON.parse(line) as RolloutRecord]; }
+    catch { throw new Error(`Invalid rollout JSON at ${path}:${index + 1}`); }
+  });
+}
+
+function spawnMetadata(entries: RolloutRecord[]): ObjectRecord | undefined {
+  const meta = entries.find(entry => entry.type === "session_meta")?.payload;
+  return object(object(object(meta?.source)?.subagent)?.thread_spawn);
+}
+
+function items(entries: RolloutRecord[]): ObjectRecord[] {
+  return entries.flatMap(entry => entry.type === "response_item" && entry.payload ? [entry.payload] : []);
+}
+
+function toolName(item: ObjectRecord): string {
+  return typeof item.name === "string" ? item.name.split(/\.|__/).at(-1)! : "";
+}
+
+function jsonObject(value: unknown): ObjectRecord | undefined {
+  if (typeof value !== "string") return object(value);
+  try { return object(JSON.parse(value)); } catch { return undefined; }
+}
+
+function calls(entries: ObjectRecord[], name: string) {
+  return entries.flatMap((item, index) => {
+    if (item.type !== "function_call" || toolName(item) !== name) return [];
+    const resultIndex = entries.findIndex((result, position) => position > index
+      && result.type === "function_call_output" && typeof item.call_id === "string" && result.call_id === item.call_id);
+    const result = resultIndex >= 0 ? entries[resultIndex] : undefined;
+    return [{ index, resultIndex, args: jsonObject(item.arguments), result, data: jsonObject(result?.output) }];
+  });
+}
+
+function completion(entries: RolloutRecord[]): ObjectRecord | undefined {
+  return entries.findLast(entry => entry.type === "event_msg" && entry.payload?.type === "task_complete")?.payload;
+}
+
+function shellProof(entries: ObjectRecord[], token: string) {
+  return ["exec_command", "shell_command", "shell"].flatMap(name => calls(entries, name)).filter(call => {
+    const output = call.result?.output;
+    return typeof output === "string" && output.includes(token)
+      && /(?:Process exited with code|Exit code:)\s*0\b/i.test(output);
+  });
+}
+
+export function validateWebSubagentEvidence(sessions: RolloutRecord[][], expected: ExpectedEvidence) {
+  const failures: string[] = [];
+  const roots = sessions.filter(entries => !spawnMetadata(entries));
+  const children = sessions.filter(entries => spawnMetadata(entries)?.depth === 1);
+  if (roots.length !== 1 || children.length !== 1 || sessions.length !== 2) failures.push("expected exactly one root and one depth-1 child rollout");
+  const root = roots[0] ?? [];
+  const child = children[0] ?? [];
+  const rootId = root.find(entry => entry.type === "session_meta")?.payload?.id;
+  const childId = child.find(entry => entry.type === "session_meta")?.payload?.id;
+  if (!rootId || !childId || spawnMetadata(child)?.parent_thread_id !== rootId) failures.push("child lineage does not match root id");
+  for (const [label, entries] of [["root", root], ["child", child]] as const) {
+    const contexts = entries.filter(entry => entry.type === "turn_context");
+    if (!contexts.length || contexts.some(entry => typeof entry.payload?.cwd !== "string"
+      || resolve(entry.payload.cwd) !== resolve(expected.cwd) || entry.payload.model !== expected.model
+      || entry.payload.multi_agent_version !== "v1")) failures.push(`${label} cwd/model/protocol mismatch`);
+    const done = completion(entries);
+    if (!done || done.error) failures.push(`${label} missing successful task_complete`);
+  }
+  const parentItems = items(root);
+  const spawns = calls(parentItems, "spawn_agent");
+  const spawn = spawns[0];
+  if (spawns.length !== 1 || spawn?.args?.fork_context !== false
+    || spawn.args.model !== undefined || spawn.args.reasoning_effort !== undefined
+    || spawn.data?.agent_id !== childId) failures.push("spawn must return exact child id, fork_context=false and omit model/effort overrides");
+  const waits = calls(parentItems, "wait_agent").filter(call => {
+    const targets = call.args?.targets;
+    const state = object(object(call.data?.status)?.[String(childId)]);
+    return Array.isArray(targets) && targets.length === 1 && targets[0] === childId
+      && call.data?.timed_out === false && typeof state?.completed === "string"
+      && state.completed.includes(expected.childToken) && state.completed.includes(expected.version);
+  });
+  if (!waits.length) failures.push("no correlated targeted wait returned the completed child's actual result");
+  const firstWait = calls(parentItems, "wait_agent")[0];
+  const local = shellProof(parentItems, expected.parentToken).find(call => spawn && firstWait
+    && call.index > spawn.resultIndex && call.resultIndex < firstWait.index);
+  if (!local) failures.push("parent did not execute independent local proof between spawn and wait");
+  const childProofs = shellProof(items(child), expected.childToken);
+  if (!childProofs.some(call => String(call.result?.output).includes(expected.version))) failures.push("missing successful child repository read and private proof output");
+  const closes = calls(parentItems, "close_agent").filter(call => call.args?.target === childId
+    && call.result && call.data && !call.data.error
+    && (object(call.data.previous_status) ?? object(call.data.status))?.completed !== undefined
+    && waits.some(wait => call.index > wait.resultIndex));
+  if (!closes.length) failures.push("missing correlated close_agent result after collecting child");
+  const childFinal = String(completion(child)?.last_agent_message ?? "");
+  if (!childFinal.includes(expected.childToken) || !childFinal.includes(expected.version)) failures.push("child final result differs from proof");
+  const final = String(completion(root)?.last_agent_message ?? "").replaceAll("\\_", "_");
+  if (!["LIVE_WEB_SUBAGENT_OK", expected.parentToken, expected.childToken, expected.version].every(value => final.includes(value))) failures.push("parent final result differs from collected proofs");
+  return { failures, rootId, childId };
+}
+
+function files(directory: string, suffix: string): string[] {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) return files(path, suffix);
+    return entry.isFile() && entry.name.endsWith(suffix) ? [path] : [];
+  });
+}
+
+export function collectSmokeRollouts(codexHome: string, rootId: string): string[] {
+  const available = ["sessions", "archived_sessions"].flatMap(directory => files(join(codexHome, directory), ".jsonl"));
+  const rootPath = available.find(path => path.includes(rootId));
+  if (!rootPath) return [];
+  const root = parseRollout(readFileSync(rootPath, "utf8"), rootPath);
+  const childIds = calls(items(root), "spawn_agent").flatMap(call => typeof call.data?.agent_id === "string" ? [call.data.agent_id] : []);
+  return available.filter(path => [rootId, ...childIds].some(id => path.includes(id)));
+}
+
+export function correlateSmokeTraces(registrations: Array<{ traceId?: string }>, rootId: unknown, childId: unknown) {
+  const traces = [...new Set(registrations.map(entry => entry.traceId))];
+  if (traces.length !== 2 || traces.some(trace => !trace) || typeof rootId !== "string" || typeof childId !== "string") {
+    throw new Error("Expected exactly two registered browser traces for the root and its single child");
+  }
+  return traces.map((traceId, index) => ({ traceId, threadId: index === 0 ? rootId : childId }));
+}
+
+function writeJson(path: string, value: unknown) { writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`); }
+
+async function main() {
+  const options = parseSmokeOptions(process.argv.slice(2));
+  if (options.help) { process.stdout.write(HELP); return; }
+  const cwd = resolve(import.meta.dir, "..");
+  const git = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" });
+  if (git.status !== 0 || resolve(git.stdout.trim()) !== cwd || resolve(process.cwd()) !== cwd) throw new Error(`Run from authoritative repository root: ${cwd}`);
+  const outputDir = resolve(options.outputDir ?? join(cwd, "outputs", `web-subagents-${Date.now()}`));
+  if (existsSync(outputDir)) throw new Error(`Evidence directory must be fresh: ${outputDir}`);
+  mkdirSync(outputDir, { recursive: true });
+  const report: ObjectRecord = { status: "preparing", cwd, outputDir, startedAt: new Date().toISOString() };
+  let sourceServer: ReturnType<typeof Bun.serve> | undefined;
+  const mappings: Array<{ threadId?: string; parentThreadId?: string; traceId?: string }> = [];
+  const codexHome = resolve(options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex"));
+  const sqliteHome = options.codexHome ? codexHome : resolve(process.env.CODEX_SQLITE_HOME ?? codexHome);
+  const previousHome = process.env.CODEX_HOME;
+  const previousSqlite = process.env.CODEX_SQLITE_HOME;
+  const previousBridgeHome = process.env.CODEX_CHATGPT_WEB_HOME;
+  try {
+    if (options.bridgeHome) process.env.CODEX_CHATGPT_WEB_HOME = resolve(options.bridgeHome);
+    const config = loadConfig();
+    const bridgeHome = getConfigDir();
+    if (config.browserHost !== "launcher" || config.browserInteractionMode !== "automatic"
+      || config.mode !== "full" || config.subagentProtocol !== "compatibility-v1" || !config.useSavedChats) {
+      throw new Error("Requires launcher automatic/full Compatibility V1 config with useSavedChats=true");
+    }
+    if (!options.launcherLog || !existsSync(options.launcherLog)) throw new Error("--launcher-log must identify the current launcher JSONL log for retention/release proof");
+    const codex = options.codex ? resolve(options.codex) : Bun.which("codex");
+    if (!codex || !existsSync(codex)) throw new Error("Codex binary missing; supply --codex with the Windows Codex executable");
+    mkdirSync(codexHome, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+    process.env.CODEX_SQLITE_HOME = sqliteHome;
+    const version = spawnSync(codex, ["--version"], { encoding: "utf8", timeout: 15_000 });
+    const bundled = spawnSync(codex, ["debug", "models", "--bundled"], { encoding: "utf8", timeout: 15_000 });
+    if (bundled.status !== 0) throw new Error(`Could not read current bundled catalog: ${bundled.error?.message ?? bundled.stderr}`);
+    const catalog = augmentNativeModelCatalog(JSON.parse(bundled.stdout), config);
+    const models = catalog.models as ObjectRecord[];
+    const selected = models.find(model => model.slug === options.model && model.visibility === "list");
+    if (!selected || !(selected.supported_reasoning_levels as ObjectRecord[]).some(level => level.effort === options.effort)) throw new Error("Requested model/effort is not visible in current augmented catalog");
+    writeJson(join(outputDir, "models.json"), catalog);
+    let endpoint = options.bridgeUrl ?? `http://${config.host}:${config.port}/v1`;
+    const runtimeRoot = join(outputDir, "runtime");
+    if (options.sourceRuntime) {
+      const { createLauncherDevAdapter } = await import("../src/dev-chat/driver");
+      const { startServer } = await import("../src/server");
+      const { RemoteTurnBroker } = await import("../src/adapters/chatgpt-web/turn-broker");
+      const remote = new RemoteTurnBroker(config.brokerSocketPath);
+      await remote.assertCompatible();
+      const observedBroker = new Proxy(remote, { get(target, key) {
+        if (key === "register") return (...args: Parameters<typeof remote.register>) => {
+          mappings.push({ traceId: args[2] });
+          writeJson(join(outputDir, "trace-mappings.json"), mappings);
+          return target.register(...args);
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+      mkdirSync(runtimeRoot, { recursive: true });
+      const helper = join(runtimeRoot, "browser-helper.cjs");
+      const build = Bun.spawnSync([process.execPath, "run", join(cwd, "scripts/build-browser-helper.ts"), helper], { cwd, stdout: "pipe", stderr: "pipe" });
+      writeFileSync(join(outputDir, "helper-build.log"), `${build.stdout}\n${build.stderr}`);
+      if (build.exitCode !== 0) throw new Error("Source browser helper build failed; see helper-build.log");
+      const adapter = createLauncherDevAdapter(config, runtimeRoot, { broker: observedBroker, browserHelperScriptPath: helper });
+      const smokeConfig = { ...config, port: 0, brokerSocketPath: defaultBrokerEndpoint(outputDir) };
+      sourceServer = startServer(smokeConfig, { adapterFactory: adapter.adapterFactory });
+      endpoint = `http://127.0.0.1:${sourceServer.port}/v1`;
+    }
+    Object.assign(report, { codex, codexVersion: version.stdout.trim(), bridgeHome, endpoint, sourceRuntime: options.sourceRuntime, codexHome, sqliteHome, model: options.model, effort: options.effort, childChatMode: config.subagentUseSavedChats ? "saved" : "temporary", head: spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).stdout.trim() });
+    const configArgs = [
+      `model=${JSON.stringify(options.model)}`, 'model_provider="live_bridge"',
+      `model_reasoning_effort=${JSON.stringify(options.effort)}`,
+      `model_catalog_json=${JSON.stringify(join(outputDir, "models.json"))}`,
+      `sqlite_home=${JSON.stringify(sqliteHome)}`,
+      'model_providers.live_bridge.name="Live Web smoke"',
+      `model_providers.live_bridge.base_url=${JSON.stringify(endpoint)}`,
+      'model_providers.live_bridge.env_key="CODEX_WEB_LIVE_SMOKE_KEY"',
+      'model_providers.live_bridge.wire_api="responses"',
+      "model_providers.live_bridge.supports_websockets=false",
+      "features.multi_agent=true", "features.multi_agent_v2=false", "agents.max_depth=1",
+    ];
+    writeFileSync(join(outputDir, "codex-overrides.txt"), configArgs.join("\n"));
+    const parentToken = crypto.randomUUID();
+    const childToken = crypto.randomUUID();
+    const parentFile = join(outputDir, "parent-proof.json");
+    const childFile = join(outputDir, "child-proof.json");
+    writeJson(parentFile, { token: parentToken });
+    writeJson(childFile, { token: childToken });
+    const expectedVersion = String(JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")).version);
+    const prompt = [
+      "Perform this bounded real Web delegation test. Use tools, no fallback model, no application edits.",
+      "Spawn exactly one child immediately, omit model and reasoning_effort so it inherits yours; fork_context=false.",
+      `Its compact task: read ${JSON.stringify(childFile)} and repository package.json using shell tools in one command; return CHILD_RESULT, the token and exact version. No delegation.`,
+      `After spawning, before your first wait, independently read ${JSON.stringify(parentFile)} using a local shell tool.`,
+      "Wait for that exact child id using targeted wait_agent, collect its actual completed result, then close that child and inspect close result.",
+      "Finish with LIVE_WEB_SUBAGENT_OK, your local token, the child's token and version. Fail explicitly if anything is unavailable.",
+    ].join(" ");
+    writeFileSync(join(outputDir, "prompt.txt"), prompt);
+    const startedAt = Date.now();
+    report.status = "running";
+    writeJson(join(outputDir, "report.json"), report);
+    const child = Bun.spawn([codex, "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", ...configArgs.flatMap(value => ["-c", value]), prompt], {
+      cwd, env: { ...process.env, CODEX_WEB_LIVE_SMOKE_KEY: "loopback-live-smoke" }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 8 * 60_000);
+    const saveStream = async (stream: ReadableStream<Uint8Array>, path: string) => {
+      writeFileSync(path, "");
+      for await (const chunk of stream) appendFileSync(path, chunk);
+    };
+    let exitCode: number;
+    try {
+      [exitCode] = await Promise.all([child.exited, saveStream(child.stdout, join(outputDir, "codex.stdout.jsonl")), saveStream(child.stderr, join(outputDir, "codex.stderr.log"))]);
+    } finally { clearTimeout(timer); }
+    const stdout = parseRollout(readFileSync(join(outputDir, "codex.stdout.jsonl"), "utf8"), "codex.stdout.jsonl") as Array<ObjectRecord>;
+    const rootId = stdout.find(entry => entry.type === "thread.started")?.thread_id;
+    const all = collectSmokeRollouts(codexHome, String(rootId));
+    const evidenceDir = join(outputDir, "rollouts");
+    mkdirSync(evidenceDir);
+    const sessions = all.map((path, index) => {
+      const raw = readFileSync(path, "utf8");
+      writeFileSync(join(evidenceDir, `${index}.jsonl`), raw);
+      return parseRollout(raw, path);
+    });
+    const evidence = validateWebSubagentEvidence(sessions, { cwd, model: options.model, version: expectedVersion, parentToken, childToken });
+    const correlatedMappings = correlateSmokeTraces(mappings, evidence.rootId, evidence.childId);
+    writeJson(join(outputDir, "trace-mappings.json"), correlatedMappings);
+    if (exitCode !== 0 || timedOut) evidence.failures.push(`Codex exit=${exitCode}, timedOut=${timedOut}`);
+    const launcherEvents = [options.launcherLog + ".1", options.launcherLog].flatMap(path => existsSync(path)
+      ? readFileSync(path, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as ObjectRecord) : []);
+    const relevantEvents = launcherEvents.filter(event => Date.parse(String(event.at)) >= startedAt
+      && mappings.some(mapping => mapping.traceId === object(event.detail)?.traceId));
+    writeJson(join(outputDir, "launcher-events.json"), relevantEvents);
+    const diagnostics: ObjectRecord[] = files(join(runtimeRoot, "diagnostics"), ".json").map(path => ({ path, ...JSON.parse(readFileSync(path, "utf8")) as ObjectRecord }));
+    const childTraces = new Set(correlatedMappings.filter(mapping => mapping.threadId === evidence.childId).map(mapping => mapping.traceId));
+    const rootTraces = new Set(correlatedMappings.filter(mapping => mapping.threadId === evidence.rootId).map(mapping => mapping.traceId));
+    const childChatCheckpoint = config.subagentUseSavedChats ? "saved-chat-navigation-complete" : "temporary-chat-navigation-complete";
+    if (!diagnostics.some(diagnostic => childTraces.has(diagnostic.traceId as string)
+      && diagnostic.checkpoint === childChatCheckpoint
+      && object(object(diagnostic.state)?.location)?.temporaryChat === !config.subagentUseSavedChats)) evidence.failures.push("missing child configured chat-policy navigation diagnostic");
+    const childEvents = relevantEvents.filter(event => childTraces.has(object(event.detail)?.traceId as string));
+    if (childEvents.some(event => new Set(["browser.tab_retained", "browser.tab_restored", "browser.tab_reused"]).has(String(event.event)))) evidence.failures.push("child was retained/restored/reused");
+    if (!childEvents.some(event => event.event === "browser.tab_released")
+      || !childEvents.some(event => event.event === "browser.turn_ended" && object(event.detail)?.status === "completed")) evidence.failures.push("missing completed child tab release diagnostic");
+    if (!relevantEvents.some(event => rootTraces.has(object(event.detail)?.traceId as string) && event.event === "browser.tab_retained")) evidence.failures.push("missing saved root tab retention diagnostic");
+    Object.assign(report, { ...evidence, exitCode, timedOut, rolloutPaths: all, mappings: correlatedMappings, status: evidence.failures.length ? "failed" : "passed" });
+    if (evidence.failures.length) throw new Error(evidence.failures.join("; "));
+    process.stdout.write(`LIVE_WEB_SUBAGENT_CHAIN_OK ${join(outputDir, "report.json")}\n`);
+  } catch (error) {
+    report.status = "failed";
+    report.error = error instanceof Error ? error.message : String(error);
+    process.exitCode = 1;
+    process.stderr.write(`${report.error}\nEvidence: ${outputDir}\n`);
+  } finally {
+    report.finishedAt = new Date().toISOString();
+    writeJson(join(outputDir, "report.json"), report);
+    if (sourceServer) {
+      await sourceServer.stop(true);
+      const { closeTurnBrokers } = await import("../src/adapters/chatgpt-web/turn-broker");
+      const { closeChatGptBrowserWorkers } = await import("../src/adapters/chatgpt-web/browser-worker");
+      await Promise.allSettled([closeTurnBrokers(), closeChatGptBrowserWorkers()]);
+    }
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    if (previousSqlite === undefined) delete process.env.CODEX_SQLITE_HOME; else process.env.CODEX_SQLITE_HOME = previousSqlite;
+    if (previousBridgeHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME; else process.env.CODEX_CHATGPT_WEB_HOME = previousBridgeHome;
+  }
+}
+
+if (import.meta.main) await main();

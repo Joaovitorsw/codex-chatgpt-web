@@ -149,10 +149,8 @@ test("one browser conversation spans native turns and rotates only at compaction
       turn_id: "turn_branch_next",
     }),
   };
-  // A branch begins in a new browser conversation, while its own follow-ups
-  // retain that new conversation instead of allocating a tab per turn.
-  expect(chatGptConversationKey(branch, "provider")).not.toBe(chatGptConversationKey(before, "provider"));
-  expect(chatGptConversationKey(branchFollowUp, "provider")).toBe(chatGptConversationKey(branch, "provider"));
+  expect(chatGptConversationKey(branch, "provider")).toBeUndefined();
+  expect(chatGptConversationKey(branchFollowUp, "provider")).toBeUndefined();
   expect(retainedConversationResumeRequest(before)?.context.messages).toEqual([
     { role: "user", content: "Continue with the next step", timestamp: 3 },
   ]);

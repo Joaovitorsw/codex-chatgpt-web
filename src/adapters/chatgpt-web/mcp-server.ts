@@ -268,7 +268,7 @@ function safeVisibleTools(environment: ChatGptTurnEnvironment, contract: ChatGpt
     && !BRIDGE_TOOL_NAMES.has(tool.name)
     // Zero Risk does not expose model-authored JavaScript. Automatic Full mode keeps the native
     // Codex exec surface and applies its transport guard at invocation time below.
-    && (tool.namespace !== undefined || tool.name !== "exec")
+    && !isExecGateway(tool)
     && (!tool.namespace || !bridgeNamespaces.has(tool.namespace))
   ));
 }
@@ -283,7 +283,7 @@ function isGatewayAgentWaitTool(name: string): boolean {
 
 function browserToolDescription(tool: CodexTool): string {
   if (isAgentWaitTool(tool)) return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE}`;
-  if (!tool.namespace && tool.name === "exec") {
+  if (isExecGateway(tool)) {
     return `${tool.description}\n\n${AGENT_WAIT_TRANSPORT_RULE} This rule is enforced for wait_agent calls made inside exec; recursive raw exec is unavailable.`;
   }
   return tool.description;
@@ -501,9 +501,13 @@ function asMcpResult(value: BrokerToolResult) {
   };
 }
 
+function isExecGateway(tool: CodexTool): boolean {
+  return tool.name === "exec" && tool.freeform === true
+    && (!tool.namespace || tool.namespace === "functions");
+}
+
 function execGateway(environment: ChatGptTurnEnvironment): CodexTool | undefined {
-  const tool = exactTool(environment, "exec");
-  return tool?.freeform ? tool : undefined;
+  return environment.tools.find(isExecGateway);
 }
 
 function gatewayNestedToolName(toolName: string): string {

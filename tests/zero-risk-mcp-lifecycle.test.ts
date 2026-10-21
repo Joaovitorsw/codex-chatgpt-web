@@ -273,6 +273,7 @@ describe("Zero Risk public MCP ABI", () => {
     const ownNamespace = "mcp__codex_safe";
     const requestId = await broker.registerSafe(environment([
       { name: "exec", description: "Recursive freeform gateway", parameters: {}, freeform: true },
+      { name: "exec", namespace: "functions", description: "Namespaced recursive gateway", parameters: {}, freeform: true },
       { name: "exec_command", description: "Run a command", parameters: { type: "object" } },
       { name: "codex_tool_inventory", description: "Top-level recursive bridge", parameters: { type: "object" } },
       { name: CODEX_COMPACTION_CONTROL_WIRE_NAME, description: "Internal compaction", parameters: { type: "object" } },

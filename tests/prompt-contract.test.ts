@@ -180,6 +180,75 @@ test("Pro preserves the same native Codex delegation contract as Extra High", ()
   }
 });
 
+test.each(["low", "medium", "high", "xhigh", "max"] as const)("%s Web prompts discover authorized independent delegation early", reasoning => {
+  const compiled = compileChatGptWebPrompt(
+    request(reasoning),
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+  );
+  const transport = compiled.text.split("<codex_context_json>")[0]!;
+
+  expect(transport).toContain("When delegation is explicitly authorized by the user or applicable AGENTS.md or skill instructions");
+  expect(transport).toContain("at the start of substantial work");
+  expect(transport).toContain("the critical path, the next action to perform locally, and a useful independent sidecar");
+  expect(transport).toContain("Keep the immediate blocker local");
+  expect(transport).toContain("discover the actual Codex Native subagent capabilities early");
+  expect(transport).toContain("before broad serial exploration");
+  expect(transport).toContain("Start with one or two agents when useful and capacity permits");
+  expect(transport).toContain("Do not force agents for trivial, tightly coupled, or unauthorized tasks");
+  expect(transport).toContain("This guidance neither grants delegation authorization nor changes the supplied instruction priority");
+  expect(transport).toContain("system, then developer, then user");
+});
+
+test("Web delegation supplies lean explicit briefs and inherits the parent model", () => {
+  const compiled = compileChatGptWebPrompt(
+    request("high"),
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+  );
+
+  expect(compiled.text).toContain("Default to fork_context=false when the declared spawn schema supports it");
+  expect(compiled.text).toContain("a concise self-contained brief instead of copying the full parent conversation");
+  expect(compiled.text).toContain("objective, authoritative project root, owned files or read-only scope");
+  expect(compiled.text).toContain("relevant instructions and evidence, dependencies, acceptance checks, and expected compact result");
+  expect(compiled.text).toContain("Omit model and reasoning-effort overrides to inherit the parent's configured route");
+  expect(compiled.text).toContain("unless the user explicitly requests a different model or effort");
+});
+
+test("Web delegation keeps local progress and collects and closes task-owned agents", () => {
+  const compiled = compileChatGptWebPrompt(
+    request("max"),
+    { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+  );
+
+  expect(compiled.text).toContain("Continue meaningful non-overlapping local work immediately after dispatch");
+  expect(compiled.text).toContain("Assign disjoint write scopes, preserve concurrent edits, and serialize shared mutable runtime state");
+  expect(compiled.text).toContain("Collect compact results, inspect the actual diff or evidence, and validate integration in the authoritative root");
+  expect(compiled.text).toContain("Close task-owned agents once their context is no longer needed");
+  expect(compiled.text).toContain("never create new user-owned chats or use cross-chat messaging as a substitute");
+  expect(compiled.text).toContain("On a capacity limit or unavailable subagent capability, continue useful local work");
+});
+
+test.each([
+  { localToolsEnabled: false, compaction: false },
+  { localToolsEnabled: false, compaction: true },
+  { localToolsEnabled: true, compaction: true },
+])("delegation instructions stay out of isolated prompt mode %j", ({ localToolsEnabled, compaction }) => {
+  const parsed = request("high");
+  parsed._compactionRequest = compaction;
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    localToolsEnabled ? "turn_12345678901234567890123456789012" : undefined,
+  );
+
+  expect(compiled.text).not.toContain("When delegation is explicitly authorized");
+  expect(compiled.text).not.toContain("subagent capabilities");
+  expect(compiled.text).not.toContain("fork_context");
+  expect(compiled.text).not.toContain("task-owned agents");
+});
+
 test("read-only prompts resume without exposing a bind capability", () => {
   const compiled = compileChatGptWebPrompt(
     request("max"),

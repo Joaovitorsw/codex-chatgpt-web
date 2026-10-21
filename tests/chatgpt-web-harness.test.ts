@@ -295,6 +295,95 @@ function proRequest(environmentText = environmentXml): CodexParsedRequest {
   return request;
 }
 
+test.each([
+  { child: false, failed: false, compaction: false, savedAgents: false },
+  { child: true, failed: false, compaction: false, savedAgents: false },
+  { child: true, failed: true, compaction: false, savedAgents: false },
+  { child: true, failed: false, compaction: true, savedAgents: false },
+  { child: false, failed: false, compaction: false, savedAgents: true },
+  { child: true, failed: false, compaction: false, savedAgents: true },
+  { child: true, failed: true, compaction: false, savedAgents: true },
+  { child: true, failed: false, compaction: true, savedAgents: true },
+])("root retention and configured child chat policy stay isolated %j", async ({ child, failed, compaction, savedAgents }) => {
+  const socketPath = brokerTestEndpoint(`chat-policy-${process.pid}-${Date.now()}-${child}-${failed}-${compaction}`);
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://chat-policy-${socketPath}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(tempRoot, "launcher-policy.json"),
+      brokerSocketPath: socketPath,
+      localToolsEnabled: true,
+      solAvailable: true,
+      proAvailable: true,
+      useSavedChats: true,
+      subagentUseSavedChats: savedAgents,
+    },
+  };
+  const rootWorker = ChatGptBrowserWorker.forProvider(provider);
+  const temporaryWorker = ChatGptBrowserWorker.forProvider({
+    ...provider,
+    chatgptWeb: { ...provider.chatgptWeb, useSavedChats: false },
+  });
+  const visited: string[] = [];
+  const run = (surface: string) => async (turn: BrowserTurn): Promise<string> => {
+    visited.push(surface);
+    expect(turn.retainConversation === true).toBe(!child);
+    expect(turn.conversationKey !== undefined).toBe(!child);
+    expect(turn.prepareResume !== undefined).toBe(!child);
+    const prepared = await turn.prepare();
+    prepared.release();
+    if (failed) throw new Error("Child failed");
+    turn.onTextDelta("Policy checked");
+    return "Policy checked";
+  };
+  const rootRun = spyOn(rootWorker, "run").mockImplementation(run("saved"));
+  const temporaryRun = spyOn(temporaryWorker, "run").mockImplementation(run("temporary"));
+  const parsed = proRequest();
+  parsed._compactionRequest = compaction;
+  if (child) {
+    const raw = parsed._rawBody as { client_metadata: Record<string, unknown> };
+    const metadata = JSON.parse(String(raw.client_metadata["x-codex-turn-metadata"]));
+    raw.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      ...metadata,
+      parent_thread_id: "thread_parent_policy",
+    });
+  }
+  const events: AdapterEvent[] = [];
+  try {
+    const execution = createChatGptWebAdapter(provider).runTurn!(parsed, { headers: new Headers() }, event => events.push(event));
+    if (failed) {
+      await expect(execution).rejects.toThrow("Child failed");
+    } else {
+      await execution;
+      expect(events.filter(event => event.type === "error")).toEqual([]);
+      expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
+    }
+    expect(visited).toEqual([child && !savedAgents ? "temporary" : "saved"]);
+    expect(provider.chatgptWeb?.useSavedChats).toBeTrue();
+  } finally {
+    rootRun.mockRestore();
+    temporaryRun.mockRestore();
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(socketPath).close();
+  }
+});
+
+test("changing only the child chat policy preserves the root conversation namespace", () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: "browser://root-retention-policy",
+    chatgptWeb: { useSavedChats: true },
+  };
+  const namespace = chatGptWebExecutionNamespace(provider);
+  const savedChildren = { ...provider, chatgptWeb: { ...provider.chatgptWeb, subagentUseSavedChats: true } };
+  const temporaryChildren = { ...provider, chatgptWeb: { ...provider.chatgptWeb, subagentUseSavedChats: false } };
+  expect(chatGptWebExecutionNamespace(savedChildren)).toBe(namespace);
+  expect(chatGptWebExecutionNamespace(temporaryChildren)).toBe(namespace);
+  expect(chatGptConversationKey(proRequest(), chatGptWebExecutionNamespace(savedChildren)))
+    .toBe(chatGptConversationKey(proRequest(), namespace));
+});
+
 function toolResult(value: Record<string, unknown>): BrokerToolResult {
   return {
     content: [{ type: "text", text: JSON.stringify(value) }],
@@ -3523,12 +3612,12 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   }, 30_000);
 
-  test("serves the outer-native bridge contract over MCP stdio for a turn registered without a turn timeout", async () => {
+  for (const namespace of [undefined, "functions"]) test(`serves the outer-native bridge contract without a turn timeout (namespace=${namespace})`, async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-mcp-no-ttl-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
     const gatewayOnlyEnvironment = extractChatGptTurnEnvironment(parsed(environmentXml));
     gatewayOnlyEnvironment.tools = [
-      { name: "exec", description: "Run nested Codex tools, including exec_command", parameters: {}, freeform: true },
+      { name: "exec", namespace, description: "Run nested Codex tools, including exec_command", parameters: {}, freeform: true },
       { name: "wait", description: "Wait for an exec cell", parameters: { type: "object" } },
       { name: "request_user_input", description: "Request user input", parameters: { type: "object" } },
     ];
@@ -3558,7 +3647,7 @@ describe("ChatGPT outer-native harness v4", () => {
           throw new Error(`codex_exec settled before reaching the broker: ${JSON.stringify(response.content)}`);
         }),
       ]);
-      expect(execRequest).toMatchObject({ wireName: "exec", freeform: true });
+      expect(execRequest).toMatchObject({ wireName: namespace ? `${namespace}__exec` : "exec", freeform: true });
       expect(execRequest?.input).toContain("ALL_TOOLS");
       expect(execRequest?.input).toContain('"exec_command"');
       expect(execRequest?.input).toContain('"shell_command"');

@@ -552,6 +552,7 @@ test("manual control keeps start idempotency separate from long Sent observation
       resumePrompt: "incremental prompt",
       conversationKey: "c".repeat(64),
       compaction: true,
+      useSavedChats: false,
     })).status, 200);
     assert.equal((await post("/v1/manual/wait-sent", owner)).status, 200);
     assert.equal((await post("/v1/manual/wait-terminal", owner)).status, 200);
@@ -560,10 +561,19 @@ test("manual control keeps start idempotency separate from long Sent observation
     assert.equal(calls[0][0], "start");
     assert.equal(calls[0][3], prompt);
     assert.equal(calls[0][5], "incremental prompt");
-    assert.equal(calls[0][6], true);
+    assert.deepEqual(calls[0][6], { compaction: true, useSavedChats: false });
     assert.equal(calls[1][0], "wait");
     assert.equal(calls[2][0], "wait-terminal");
     assert.equal(logs.some(([, detail]) => JSON.stringify(detail).includes(prompt)), false);
+    for (const useSavedChats of ["false", null, 0]) {
+      assert.equal((await post("/v1/manual/start", { ...owner, prompt, useSavedChats })).status, 400);
+    }
+    const starts = calls.filter(call => call[0] === "start");
+    assert.equal(starts.length, 1);
+    assert.equal((await post("/v1/manual/start", { ...owner, prompt })).status, 200);
+    assert.deepEqual(calls.at(-1)[6], { compaction: false });
+    assert.equal((await post("/v1/manual/start", { ...owner, prompt, useSavedChats: true })).status, 200);
+    assert.deepEqual(calls.at(-1)[6], { compaction: false, useSavedChats: true });
   } finally {
     await server.close();
   }

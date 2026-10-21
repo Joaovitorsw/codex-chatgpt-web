@@ -112,9 +112,10 @@ for (const scenario of [
     manualOperation: null, clipboard: { writeText() {} }, logger,
     publishState() {}, snapshot: () => ({}), showWindow() {}, show() {}, writeDescriptor() {},
     createManualTurnTab(traceId: string, helperPid: number, conversationKey: string | undefined,
-      prompt: string, manualSubmitTimeoutMs: number) {
+      prompt: string, manualSubmitTimeoutMs: number, { useSavedChats }: { useSavedChats?: boolean } = {}) {
       const tab = {
         id: traceId, traceId, helperPid, conversationKey, interactionMode: "manual", status: "running",
+        useSavedChats,
         manualState: "awaiting-user", manualSubmitTimeoutMs, manualDeadlineAt: Date.now() + manualSubmitTimeoutMs,
         manualDeadlineTimer: null, manualWaiters: new Set(), manualTerminalWaiters: new Set(),
         prompt, promptDigest: createHash("sha256").update(prompt).digest("hex"), manualConversationReused: false,
@@ -144,7 +145,8 @@ for (const scenario of [
   const control: ChatGptZeroRiskManualControl = {
     async start(_path, activity) {
       host.beginManualTurn(activity.traceId, activity.helperPid, activity.prompt,
-        activity.conversationKey, activity.resumePrompt, activity.compaction);
+        activity.conversationKey, activity.resumePrompt,
+        { compaction: activity.compaction, useSavedChats: activity.useSavedChats });
       starts.push(activity.traceId);
       bindings.set(activity.traceId, binding(activity.prompt).request_id);
     },
@@ -238,8 +240,14 @@ for (const scenario of [
   }
 });
 
-test("Zero Risk adapter never starts the automatic browser worker and completes only through Zero Risk MCP", async () => {
+test.each([
+  { child: false, savedAgents: false },
+  { child: true, savedAgents: false },
+  { child: true, savedAgents: true },
+])("Zero Risk adapter keeps manual child chat policy and never runs automatic browsing %j", async ({ child, savedAgents }) => {
   const config = provider("complete");
+  config.chatgptWeb!.useSavedChats = true;
+  config.chatgptWeb!.subagentUseSavedChats = savedAgents;
   const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);
   const worker = ChatGptBrowserWorker.forProvider(config);
   const originalRun = worker.run.bind(worker);
@@ -254,6 +262,8 @@ test("Zero Risk adapter never starts the automatic browser worker and completes 
       calls.push("start");
       manualCompaction = activity.compaction;
       exactBinding = binding(activity.prompt);
+      expect(activity.useSavedChats).toBe(child ? savedAgents : undefined);
+      expect(activity.conversationKey !== undefined).toBe(!child);
     },
     async waitSent() {
       calls.push("sent");
@@ -268,13 +278,19 @@ test("Zero Risk adapter never starts the automatic browser worker and completes 
     async cancel() { calls.push("cancel"); },
   };
   const events: AdapterEvent[] = [];
+  const parsed = request("turn_safe_complete");
+  if (child) {
+    const raw = parsed._rawBody as { client_metadata: Record<string, unknown> };
+    const metadata = JSON.parse(String(raw.client_metadata["x-codex-turn-metadata"]));
+    raw.client_metadata["x-codex-turn-metadata"] = JSON.stringify({ ...metadata, parent_thread_id: "thread_manual_parent" });
+  }
   try {
     await createChatGptWebAdapter(config, { broker, zeroRiskManualControl: control }).runTurn!(
-      request("turn_safe_complete"),
+      parsed,
       { headers: new Headers() },
       event => events.push(event),
     );
-    expect(calls).toEqual(["start", "sent", "started", "end:completed:true"]);
+    expect(calls).toEqual(["start", "sent", "started", `end:completed:${!child}`]);
     expect(manualCompaction).toBeUndefined();
     expect(events.some(event => event.type === "text_delta"
       && event.phase === "commentary"

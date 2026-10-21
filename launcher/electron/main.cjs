@@ -32,6 +32,7 @@ const {
   registerLoggedIpc,
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
+const { createCodexDesktopLifecycle } = require("./codex-desktop.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
@@ -102,6 +103,7 @@ let mainWindowShowRequested = false;
 let startupFailed = false;
 let browserHost = null;
 let runtimeHost = null;
+let codexDesktop = null;
 let finishRuntimeStartup;
 const runtimeStartup = new Promise(resolve => { finishRuntimeStartup = resolve; });
 let browserControl = null;
@@ -999,6 +1001,7 @@ function registerIpc({ logger, stateStore }) {
     return { cancelled: false, state };
   });
   handle("launcher:setup-core", async (_event, input = {}) => {
+    if (runtimeHost.currentOperation()) throw new Error("Finish the current launcher operation before reinstalling models.");
     const setupState = stateStore.read();
     const availableBundledSkills = listBundledSkills(BUNDLED_SKILLS_PATH);
     const selectedBundledSkills = validateBundledSkillSelection(
@@ -1006,7 +1009,7 @@ function registerIpc({ logger, stateStore }) {
       availableBundledSkills,
     );
     const smokeProved = smokePassedThisSession || smokePassedForCurrentVersion(setupState);
-    if (setupState.browserInteractionMode === "automatic" && !smokeProved) {
+    if (setupState.browserInteractionMode === "automatic" && !setupState.coreSetupComplete && !smokeProved) {
       const browser = await browserHost.probeAuthentication();
       if (!browser.authenticated) {
         if (browser.status === "error") throw new Error(browser.message);
@@ -1026,41 +1029,50 @@ function registerIpc({ logger, stateStore }) {
           : "Run the browser smoke test before installing the Codex integration",
       );
     }
-    const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
-    const bundledSkillResult = syncBundledSkills({
-      sourceRoot: BUNDLED_SKILLS_PATH,
-      codexHome: LAUNCHER_PROFILE.codexHome,
-      selectedSkills: selectedBundledSkills,
-    });
-    stateStore.update({
-      coreSetupComplete: true,
-      codexCatalogVerified: IS_DEV_PROFILE ? true : false,
-      codexRestartRequired: IS_DEV_PROFILE ? false : true,
-      biggerContextAvailable: typeof runtimeHost.runtimeConfigSnapshot().config?.solAvailable === "boolean",
-      zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
-      experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
-      experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
-      experimentalContextAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalContextAttachments === true,
-      experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
-      useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
-      bundledSkillSelection: selectedBundledSkills,
-      ...(result.mode === "full" ? {
-        mcpRuntimeInstalled: true,
-        mcpSetupComplete: false,
-        mcpGuideStep: 2,
-      } : {
-        mcpSetupComplete: false,
-        mcpRuntimeInstalled: false,
-        mcpGuideStep: 0,
-      }),
-    });
-    await browserHost.returnToIdle().catch((error) => {
-      logger.warn("browser.idle_cleanup_failed", {
-        message: error instanceof Error ? error.message : String(error),
+    const reinstall = !IS_DEV_PROFILE && setupState.coreSetupComplete;
+    const installModels = async () => {
+      if (reinstall) await runtimeSupervisor.cancelActiveTurns();
+      const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
+      const bundledSkillResult = syncBundledSkills({
+        sourceRoot: BUNDLED_SKILLS_PATH,
+        codexHome: LAUNCHER_PROFILE.codexHome,
+        selectedSkills: selectedBundledSkills,
       });
-    });
+      stateStore.update({
+        coreSetupComplete: true,
+        codexCatalogVerified: IS_DEV_PROFILE ? true : false,
+        codexRestartRequired: IS_DEV_PROFILE ? false : true,
+        biggerContextAvailable: typeof runtimeHost.runtimeConfigSnapshot().config?.solAvailable === "boolean",
+        zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
+        experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
+        experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
+        experimentalContextAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalContextAttachments === true,
+        experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
+        useSavedChats: runtimeHost.runtimeConfigSnapshot().config?.useSavedChats === true,
+        bundledSkillSelection: selectedBundledSkills,
+        ...(result.mode === "full" ? {
+          mcpRuntimeInstalled: true,
+          mcpSetupComplete: false,
+          mcpGuideStep: 2,
+        } : {
+          mcpSetupComplete: false,
+          mcpRuntimeInstalled: false,
+          mcpGuideStep: 0,
+        }),
+      });
+      await browserHost.returnToIdle().catch((error) => {
+        logger.warn("browser.idle_cleanup_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+      return { ...result, bundledSkills: bundledSkillResult };
+      };
+    const result = reinstall
+      ? await codexDesktop.withRestart(installModels)
+      : await installModels();
+    if (reinstall) stateStore.update({ codexRestartRequired: false });
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
-    return { ok: true, stdout: result.stdout, restartRequired: !IS_DEV_PROFILE, bundledSkills: bundledSkillResult };
+    return { ok: true, stdout: result.stdout, restartRequired: !IS_DEV_PROFILE && !reinstall, bundledSkills: result.bundledSkills };
   });
   handle("launcher:setup-mcp", async (_event, input) => {
     // The Setup surface may be opened while a slow smoke test is still waiting for
@@ -1519,6 +1531,7 @@ async function start() {
       if (browserHost && !runtimeHost?.currentOperation()) syncBrowserPreferences(stateStore, config);
     },
   });
+  codexDesktop = createCodexDesktopLifecycle({ logger });
   runtimeHost = new RuntimeHost({
     app,
     logger,

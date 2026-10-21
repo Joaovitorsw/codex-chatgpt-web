@@ -195,9 +195,11 @@ function safeManualTerminalError(status: "cancelled" | "failed"): ChatGptWebAdap
 }
 
 export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): string {
+  const chatgptWeb = { ...provider.chatgptWeb };
+  delete chatgptWeb.subagentUseSavedChats;
   return createHash("sha256").update(JSON.stringify({
     baseUrl: provider.baseUrl,
-    chatgptWeb: provider.chatgptWeb ?? {},
+    chatgptWeb,
   })).digest("hex");
 }
 
@@ -550,6 +552,12 @@ export function createChatGptWebAdapter(
       ? { localTools: true }
       : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const identity = extractChatGptTurnIdentity(parsed);
+    const turnWorker = identity.parentThreadId
+      ? ChatGptBrowserWorker.forProvider({
+        ...provider,
+        chatgptWeb: { ...provider.chatgptWeb, useSavedChats: provider.chatgptWeb?.subagentUseSavedChats === true },
+      })
+      : worker;
     const captureLunaCheckpoint = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
       && !experimentalBiggerContext
       && !parsed._compactionRequest
@@ -743,6 +751,7 @@ export function createChatGptWebAdapter(
           await zeroRiskManualControl.start(retainedLauncherDescriptor, {
             ...owner,
             prompt: compiled.text,
+            ...(identity.parentThreadId ? { useSavedChats: provider.chatgptWeb?.subagentUseSavedChats === true } : {}),
             ...(resumeCompiled ? { resumePrompt: resumeCompiled.text } : {}),
             ...(conversationKey ? { conversationKey } : {}),
             ...(parsed._compactionRequest ? { compaction: true as const } : {}),
@@ -855,7 +864,7 @@ export function createChatGptWebAdapter(
         ...compileChatGptWebPrompt(input, turnCapabilities, undefined, compileOptionsFor(input)),
         release: () => {},
       });
-      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
+      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(turnWorker.run({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
@@ -925,7 +934,7 @@ export function createChatGptWebAdapter(
         throw error;
       }
     };
-    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
+    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(turnWorker.run({
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,

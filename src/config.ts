@@ -123,6 +123,7 @@ export interface AppConfig {
   experimentalContextAttachments: boolean;
   experimentalFreshConversationPerTurn: boolean;
   useSavedChats: boolean;
+  subagentUseSavedChats: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
   /** Optional adapter-silence budget for the Responses watchdog. */
@@ -258,6 +259,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     experimentalContextAttachments: false,
     experimentalFreshConversationPerTurn: false,
     useSavedChats: false,
+    subagentUseSavedChats: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: true,
     controlToken: randomBytes(32).toString("base64url"),
@@ -569,6 +571,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid useSavedChats in ${path}`);
   }
   const useSavedChats = parsed.useSavedChats === true;
+  if (parsed.subagentUseSavedChats !== undefined && typeof parsed.subagentUseSavedChats !== "boolean") {
+    throw new Error(`Invalid subagentUseSavedChats in ${path}`);
+  }
+  const subagentUseSavedChats = parsed.subagentUseSavedChats === true;
   if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
   }
@@ -601,6 +607,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalContextAttachments,
     experimentalFreshConversationPerTurn,
     useSavedChats,
+    subagentUseSavedChats,
     zeroRiskProEnabled,
   } as AppConfig;
 }
@@ -660,6 +667,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalContextAttachments: manual ? false : config.experimentalContextAttachments,
       experimentalFreshConversationPerTurn: !manual && config.experimentalFreshConversationPerTurn === true,
       useSavedChats: config.useSavedChats === true,
+      subagentUseSavedChats: config.subagentUseSavedChats === true,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: manual ? false : true,
     },

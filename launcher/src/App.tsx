@@ -939,6 +939,14 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
+  const openBrowserLogin = async () => {
+    setError(null);
+    try {
+      await api!.openLogin();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
   const selectTab = async (tabId: string) => {
     try {
       await api!.selectBrowserTab(tabId);
@@ -1057,6 +1065,16 @@ function BrowserSurface({
           </button>
           <IconButton icon="plus" label={copy.zoomIn} onClick={() => void zoom("in")} />
         </div>
+        {!manualInteraction && browser?.authenticated !== true ? (
+          <button
+            className="toolbar-text-button"
+            disabled={passkeyActive}
+            onClick={() => void openBrowserLogin()}
+            type="button"
+          >
+            {copy.signIn}
+          </button>
+        ) : null}
         {passkeyAvailable ? (
           <button
             className="toolbar-text-button"
@@ -1108,7 +1126,7 @@ function BrowserSurface({
                   ? copy.noActiveTaskBody
                   : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyActive} onClick={() => void toggle()}>
+              <PrimaryButton disabled={passkeyActive} onClick={() => void (manualInteraction || browser?.authenticated ? toggle() : openBrowserLogin())}>
                 {manualInteraction || browser?.authenticated
                   ? copy.openChatgpt
                   : copy.signIn}
@@ -1222,15 +1240,15 @@ function SetupSurface({
   // look incomplete or disable reinstall/repair actions.
   const browserSetupGateComplete = snapshot.smokePassed
     || snapshot.state.codexCatalogVerified === true;
-  const busy = localBusy
-    || operation?.status === "running"
+  const installBusy = localBusy || operation?.status === "running";
+  const busy = installBusy
     || (!manualInteraction && (
       browser?.status === "loading"
       || browser?.status === "testing"
       || browser?.status === "running"
     ));
-  const run = async (action: () => Promise<void>) => {
-    if (busy) return;
+  const run = async (action: () => Promise<void>, allowBrowserBusy = false) => {
+    if (allowBrowserBusy ? installBusy : busy) return;
     setLocalBusy(true);
     setError(null);
     try {
@@ -1255,13 +1273,13 @@ function SetupSurface({
     onSmokeComplete();
   });
   const install = () => run(async () => {
-    if (!manualInteraction && !browserSetupGateComplete) {
+    if (!snapshot.state.coreSetupComplete && !manualInteraction && !browserSetupGateComplete) {
       await activateBrowser();
       await api!.smokeTest();
     }
     await api!.setupCore({ bundledSkills: selectedBundledSkills });
     updateState((await api!.snapshot()).state);
-  });
+  }, true);
   const toggleBundledSkill = (skill: string) => {
     setSelectedBundledSkills(current => current.includes(skill)
       ? current.filter(item => item !== skill)
@@ -1345,7 +1363,7 @@ function SetupSurface({
             : devProfile ? copy.devInstall : copy.install}
           complete={snapshot.state.codexCatalogVerified === true}
           description={devProfile ? copy.devStepInstallBody : copy.stepInstallBody}
-          disabled={busy}
+          disabled={installBusy}
           index={manualInteraction ? 1 : 3}
           onAction={install}
           repeatable

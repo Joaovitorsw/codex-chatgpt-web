@@ -265,13 +265,19 @@ class BrowserControlServer {
           if (body.compaction !== undefined && body.compaction !== true) {
             throw new Error("manual compaction flag is invalid");
           }
+          if (body.useSavedChats !== undefined && typeof body.useSavedChats !== "boolean") {
+            throw new Error("manual useSavedChats flag is invalid");
+          }
           const lease = host.beginManualTurn(
             body.traceId,
             body.helperPid,
             body.prompt,
             body.conversationKey,
             body.resumePrompt,
-            body.compaction === true,
+            {
+              compaction: body.compaction === true,
+              ...(body.useSavedChats !== undefined ? { useSavedChats: body.useSavedChats } : {}),
+            },
           );
           this.logger.info("browser.manual_control_started", {
             traceId: body.traceId,

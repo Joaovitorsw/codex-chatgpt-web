@@ -136,6 +136,16 @@ do Codex antes da desinstalação. **Salvar chats no ChatGPT** mantém as conver
 desativado por padrão, independentemente de **Novo chat do navegador a cada turno**. Defina
 `CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS=1` apenas quando cada checkpoint precisar de captura de tela.
 
+Subagentes Web liberam a aba ao terminar cada resposta. Um follow-up abre outro chat com o histórico
+do próprio agente. Por padrão os filhos usam chats temporários; `subagentUseSavedChats: true` no
+`config.json` permite chats salvos quando a interface temporária não oferece o conector. A preferência
+`useSavedChats` continua valendo separadamente para a conversa principal. Para delegações independentes, o modelo recebe orientação para
+descobrir as ferramentas cedo, usar `fork_context=false` e passar um briefing curto com objetivo,
+escopo e critérios de aceitação. O uso continua dependendo da autorização e da utilidade do trabalho paralelo.
+O chat temporário precisa permitir o conector configurado; interfaces que exigem personalização devem
+oferecer o modo **Personalized**. Se essa capacidade estiver indisponível, o filho retorna erro sem
+abrir uma conversa salva como fallback.
+
 Novas instalações usam **Compatibilidade V1** para subagentes entre backends. **Nativo** preserva as
 configurações do próprio Codex e habilita delegação Web-to-Web V2 em texto simples. Reinicie o Codex
 e abra uma nova tarefa após trocar o protocolo:

@@ -1576,7 +1576,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     ["fill", ""],
     ["fill", ""],
     ["focus"],
-    ["pressSequentially", "@codex"],
+    ["pressSequentially", "@Codex Native2"],
     ["waitForResult"],
     ["press"],
     ["waitForSelectedConnector"],
@@ -1703,7 +1703,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     fill: async () => { calls.push("clear"); },
     focus: async (_options?: { signal?: AbortSignal }) => { calls.push("focus"); },
     pressSequentially: async (value: string) => {
-      expect(value).toBe("@codex");
+      expect(value).toBe("@Codex Native2");
       calls.push("type");
     },
     press: async (key: string) => {
@@ -2174,7 +2174,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["fill", ""],
     ["fill", ""],
     ["focus"],
-    ["type", "@codex"],
+    ["type", "@Codex Native2"],
     ["connectorMenu"],
     ["selectConnector"],
     ["selectedConnector"],
@@ -2365,7 +2365,7 @@ test("an aborted real connector selection clears the typed mention before return
 });
 
 test("connector cleanup uses native editor deletion when contenteditable fill would retain the mention", async () => {
-  let composerText = "@codex";
+  let composerText = "@Codex Native2";
   let selectedAll = false;
   let fillCalls = 0;
   const pressed: string[] = [];

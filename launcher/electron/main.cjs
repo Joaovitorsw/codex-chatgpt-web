@@ -1276,9 +1276,11 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "memorySaver";
     if (!ordinary) throw new Error("Unknown preference");
-    return stateStore.update({ [key]: value === true });
+    const state = stateStore.update({ [key]: value === true });
+    if (key === "memorySaver") browserHost?.applyMemorySaver();
+    return state;
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
@@ -1562,6 +1564,7 @@ async function start() {
     // user-approved saved-chat fallback during that bootstrap; once a config exists, honor
     // its explicit saved/temporary choice normally.
     getUseSavedChats: () => runtimeHost.runtimeConfigSnapshot().config?.useSavedChats !== false,
+    getMemorySaver: () => stateStore.read().memorySaver,
     retainedConversationStore,
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,

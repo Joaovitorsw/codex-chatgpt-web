@@ -15,6 +15,7 @@ export interface LauncherState {
   autoStart: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
+  memorySaver: boolean;
   autoApproveToolCalls: boolean;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
@@ -210,7 +211,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "memorySaver",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

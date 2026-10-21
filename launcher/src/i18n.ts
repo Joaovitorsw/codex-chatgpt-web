@@ -1,6 +1,8 @@
 import type { Language } from "./types";
 
 const en = {
+  memorySaver: "Memory saver",
+  memorySaverBody: "Skips preloaded tabs and releases inactive saved chats after 30 seconds. Active turns and temporary chats stay open; reopening may take longer.",
   pluginName: "Plugin name",
   pluginNameBody: "Codex stays fixed. Edit the rest of the name.",
   pluginNameChange: "Change name",
@@ -243,6 +245,8 @@ const en = {
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
+  memorySaver: "节省内存",
+  memorySaverBody: "不预加载标签页，并在 30 秒后释放闲置的已保存聊天。进行中的任务和临时聊天保持打开；重新打开可能需要更长时间。",
   pluginName: "插件名称",
   pluginNameBody: "Codex 保持不变，可以修改其后的名称。",
   pluginNameChange: "更改名称",
@@ -485,6 +489,8 @@ const zh: Record<keyof typeof en, string> = {
 };
 
 const ja: Record<keyof typeof en, string> = {
+  memorySaver: "メモリ節約",
+  memorySaverBody: "タブを事前読み込みせず、保存済みの待機中チャットを30秒後に解放します。実行中のターンと一時チャットは保持します。",
   pluginName: "プラグイン名",
   pluginNameBody: "Codex は固定です。それ以降の名前を編集できます。",
   pluginNameChange: "名前を変更",
@@ -727,6 +733,8 @@ const ja: Record<keyof typeof en, string> = {
 };
 
 const ko: Record<keyof typeof en, string> = {
+  memorySaver: "메모리 절약",
+  memorySaverBody: "탭을 미리 로드하지 않고 저장된 유휴 채팅을 30초 후 해제합니다. 진행 중인 작업과 임시 채팅은 유지됩니다.",
   pluginName: "플러그인 이름",
   pluginNameBody: "Codex는 고정입니다. 뒤에 오는 이름을 변경하세요.",
   pluginNameChange: "이름 변경",
@@ -969,6 +977,8 @@ const ko: Record<keyof typeof en, string> = {
 };
 
 const zhTW: Record<keyof typeof en, string> = {
+  memorySaver: "節省記憶體",
+  memorySaverBody: "不預載分頁，並在 30 秒後釋放閒置的已儲存聊天。進行中的任務及臨時聊天保持開啟。",
   pluginName: "外掛程式名稱",
   pluginNameBody: "Codex 保持不變，可以修改後面的名稱。",
   pluginNameChange: "變更名稱",
@@ -1211,6 +1221,8 @@ const zhTW: Record<keyof typeof en, string> = {
 };
 
 const ptBR: Record<keyof typeof en, string> = {
+  memorySaver: "Economia de RAM",
+  memorySaverBody: "Desativa abas preparadas e libera conversas salvas inativas após 30 segundos. Turnos em andamento e chats temporários permanecem abertos; reabrir pode levar mais tempo.",
   composerPredictions: "Sugestões de próxima mensagem",
   composerPredictionsBody: "Sugere sua próxima mensagem com GPT-6 Sol Medium quando a conversa cabe no limite. Requer modo Automático, acesso ao Sol e sugestões ativadas no Codex.",
   passkeyOpening: "Abrindo Chrome…",

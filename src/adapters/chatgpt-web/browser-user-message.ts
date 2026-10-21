@@ -13,15 +13,17 @@ export function chatGptUserMessageMatches(
   const submitted = normalize(options.submittedText);
   if (text === submitted) return true;
   if (!options.connectorName || !submitted) return false;
-  const mentions = content.querySelectorAll<HTMLElement>('[data-prompt-link-href^="app://"]');
+  const mentions = content.querySelectorAll<HTMLElement>(
+    '[data-prompt-link-href^="app://"], [app-mention-path^="app://"][app-mention-display-name]',
+  );
   if (mentions.length !== 1) return false;
   const mention = mentions[0]!;
-  if (mention.textContent !== options.connectorName) return false;
+  if (mention.textContent?.trim() !== options.connectorName) return false;
   const leading = content.ownerDocument.createRange();
   leading.selectNodeContents(content);
   leading.setEndBefore(mention);
   if (leading.toString() !== "") return false;
-  const label = normalize(mention.innerText);
-  const prefixes = new Set([`${label}  `, `${label}\n  `]);
+  const label = normalize(mention.innerText.trim());
+  const prefixes = new Set([`${label}  `, `${label}\n  `, `${label} \n\n`, `${label}\n\n`]);
   return text.endsWith(submitted) && prefixes.has(text.slice(0, text.length - submitted.length));
 }

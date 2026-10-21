@@ -76,6 +76,7 @@ const TURN_HEARTBEAT_SWEEP_MS = 5_000;
 const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
+const MEMORY_SAVER_IDLE_TTL_MS = 30_000;
 
 function recordTurnActivity(tab, now = Date.now()) {
   const state = tab.approvalPending ? "approval"
@@ -377,6 +378,7 @@ class BrowserHost {
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
     getUseSavedChats = () => false,
+    getMemorySaver = () => false,
     retainedConversationStore = null,
   }) {
     if (typeof getConnectorName !== "function") {
@@ -408,6 +410,7 @@ class BrowserHost {
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.getUseSavedChats = getUseSavedChats;
+    this.getMemorySaver = getMemorySaver;
     this.retainedConversationStore = retainedConversationStore;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
@@ -732,6 +735,7 @@ class BrowserHost {
 
   async ensurePrewarmedTurnTab(allowUnverifiedSession = false) {
     if (this.prewarmedTurnTab || this.prewarmTurnTabOperation
+      || this.getMemorySaver?.() === true
       || this.destroyed
       || browserInteractionModeFor(this) !== "automatic"
       || (!allowUnverifiedSession && this.state.authenticated !== true)
@@ -749,7 +753,7 @@ class BrowserHost {
       );
       const contents = tab.view.webContents;
       const deadline = Date.now() + 90_000;
-      while (!this.destroyed && Date.now() < deadline && !contents.isDestroyed()) {
+      while (!this.destroyed && this.getMemorySaver?.() !== true && Date.now() < deadline && !contents.isDestroyed()) {
         const ready = await contents.executeJavaScript(`(() => {
           const visible = Array.from(document.querySelectorAll(${JSON.stringify(COMPOSER_SELECTOR)})).filter((element) => {
             const style = getComputedStyle(element);
@@ -786,6 +790,7 @@ class BrowserHost {
             } catch { return false; }
           })()`, true).catch(() => false);
           if (!sessionAuthenticated) break;
+          if (this.getMemorySaver?.() === true) break;
           tab.status = "prewarmed";
           tab.loading = false;
           tab.message = "ChatGPT is ready";
@@ -2023,7 +2028,26 @@ class BrowserHost {
     }
   }
 
+  applyMemorySaver() {
+    if (this.getMemorySaver?.() !== true) {
+      void this.ensurePrewarmedTurnTab().catch(error => {
+        this.logger.warn("browser.tab_prewarm_failed", { message: error.message });
+      });
+      return;
+    }
+    const tab = this.prewarmedTurnTab;
+    this.prewarmedTurnTab = null;
+    if (tab) {
+      try { this.window.contentView.removeChildView(tab.view); } catch {}
+      if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
+      this.logger.info("browser.memory_saver_prewarm_released", { tabId: tab.id });
+      this.writeDescriptor();
+    }
+    this.reapExpiredTurnTabs();
+  }
+
   reapExpiredTurnTabs(now = Date.now()) {
+    const memorySaver = this.getMemorySaver?.() === true;
     const cancellations = [];
     const lastSweepAt = this.lastTurnSweepAt;
     this.lastTurnSweepAt = now;
@@ -2035,7 +2059,8 @@ class BrowserHost {
     }
     for (const tab of [...this.turnTabs.values()]) {
       if (tab.failedAt !== undefined) {
-        if (now - tab.failedAt < RETAINED_TURN_TAB_TTL_MS) continue;
+        const ttl = memorySaver && tab.interactionMode !== "manual" ? MEMORY_SAVER_IDLE_TTL_MS : RETAINED_TURN_TAB_TTL_MS;
+        if (now - tab.failedAt < ttl) continue;
         this.logger.info("browser.failed_tab_expired", { tabId: tab.id, traceId: tab.traceId });
         this.removeTurnTab(tab, false);
         continue;
@@ -2060,7 +2085,11 @@ class BrowserHost {
         continue;
       }
       if (tab.status === "ready") {
-        if (now - (tab.lastHeartbeatAt ?? 0) < RETAINED_TURN_TAB_TTL_MS) continue;
+        // Temporary chats cannot be restored after closing their document. Saved
+        // conversations already have a durable URL and can reopen on the next turn.
+        const ttl = memorySaver && this.getUseSavedChats?.() === true
+          ? MEMORY_SAVER_IDLE_TTL_MS : RETAINED_TURN_TAB_TTL_MS;
+        if (tab.finalizingUntil > now || now - (tab.lastHeartbeatAt ?? 0) < ttl) continue;
         this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
         this.removeTurnTab(tab, false);
         continue;

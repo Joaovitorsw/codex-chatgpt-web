@@ -144,6 +144,21 @@ if ($ownedLauncherConsoles.Count -gt 0) {
   Start-Sleep -Milliseconds 500
 }
 
+$electronPackagePath = Join-Path $repoRoot 'launcher\node_modules\electron\package.json'
+$electronVersionPath = Join-Path $repoRoot 'launcher\node_modules\electron\dist\version'
+if (Test-Path -LiteralPath $electronPackagePath) {
+  $expectedElectronVersion = (Get-Content -Raw -LiteralPath $electronPackagePath | ConvertFrom-Json).version
+  $installedElectronVersion = if (Test-Path -LiteralPath $electronVersionPath) {
+    (Get-Content -Raw -LiteralPath $electronVersionPath).Trim().TrimStart('v')
+  } else { '' }
+  if ($installedElectronVersion -ne $expectedElectronVersion) {
+    Write-RestartLog "Installing Electron $expectedElectronVersion after releasing the old launcher files."
+    $taskBun = (Get-Command bun -ErrorAction Stop).Source
+    & $taskBun (Join-Path $repoRoot 'launcher\node_modules\electron\install.js')
+    if ($LASTEXITCODE -ne 0) { throw 'Electron installation failed before restarting the launcher.' }
+  }
+}
+
 if ($MemorySaver) {
   $statePath = Join-Path $env:APPDATA 'Codex Web GPT\launcher-state.json'
   if (-not (Test-Path -LiteralPath $statePath)) { throw 'Launcher state was not found.' }

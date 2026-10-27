@@ -1,8 +1,20 @@
 import { ChatGptWebAdapterError } from "./adapter-error";
 
 /** Maximum number of automatic browser-turn retries after the initial send. */
-export const MAX_CHATGPT_WEB_TURN_RETRIES = 3;
+export const MAX_CHATGPT_WEB_TURN_RETRIES = 5;
 const RETRY_BUDGET_TTL_MS = 30 * 60_000;
+
+export function canRetryNativeConnectorFailure(state: {
+  initialBatchRevision: number;
+  currentBatchRevision: number;
+  activeToolCalls: number;
+  outstandingToolCalls: number;
+}): boolean {
+  return Object.values(state).every(value => Number.isSafeInteger(value) && value >= 0)
+    && state.initialBatchRevision === state.currentBatchRevision
+    && state.activeToolCalls === 0
+    && state.outstandingToolCalls === 0;
+}
 
 interface RetryBudgetEntry {
   retries: number;

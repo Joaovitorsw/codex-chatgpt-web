@@ -51,6 +51,7 @@ Usage:
   codex-chatgpt-web dev list
   codex-chatgpt-web serve
   codex-chatgpt-web mcp [--broker-socket PATH]
+  codex-chatgpt-web tool-relay JSON_OR_BASE64URL_JSON
   codex-chatgpt-web service <status|install|start|restart|stop|cancel-turns>
   codex-chatgpt-web tunnel <status|start|restart|stop|key-import>
   codex-chatgpt-web open <tunnels|runtime-keys|connectors>
@@ -630,6 +631,10 @@ async function main(): Promise<void> {
     await new Promise<void>(() => {});
   } else if (command === "dev") await runDevCommand(args);
   else if (command === "mcp") await runChatGptMcpMain(args);
+  else if (command === "tool-relay") {
+    const { runNativeToolRelay } = await import("./adapters/chatgpt-web/native-tool-relay");
+    await runNativeToolRelay(args, [process.execPath, process.argv[1]!]);
+  }
   else if (command === "service") await serviceCommand(args);
   else if (command === "hook") {
     const action = args.shift();

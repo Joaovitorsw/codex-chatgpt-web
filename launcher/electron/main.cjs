@@ -61,7 +61,7 @@ const BROWSER_HELPER_PATH = app.isPackaged
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
 const GITHUB_URL = "https://github.com/miuuyy/codex-chatgpt-web";
 const X_URL = "https://x.com/miu21590";
-const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
+const CONNECTORS_URL = "https://chatgpt.com/settings/plugins-settings";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL, LIMITS_SOURCE_URL]);
@@ -166,9 +166,11 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
     try {
       const config = runtimeSupervisor.readConfig();
       const health = await runtimeSupervisor.proxyHealthPayload(config);
+      const result = health?.last_model_catalog_result;
       if (!Number.isInteger(health?.successful_model_catalog_requests)
-        || health.successful_model_catalog_requests < 1) {
-        const result = health?.last_model_catalog_result;
+        || health.successful_model_catalog_requests < 1
+        || !Number.isInteger(result?.status) || result.status < 200 || result.status >= 300
+        || !Number.isInteger(result.request) || result.request < 1) {
         if (!result || !Number.isInteger(result.status) || result.status < 400 || result.status > 599
           || !Number.isInteger(result.request) || result.request < 1 || lastOperation?.status === "running") return;
         const identity = `${health.pid}:${result.request}:${result.at}`;

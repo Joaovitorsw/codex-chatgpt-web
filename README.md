@@ -41,6 +41,32 @@ O modo Full harness conecta o ChatGPT aos arquivos, terminal, ferramentas e apro
 
 Quando a janela de contexto se aproxima do limite, o transporte inicia a compactação nativa antes do erro: encerra a conversa Web retida, envia somente o resumo operacional validado e o contexto mais recente para um chat novo e então continua a mesma tarefa do Codex. Ele não tenta copiar toda a conversa antiga para o novo chat.
 
+## DevSpace com Tailscale Funnel (Windows, código-fonte)
+
+Este fluxo opcional do checkout local expõe o gateway DevSpace à internet via Funnel. É separado do túnel Full harness acima e requer Node.js/npm, Git Bash, Bun (ou o runtime Bun do launcher instalado) e [Tailscale para Windows](https://tailscale.com/download/windows). Entre no Tailscale e habilite MagicDNS, HTTPS e Funnel na sua tailnet; a política da tailnet precisa permitir Funnel. Consulte a [documentação oficial do Funnel](https://tailscale.com/kb/1223/funnel).
+
+No PowerShell, instale e configure o DevSpace:
+
+```powershell
+npm install -g @waishnav/devspace
+tailscale status
+$dns = (tailscale status --json | ConvertFrom-Json).Self.DNSName.TrimEnd('.')
+"https://$dns"
+devspace init
+```
+
+No assistente, escolha ChatGPT, autorize as pastas necessárias e informe a origem `https://<nome-do-dispositivo>.<tailnet>.ts.net` exibida acima, sem `/mcp` e sem caminho. Guarde a senha de proprietário exibida pelo `devspace init`. O endereço deve corresponder à identidade Tailscale ativa. A configuração padrão fica em `%USERPROFILE%\.devspace\config.json`; a porta padrão é `7676`.
+
+Na raiz deste repositório, inicie e verifique a integração:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-local-production-silent.ps1 -DevSpaceOnly
+```
+
+O script inicia ou reutiliza o gateway no modo nativo, ativa o modo unattended do Tailscale, cria o Funnel em segundo plano quando não há encaminhamento existente e verifica a saúde local e o ingresso público. Encaminhamentos conflitantes não são sobrescritos. Se o serviço Tailscale estiver parado e o acesso for negado, execute o comando em um PowerShell como administrador. Veja `work\devspace\startup.log` em caso de falha. O atalho `run-local-production-silent.cmd` também inicia essa integração em segundo plano.
+
+No ChatGPT, ative o modo de desenvolvedor e crie ou atualize um conector para `https://<nome-do-dispositivo>.<tailnet>.ts.net/mcp`, usando OAuth; conclua a autorização com a senha de proprietário. O Funnel publica esse endpoint na internet: compartilhe o acesso somente com quem deve operar o DevSpace. Consulte o [guia de configuração do DevSpace](https://github.com/Waishnav/devspace/blob/main/docs/setup.md).
+
 <div id="get-started"><a id="quick-start"></a></div>
 
 ## Primeiros passos

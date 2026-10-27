@@ -372,11 +372,12 @@ test("bounded broker calls preserve server-owned closure before advancing the li
       settled = true;
       return result;
     });
-    await frameWritten;
+    await Promise.race([frameWritten, Bun.sleep(2_000).then(() => { throw new Error("broker test peer never finished its response frame"); })]);
     await Bun.sleep(25);
     expect(settled).toBeFalse();
     peer.end();
-    await expect(call).resolves.toEqual({ ready: true });
+    await expect(Promise.race([call, Bun.sleep(2_000).then(() => { throw new Error("broker test client did not settle after server EOF"); })]))
+      .resolves.toEqual({ ready: true });
   } finally {
     peer?.destroy();
     await broker.close();

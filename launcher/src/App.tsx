@@ -15,7 +15,7 @@ import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { LimitsSurface } from "./LimitsSurface";
 import { limitsCopyFor } from "./limits-copy";
-import { friendlyErrorMessage } from "./friendly-errors";
+import { failurePresentation, friendlyErrorMessage } from "./friendly-errors";
 import { useLimits } from "./useLimits";
 import { describeTurnActivity } from "./turn-activity";
 import type {
@@ -886,6 +886,11 @@ function BrowserSurface({
   setError: (error: string | null) => void;
 }) {
   const [passkeyStarting, setPasskeyStarting] = useState(false);
+  const [focusedTabId, setFocusedTabId] = useState<string | null>(null);
+  const browserTabs = browser?.tabs ?? [];
+  const rovingTabId = browserTabs.find(tab => tab.id === focusedTabId)?.id
+    ?? browserTabs.find(tab => tab.active)?.id
+    ?? browserTabs[0]?.id;
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
   const passkeyPhase = browser?.passkeyPhase;
   const passkeyActive = passkeyStarting || Boolean(passkeyPhase);
@@ -1001,14 +1006,47 @@ function BrowserSurface({
 
   return (
     <section className="browser-surface">
-      <div className="browser-tab-strip" title={copy.browserTabLimit}>
-        {(browser?.tabs ?? []).map((tab) => (
+      <div
+        aria-label={copy.browser}
+        className="browser-tab-strip"
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setFocusedTabId(null);
+        }}
+        role="tablist"
+        title={copy.browserTabLimit}
+      >
+        {browserTabs.map((tab) => (
           <div
             className={`browser-tab${tab.active ? " is-active" : ""}`}
             key={tab.id}
             onClick={() => void selectTab(tab.id)}
+            onFocus={(event) => {
+              if (event.target === event.currentTarget) setFocusedTabId(tab.id);
+            }}
+            onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                void selectTab(tab.id);
+                return;
+              }
+              const tabs = Array.from(event.currentTarget.parentElement!
+                .querySelectorAll<HTMLDivElement>(':scope > [role="tab"]'));
+              const index = tabs.indexOf(event.currentTarget);
+              let nextIndex: number;
+              switch (event.key) {
+                case "ArrowLeft": nextIndex = (index - 1 + tabs.length) % tabs.length; break;
+                case "ArrowRight": nextIndex = (index + 1) % tabs.length; break;
+                case "Home": nextIndex = 0; break;
+                case "End": nextIndex = tabs.length - 1; break;
+                default: return;
+              }
+              event.preventDefault();
+              tabs[nextIndex]?.focus();
+            }}
             role="tab"
             aria-selected={tab.active}
+            tabIndex={tab.id === rovingTabId ? 0 : -1}
           >
             <BrandMark small />
             <span title={tab.traceId ? `${tab.title} · ${tab.traceId}` : tab.title}>
@@ -2008,6 +2046,7 @@ function SettingsSurface({
         {!devProfile ? <SettingRow body={copy.launchAtLoginBody} flushAfter label={copy.launchAtLogin}>
           <Switch
             checked={snapshot.state.autoStart}
+            label={copy.launchAtLogin}
             onChange={(checked) => void api!.setAutostart(checked)
               .then((result) => updateState(result.state))
               .catch((cause) => setError(messageOf(cause)))}
@@ -2047,6 +2086,7 @@ function SettingsSurface({
         <SettingRow body={devProfile ? copy.devKeepRunningBody : copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
           <Switch
             checked={snapshot.state.keepRunningOnClose}
+            label={copy.keepRunningOnClose}
             onChange={(checked) => void api!.setPreference("keepRunningOnClose", checked)
               .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}
@@ -2055,6 +2095,7 @@ function SettingsSurface({
         <SettingRow body={copy.memorySaverBody} label={copy.memorySaver}>
           <Switch
             checked={snapshot.state.memorySaver}
+            label={copy.memorySaver}
             onChange={(checked) => void api!.setPreference("memorySaver", checked)
               .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}
@@ -2063,6 +2104,7 @@ function SettingsSurface({
         <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}
+            label={copy.showDuringTurns}
             disabled={snapshot.state.browserInteractionMode === "manual"}
             onChange={(checked) => void api!.setPreference("showBrowserDuringTurns", checked)
               .then(updateState)
@@ -2077,6 +2119,7 @@ function SettingsSurface({
         >
           <Switch
             checked={snapshot.state.experimentalBiggerContext}
+            label={copy.biggerContext}
             disabled={busy
               || snapshot.state.browserInteractionMode === "manual"
               || (snapshot.state.biggerContextAvailable !== true && !snapshot.state.experimentalBiggerContext)
@@ -2087,6 +2130,7 @@ function SettingsSurface({
         <SettingRow body={copy.composerPredictionsBody} label={copy.composerPredictions}>
           <Switch
             checked={snapshot.state.composerPredictionsEnabled}
+            label={copy.composerPredictions}
             disabled={busy || !snapshot.state.coreSetupComplete}
             onChange={(checked) => void setComposerPredictions(checked)}
           />
@@ -2095,6 +2139,7 @@ function SettingsSurface({
           ? copy.manualSkillAttachmentsUnavailable : copy.skillAttachmentsBody} label={copy.skillAttachments}>
           <Switch
             checked={snapshot.state.experimentalSkillAttachments}
+            label={copy.skillAttachments}
             disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
             onChange={(checked) => void setSkillAttachments(checked)}
           />
@@ -2105,6 +2150,7 @@ function SettingsSurface({
             <Switch
               checked={snapshot.state.pendingFreshConversationPerTurn
                 ?? snapshot.state.experimentalFreshConversationPerTurn}
+              label={copy.freshConversation}
               disabled={busy || snapshot.state.browserInteractionMode === "manual" || snapshot.state.coreSetupComplete !== true}
               onChange={(checked) => {
                 if (typeof snapshot.state.pendingFreshConversationPerTurn === "boolean"
@@ -2133,6 +2179,7 @@ function SettingsSurface({
         >
           <Switch
             checked={snapshot.state.experimentalContextAttachments === true}
+            label={contextAttachmentCopy(language).label}
             disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
             onChange={(checked) => void setContextAttachments(checked)}
           />
@@ -2141,6 +2188,7 @@ function SettingsSurface({
           ? copy.manualAutoApproveUnavailable : copy.autoApproveToolsBody} label={copy.autoApproveTools}>
           <Switch
             checked={snapshot.state.browserInteractionMode !== "manual" && snapshot.state.autoApproveToolCalls}
+            label={copy.autoApproveTools}
             disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
             onChange={(checked) => void setAutoApproveToolCalls(checked)}
           />
@@ -2148,6 +2196,7 @@ function SettingsSurface({
         <SettingRow body={copy.savedChatsBody} label={copy.savedChats}>
           <Switch
             checked={snapshot.state.useSavedChats}
+            label={copy.savedChats}
             disabled={busy || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setUseSavedChats(checked)}
           />
@@ -2739,15 +2788,18 @@ function IconButton({
 function Switch({
   checked,
   disabled = false,
+  label,
   onChange,
 }: {
   checked: boolean;
   disabled?: boolean;
+  label: string;
   onChange: (checked: boolean) => void;
 }) {
   return (
     <button
       aria-checked={checked}
+      aria-label={label}
       className={`switch${checked ? " is-on" : ""}`}
       disabled={disabled}
       onClick={() => onChange(!checked)}
@@ -2837,17 +2889,19 @@ function BrandMark({ small = false }: { small?: boolean }) {
 }
 
 function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string; onDismiss: () => void }) {
+  const failure = failurePresentation(message, document.documentElement.lang || "en");
   return (
     <motion.div
       animate={{ opacity: 1, y: 0 }}
       className="error-toast"
       exit={{ opacity: 0, y: 8 }}
       initial={{ opacity: 0, y: 8 }}
+      role={failure && failure.tone !== "error" ? "status" : "alert"}
       transition={PANEL_TRANSITION}
     >
-      <StateDot state="error" />
+      <StateDot state={failure?.tone ?? "error"} />
       <span>
-        <strong>{copy.error}</strong>
+        <strong>{failure?.title ?? copy.error}</strong>
         <p>{message}</p>
       </span>
       <button onClick={onDismiss} type="button">{copy.dismiss}</button>
@@ -2934,7 +2988,7 @@ function BiggerContextRecommendation({
             <strong>{copy.biggerContext}</strong>
             <p>{copy.biggerContextRecommendationToggleBody}</p>
           </div>
-          <Switch checked={checked} disabled={busy} onChange={onChange} />
+          <Switch checked={checked} disabled={busy} label={copy.biggerContext} onChange={onChange} />
         </div>
         {checked ? <p className="bigger-context-recommendation-restart">{copy.restartCodex}</p> : null}
         <footer>

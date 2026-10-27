@@ -30,6 +30,49 @@ function scriptEvents() {
   return { on: events.on.bind(events), off: events.off.bind(events), isCrashed: () => false };
 }
 
+test("a stalled prewarm does not block a new browser turn for 35 seconds", async () => {
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    prewarmedTurnTab: null,
+    prewarmTurnTabOperation: new Promise(() => {}),
+  });
+  const started = performance.now();
+  const tab = await host.takePrewarmedTurnTab("trace", 123, undefined, undefined);
+  assert.equal(tab, null);
+  assert.ok(performance.now() - started < 5_000);
+});
+
+test("prewarm authentication uses a bounded browser request and retires an unauthenticated tab", async () => {
+  const scripts = [];
+  let closed = false;
+  let removed = false;
+  const contents = {
+    isDestroyed: () => closed,
+    executeJavaScript: async script => {
+      scripts.push(script);
+      return scripts.length === 1;
+    },
+    close: () => { closed = true; },
+  };
+  const tab = { view: { webContents: contents } };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    prewarmedTurnTab: null,
+    prewarmTurnTabOperation: null,
+    state: { authenticated: true },
+    turnTabs: new Map(),
+    destroyed: false,
+    getMemorySaver: () => false,
+    getUseSavedChats: () => true,
+    createTurnTab: async () => tab,
+    window: { contentView: { removeChildView: () => { removed = true; } } },
+    logger: { warn() {} },
+  });
+  await host.ensurePrewarmedTurnTab();
+  assert.match(scripts[1], /signal: AbortSignal\.timeout\(5000\)/);
+  assert.equal(removed, true);
+  assert.equal(closed, true);
+  assert.equal(host.prewarmedTurnTab, null);
+});
+
 function primaryLoginFixture() {
   let loads = 0;
   let probes = 0;
@@ -2883,7 +2926,7 @@ test("selected home surface still reports a background browser turn as active", 
   assert.equal(snapshot.tabs.find(tab => tab.id === taskTab.id)?.status, "running");
 });
 
-test("selecting a task tab shows and focuses its owned Playwright surface", () => {
+test("selecting a task tab shows its surface and preserves launcher keyboard focus", () => {
   const visibility = [];
   const focused = [];
   const makeView = (id) => ({
@@ -2907,6 +2950,7 @@ test("selecting a task tab shows and focuses its owned Playwright surface", () =
     bounds: { x: 260, y: 78, width: 800, height: 600 },
     authView: null,
     window: {
+      webContents: { focus: () => focused.push("launcher") },
       getContentSize: () => [1120, 720],
       isMinimized: () => false,
       isVisible: () => true,
@@ -2924,7 +2968,7 @@ test("selecting a task tab shows and focuses its owned Playwright surface", () =
     ["first", true],
     ["second", true],
   ]);
-  assert.deepEqual(focused, ["second"]);
+  assert.deepEqual(focused, ["launcher"]);
   assert.equal(state.activeTabId, second.id);
 });
 

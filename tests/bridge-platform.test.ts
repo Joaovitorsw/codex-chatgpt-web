@@ -55,6 +55,74 @@ test("a completed tool-use response does not abort before Codex can execute it",
   expect(body).toContain("event: response.completed");
 });
 
+test("DevSpace read and edit emit distinct native tool cards with their original arguments", async () => {
+  async function* devSpaceCalls(): AsyncGenerator<AdapterEvent> {
+    for (const [id, name, args] of [
+      ["call_read", "mcp__Codex_Native2__read", { workspaceId: "ws_fixture", path: "src/main.ts" }],
+      ["call_edit", "mcp__Codex_Native2__edit", { workspaceId: "ws_fixture", path: "src/main.ts", edits: [{ oldText: "before", newText: "after" }] }],
+    ] as const) {
+      yield { type: "tool_call_start", id, name };
+      yield { type: "tool_call_delta", arguments: JSON.stringify(args) };
+      yield { type: "tool_call_end" };
+    }
+    yield { type: "done", stopReason: "tool_use", endTurn: false };
+  }
+  const namespace = "mcp__Codex_Native2";
+  const toolNsMap = new Map([
+    [`${namespace}__read`, { namespace, name: "read" }],
+    [`${namespace}__edit`, { namespace, name: "edit" }],
+  ]);
+  const body = await new Response(bridgeToResponsesSSE(devSpaceCalls(), "chatgpt-web/test", toolNsMap, undefined, undefined, undefined, 2_000, { streamPlatform: "win32" })).text();
+  expect(body).toContain('"call_id":"call_read"');
+  expect(body).toContain('"call_id":"call_edit"');
+  expect(body).toContain('"name":"read","arguments"');
+  expect(body).toContain('"name":"edit","arguments"');
+  expect((body.match(/"namespace":"mcp__Codex_Native2"/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  expect(body).toContain("response.function_call_arguments.delta");
+  expect(body).toContain('\\"oldText\\"');
+  expect(body).toContain('\\"newText\\"');
+  expect((body.match(/event: response.output_item.added/g) ?? []).length).toBe(2);
+  expect((body.match(/event: response.output_item.done/g) ?? []).length).toBe(2);
+});
+
+test("DevSpace tool activity is streamed before the function call finishes", async () => {
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  async function* activity(): AsyncGenerator<AdapterEvent> {
+    yield { type: "tool_call_start", id: "call_live_read", name: "mcp__Codex_Native2__read" };
+    await gate;
+    yield { type: "tool_call_delta", arguments: '{"workspaceId":"ws_fixture","path":"README.md"}' };
+    yield { type: "tool_call_end" };
+    yield { type: "done", stopReason: "tool_use", endTurn: false };
+  }
+  const stream = bridgeToResponsesSSE(activity(), "chatgpt-web/test", undefined, undefined, undefined, undefined, 2_000, { streamPlatform: "win32" });
+  const reader = stream.getReader();
+  try {
+    let initial = "";
+    while (!initial.includes("event: response.output_item.added")) {
+      const chunk = await reader.read();
+      expect(chunk.done).toBeFalse();
+      initial += new TextDecoder().decode(chunk.value);
+    }
+    expect(initial).toContain("response.output_item.added");
+    expect(initial).toContain("call_live_read");
+    expect(initial).not.toContain("response.completed");
+    release?.();
+    let remainder = "";
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      remainder += new TextDecoder().decode(chunk.value);
+    }
+    expect(remainder).toContain("response.function_call_arguments.delta");
+    expect(remainder).toContain("response.output_item.done");
+    expect(remainder).toContain("response.completed");
+  } finally {
+    release?.();
+    await reader.cancel().catch(() => {});
+  }
+});
+
 test("a completed image relay emits the Responses image-generation lifecycle", async () => {
   async function* imageRelay(): AsyncGenerator<AdapterEvent> {
     yield { type: "image_generation", result: "cG5nLWJ5dGVz", revisedPrompt: "maçã existente", phase: "final_answer" };

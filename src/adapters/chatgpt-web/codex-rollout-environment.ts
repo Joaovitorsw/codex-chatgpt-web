@@ -671,6 +671,70 @@ function validateMetadataConsistency(
   }
 }
 
+function resumeItemIdentity(item: Record<string, unknown>): unknown {
+  return [item.type, item.role, item.id, item.content,
+    record(item.internal_chat_message_metadata_passthrough)?.turn_id,
+    item.call_id, item.name, item.namespace, item.arguments, item.input, item.output];
+}
+
+function verifyInterruptedResume(fd: number, size: number, turnId: string, proof: {
+  instruction: Record<string, unknown>;
+  suffix: Record<string, unknown>[];
+}): void {
+  // Recovery is deliberately bounded and fail-closed for oversized histories.
+  if (size > 64 * 1024 * 1024) throw new Error("Codex resume history exceeds the recovery bound");
+  const bytes = Buffer.alloc(size);
+  if (readSync(fd, bytes, 0, size, 0) !== size) throw new Error("Codex resume history changed during lookup");
+  let latestInstruction: Record<string, unknown> | undefined;
+  let started: Record<string, unknown> | undefined;
+  let instructionBeforeResume = false;
+  let interrupted = false;
+  const instruction = proof.instruction;
+  const oldTurnId = record(instruction.internal_chat_message_metadata_passthrough)?.turn_id;
+  const history: Record<string, unknown>[] = [];
+  for (const line of bytes.toString("utf8").split("\n").slice(0, -1)) {
+    if (!line.trim()) continue;
+    const item = parseJsonLine(Buffer.from(line));
+    const payload = record(item.payload);
+    if (item.type === "event_msg" && payload?.type === "task_started") {
+      started = payload;
+      instructionBeforeResume = interrupted && latestInstruction !== undefined
+        && isDeepStrictEqual(resumeItemIdentity(latestInstruction), resumeItemIdentity(instruction));
+    }
+    if (item.type === "event_msg" && payload?.type === "task_complete" && payload.turn_id === oldTurnId) interrupted = false;
+    if (item.type !== "response_item" || !payload) continue;
+    history.push(payload);
+    if (payload.type === "message" && payload.role === "developer") continue;
+    const content = Array.isArray(payload.content) ? payload.content.map(part => record(part)?.text).join("\n") : payload.content;
+    if (payload.type === "message" && payload.role === "user" && typeof content === "string"
+      && /^<turn_aborted>[\s\S]*<\/turn_aborted>$/.test(content.trim())) {
+      interrupted = record(payload.internal_chat_message_metadata_passthrough)?.turn_id === oldTurnId;
+      continue;
+    }
+    // Normal assistant/tool work does not supersede a human instruction. A new native
+    // direct/delegated instruction does; it can never borrow this resume proof.
+    if ((payload.type === "message" && payload.role === "user") || payload.type === "agent_message"
+      || (payload.type === "function_call_output" && payload.namespace === "codex_app"
+        && (payload.name === "send_message_to_thread" || payload.name === "create_thread"))) {
+      latestInstruction = payload;
+      interrupted = false;
+    }
+  }
+  const attribution = record(started?.turn_attribution);
+  if (started?.turn_id !== turnId || attribution?.turn_id !== turnId
+    || attribution.turn_trigger !== "resume_interrupted_task" || !instructionBeforeResume || !interrupted
+    || !latestInstruction || !isDeepStrictEqual(resumeItemIdentity(latestInstruction), resumeItemIdentity(instruction))) {
+    throw new Error("Codex rollout does not authenticate the interrupted instruction resume");
+  }
+  let position = history.findLastIndex(item => isDeepStrictEqual(resumeItemIdentity(item), resumeItemIdentity(instruction)));
+  for (const candidate of proof.suffix) {
+    const found = history.findIndex((item, index) => index > position
+      && isDeepStrictEqual(resumeItemIdentity(item), resumeItemIdentity(candidate)));
+    if (found < 0) throw new Error("Codex resume continuation differs from canonical history");
+    position = found;
+  }
+}
+
 export function resolveCurrentCodexRolloutEnvironment(options: {
   codexHome: string;
   additionalCodexHomes?: readonly string[];
@@ -681,6 +745,7 @@ export function resolveCurrentCodexRolloutEnvironment(options: {
   tools?: readonly CodexTool[];
   historicalEnvironmentMessages?: ChatGptUnattributedEnvironmentMessage[];
   compactedEnvironmentItems?: Record<string, unknown>[];
+  interruptedResumeInstruction?: { instruction: Record<string, unknown>; suffix: Record<string, unknown>[] };
 }): CodexRolloutEnvironment | undefined {
   const { codexHome, lineage, turnId, tools, compactionSourceTurnId } = options;
   const nativeThreadId = CODEX_ID.test(lineage.threadId);
@@ -724,6 +789,9 @@ export function resolveCurrentCodexRolloutEnvironment(options: {
         continue;
       }
       const environment = environmentFromTurnContext(latest, latest.turn_id as string, tools);
+      if (options.interruptedResumeInstruction) {
+        verifyInterruptedResume(fd, size, turnId, options.interruptedResumeInstruction);
+      }
       const workspaceRootsDeclared = latest.workspace_roots !== undefined;
       validateMetadataConsistency(lineage, environment, workspaceRootsDeclared);
       if (options.historicalEnvironmentMessages) {

@@ -38,8 +38,8 @@ export function chatGptResponseIncompleteError(message: string): ChatGptWebAdapt
 
 export function chatGptToolApprovalRequiredError(): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
-    "ChatGPT is waiting for plugin permission. Open the plugin's settings in ChatGPT, "
-    + 'then Permissions → Allow all actions, and retry this turn.',
+    "ChatGPT is waiting for plugin permission. Review the pending action in ChatGPT "
+    + "and approve it if appropriate before continuing this turn.",
     { status: 403, errorType: "permission_error", code: "chatgpt_tool_approval_required", retryable: false },
   );
 }

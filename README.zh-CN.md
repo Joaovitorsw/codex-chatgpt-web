@@ -28,6 +28,32 @@
 
 完整 harness 模式通过 MCP 将 ChatGPT 连接到当前任务的文件、终端、工具和审批流程。对话始终关联到你的 Codex 任务，上下文增长时也能继续工作。
 
+## 使用 Tailscale Funnel 的 DevSpace（Windows，源代码）
+
+此可选的本地配置通过 Funnel 将 DevSpace 网关公开到互联网，与 Full harness 隧道相互独立。需要 Node.js/npm、Git Bash、Bun（或已安装 launcher 中的 Bun 运行时）和 [Windows 版 Tailscale](https://tailscale.com/download/windows)。登录 Tailscale，在 tailnet 中启用 MagicDNS、HTTPS 和 Funnel，并在策略中允许 Funnel。请参阅 [Funnel 官方文档](https://tailscale.com/kb/1223/funnel)。
+
+在 PowerShell 中运行：
+
+```powershell
+npm install -g @waishnav/devspace
+tailscale status
+$dns = (tailscale status --json | ConvertFrom-Json).Self.DNSName.TrimEnd('.')
+"https://$dns"
+devspace init
+```
+
+在向导中选择 ChatGPT，授权所需文件夹，并输入上面显示的 `https://<device>.<tailnet>.ts.net`，不要附加路径或 `/mcp`。保存向导显示的所有者密码。主机名必须与当前 Tailscale 设备一致。默认配置位于 `%USERPROFILE%\.devspace\config.json`，默认端口为 `7676`。
+
+在仓库根目录运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-local-production-silent.ps1 -DevSpaceOnly
+```
+
+脚本会启动或复用原生模式网关，启用 Tailscale unattended 模式，在没有现有转发配置时创建 Funnel，并检查本地和公网连通性。它不会覆盖冲突的转发配置。如果启动已停止的服务时被拒绝访问，请使用管理员 PowerShell。失败时查看 `work\devspace\startup.log`。`run-local-production-silent.cmd` 也会在后台启动此集成。
+
+在 ChatGPT 开发者模式中为 `https://<device>.<tailnet>.ts.net/mcp` 创建或更新连接器，使用 OAuth 和所有者密码完成授权。Funnel 会将端点公开到互联网，请仅向需要操作 DevSpace 的人员开放访问。[DevSpace 配置指南](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)。
+
 <div id="get-started"><a id="quick-start"></a></div>
 
 ## 开始使用

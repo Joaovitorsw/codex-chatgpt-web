@@ -2,7 +2,35 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectSmokeRollouts, correlateSmokeTraces, validateWebSubagentEvidence, parseRollout, parseSmokeOptions } from "../scripts/smoke-codex-web-subagents";
+import { collectSmokeRollouts, correlateSmokeTraces, validateCurrentCollaborationEvents, validateNativeSmokeEvidence, validateWebSubagentEvidence, parseRollout, parseSmokeOptions, nativeToolOverlap } from "../scripts/smoke-codex-web-subagents";
+
+test("native overlap requires intersecting completed tool intervals and detects duplicate IDs", () => {
+  const tool = (at: string, type: string, call_id: string) => ({ timestamp: at, type: "response_item", payload: { type, call_id } });
+  const parent = [tool("2026-10-22T06:00:00.000Z", "custom_tool_call", "parent-1"), tool("2026-10-22T06:00:03.000Z", "custom_tool_call_output", "parent-1")];
+  const child = [tool("2026-10-22T06:00:01.000Z", "custom_tool_call", "child-1"), tool("2026-10-22T06:00:04.000Z", "custom_tool_call_output", "child-1")];
+  expect(nativeToolOverlap(parent, child)).toEqual({ overlapping: true, parentCalls: 1, childCalls: 1, duplicateCallIds: [] });
+  expect(nativeToolOverlap(parent, [tool("2026-10-22T06:00:03.000Z", "custom_tool_call", "child-1"), child[1]!]).overlapping).toBe(false);
+  expect(nativeToolOverlap([...parent, parent[0]!], child).duplicateCallIds).toEqual(["parent-1"]);
+});
+
+test("native overlap includes the running lifetime of a shell session after initial yield", () => {
+  const callAt = (timestamp: string, call_id: string, input: string) => ({ timestamp, type: "response_item", payload: { type: "custom_tool_call", call_id, input } });
+  const outputAt = (timestamp: string, call_id: string, output: string) => ({ timestamp, type: "response_item", payload: { type: "custom_tool_call_output", call_id, output: [{ type: "input_text", text: output }] } });
+  const parent = [
+    callAt("2026-10-22T06:27:08Z", "parent-exec", "run PowerShell"),
+    outputAt("2026-10-22T06:27:19Z", "parent-exec", '{"session_id":6299}'),
+    callAt("2026-10-22T06:28:02Z", "parent-poll", '{"session_id":6299,"chars":""}'),
+    outputAt("2026-10-22T06:28:02Z", "parent-poll", '{"exit_code":0,"output":"PARENT_MARKER_SEEN"}'),
+  ];
+  const child = [
+    callAt("2026-10-22T06:27:20Z", "child-exec", "run PowerShell"),
+    outputAt("2026-10-22T06:27:51Z", "child-exec", '{"session_id":53575}'),
+    callAt("2026-10-22T06:28:01Z", "child-poll", '{"session_id":53575,"chars":""}'),
+    outputAt("2026-10-22T06:28:01Z", "child-poll", '{"exit_code":0,"output":"CHILD_RESULT"}'),
+  ];
+  expect(nativeToolOverlap(parent, child).overlapping).toBe(true);
+  expect(nativeToolOverlap(parent.slice(0, 2), child).overlapping).toBe(false);
+});
 
 const cwd = process.cwd();
 const model = "chatgpt-web/gpt-6-sol";
@@ -42,6 +70,47 @@ test("correlates real tool results, inherited model, lineage, directed wait and 
   expect(validateWebSubagentEvidence(fixture(), expected).failures).toEqual([]);
 });
 
+test("validates native collaboration lifecycle with correlated IDs and ordered completion", () => {
+  const event = (tool: string, status = "completed") => ({ type: "item.completed", item: {
+    type: "collab_tool_call", tool, sender_thread_id: "parent", receiver_thread_ids: ["child"], status,
+    agents_states: { child: { status: "completed", message: "CHILD_RESULT child-secret 6.1.9" } },
+  } });
+  const valid = [event("spawn_agent"), event("wait"), event("close_agent")];
+  expect(validateCurrentCollaborationEvents(valid, "parent", "child", "child-secret", "6.1.9")).toEqual([]);
+  expect(validateCurrentCollaborationEvents(valid.slice().reverse(), "parent", "child", "child-secret", "6.1.9")).not.toEqual([]);
+  expect(validateCurrentCollaborationEvents([event("spawn_agent"), event("wait", "in_progress"), event("close_agent")], "parent", "child", "child-secret", "6.1.9")).not.toEqual([]);
+});
+
+test("accepts native child shell exit_code in JSON without accepting a failed command", () => {
+  const sessions = fixture();
+  sessions[1]![2]!.payload = { type: "custom_tool_call_output", output: [
+    { type: "input_text", text: 'Script completed\\nOutput: {"exit_code":0,"output":"child-secret 6.1.9"}' },
+  ] };
+  const collab = (tool: string) => ({ type: "item.completed", item: {
+    type: "collab_tool_call", tool, sender_thread_id: "parent", receiver_thread_ids: ["child"], status: "completed",
+    agents_states: { child: { status: "completed", message: "CHILD_RESULT child-secret 6.1.9" } },
+  } });
+  const events = [collab("spawn_agent"), { type: "item.completed", item: {
+    type: "command_execution", exit_code: 0, aggregated_output: "parent-secret",
+  } }, collab("wait"), collab("close_agent")];
+  expect(validateNativeSmokeEvidence(events, sessions, expected).failures).toEqual([]);
+  sessions[1]![2]!.payload = { type: "custom_tool_call_output", output: [
+    { type: "input_text", text: '{"exit_code":1,"output":"child-secret 6.1.9"}' },
+  ] };
+  expect(validateNativeSmokeEvidence(events, sessions, expected).failures).toContain("missing successful child shell proof");
+});
+
+test("recognizes current subagent session metadata without legacy thread_spawn", () => {
+  const sessions = fixture();
+  sessions[1]![0]!.payload = {
+    id: "child",
+    parent_thread_id: "parent",
+    agent_depth: 1,
+    source: { subagent: {} },
+  };
+  expect(validateWebSubagentEvidence(sessions, expected).failures).toEqual([]);
+});
+
 test("accepts Markdown-escaped acceptance markers without ignoring actual tool receipts", () => {
   const sessions = fixture();
   const completion = sessions[0]!.at(-1)!;
@@ -61,6 +130,7 @@ test("collects the child returned by spawn even when registration metadata repea
     writeFileSync(childPath, child!.map(entry => JSON.stringify(entry)).join("\n"));
     writeFileSync(join(home, "sessions", "unrelated.jsonl"), "{}");
     expect(collectSmokeRollouts(home, "parent")).toEqual([parentPath, childPath]);
+    expect(collectSmokeRollouts(home, "parent", ["child"])).toEqual([parentPath, childPath]);
     expect(collectSmokeRollouts(home, "missing")).toEqual([]);
   } finally {
     rmSync(home, { recursive: true, force: true });

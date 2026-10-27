@@ -972,12 +972,24 @@ export function startServer(
   }
   const startedAt = Date.now();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
+  let brokerReady = config.mode !== "full";
+  let brokerStartupError: string | undefined;
+  let brokerRetryAt = 0;
+  let brokerStarting: Promise<void> | undefined;
+  const startBroker = () => {
+    if (!turnBroker || brokerStarting) return;
+    brokerRetryAt = Date.now() + 2_000;
+    brokerStarting = turnBroker.listen().then(() => {
+      brokerReady = true;
+      brokerStartupError = undefined;
+    }).catch(error => {
+      brokerReady = false;
+      brokerStartupError = error instanceof Error ? error.message : String(error);
+      console.error(`[chatgpt-web] turn broker endpoint is unavailable: ${brokerStartupError}`);
+    }).finally(() => { brokerStarting = undefined; });
+  };
   if (config.mode === "full") {
-    void turnBroker!.listen().catch(error => {
-      console.error(
-        `[chatgpt-web] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+    startBroker();
   }
   let draining = false;
   let shutdownPromise: Promise<void> | undefined;
@@ -1016,27 +1028,28 @@ export function startServer(
         );
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
+        if (!draining && !brokerReady && !brokerStarting && Date.now() >= brokerRetryAt) startBroker();
         return Response.json({
-          status: "ok",
+          status: brokerStartupError ? "error" : brokerReady ? "ok" : "starting",
           service: "codex-chatgpt-web",
           version: VERSION,
           mode: config.mode,
           pid: process.pid,
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
-          accepting_turns: !draining,
+          accepting_turns: !draining && brokerReady && !brokerStartupError,
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           model_catalog_requests: modelCatalogRequests,
           last_model_catalog_result: lastModelCatalogResult,
           ...activity(),
-        });
+        }, { status: brokerReady && !brokerStartupError ? 200 : 503 });
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         draining = url.pathname === "/admin/drain";
         turnBroker?.setExternalOwnersAccepted(!draining);
-        return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
+        return Response.json({ status: "ok", accepting_turns: !draining && brokerReady && !brokerStartupError, ...activity() });
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-turn") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
@@ -1171,6 +1184,11 @@ export function startServer(
         }
         setTimeout(shutdown, 0);
         return Response.json({ status: "ok", accepting_turns: false, ...current });
+      }
+      if (!brokerReady || brokerStartupError) {
+        return formatErrorResponse(503, "service_unavailable", brokerStartupError
+          ? "ChatGPT Web turn broker failed to start"
+          : "ChatGPT Web turn broker is starting");
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
         if (draining) {

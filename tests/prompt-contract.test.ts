@@ -29,6 +29,79 @@ function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexP
   };
 }
 
+test("browser work resumes relevant Chrome tabs before creating another tab", () => {
+  const compiled = compileChatGptWebPrompt(request("high"), {
+    localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  }, "turn_12345678901234567890123456789012");
+  expect(compiled.text).toContain("codex_user_tabs before codex_create_tab");
+  expect(compiled.text).toContain("codex_claim_tab");
+  expect(compiled.text).toContain("An empty codex_list_tabs does not mean Chrome has no open tabs");
+  expect(compiled.text).toContain("never reuse another task's tab solely because its group is open");
+});
+
+test("DevSpace workspace tools use their declared workspaceId contract without legacy turn-token arguments", () => {
+  const parsed = request("high");
+  parsed.context.tools = [
+    { name: "open_workspace", namespace: "mcp__Codex_Native2", description: "Open the project", parameters: { type: "object" } },
+    { name: "read", namespace: "mcp__Codex_Native2", description: "Read a file", parameters: { type: "object" } },
+  ];
+  const compiled = compileChatGptWebPrompt(parsed, {
+    localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  }, "turn_12345678901234567890123456789012");
+  expect(compiled.text).toContain("retain its workspaceId");
+  expect(compiled.text).toContain("Codex Native2 DevSpace tools");
+  expect(compiled.text).toContain("do not append unsupported turn_token arguments");
+  expect(compiled.text).toContain("do not imply a native spawn or inventory API");
+  expect(compiled.text).toContain("installed DevSpace subagents skill");
+  expect(compiled.text).toContain("agents targets, run, show, continue, ls");
+  expect(compiled.text).toContain("shell process execution is explicitly permitted");
+  expect(compiled.text).toContain("No native spawn_agent or deferred discovery was advertised");
+  expect(compiled.text).toContain("use the advertised DevSpace bash tool with the active workspaceId");
+  expect(compiled.text).toContain("use its advertised edit tool for targeted replacements or write for new files");
+  expect(compiled.text).not.toContain("call the selected local plugin's declared inventory tool with query=\"spawn_agent\"");
+  expect(compiled.text).not.toContain("invoke the declared generic native command capability directly with that exact command and the supplied turn token");
+  expect(compiled.text).not.toContain("use apply_patch in small coherent batches");
+});
+
+test("workspace-shaped tools from another plugin retain the generic native contract", () => {
+  const parsed = request("high");
+  parsed.context.tools = [
+    { name: "open_workspace", namespace: "mcp__another_plugin", description: "Open workspace", parameters: { type: "object" } },
+  ];
+  const compiled = compileChatGptWebPrompt(parsed, {
+    localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  }, "turn_12345678901234567890123456789012", { appName: "Another Plugin" });
+  expect(compiled.text).not.toContain("Codex Native2 DevSpace tools");
+  expect(compiled.text).toContain("Pass turn_token turn_12345678901234567890123456789012 unchanged");
+});
+
+test("DevSpace advertises native spawn_agent when the actual tool is present", () => {
+  const parsed = request("high");
+  parsed.context.tools = [
+    { name: "open_workspace", namespace: "mcp__Codex_Native2", description: "Open workspace", parameters: { type: "object" } },
+    { name: "spawn_agent", namespace: "multi_agent_v1", description: "Spawn worker", parameters: { type: "object" } },
+  ];
+  const compiled = compileChatGptWebPrompt(parsed, {
+    localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  }, "turn_12345678901234567890123456789012");
+  expect(compiled.text).toContain("multi_agent_v1__spawn_agent");
+  expect(compiled.text).toContain("Invoke the advertised native spawn_agent directly");
+  expect(compiled.text).not.toContain("No native spawn_agent or deferred discovery was advertised");
+});
+
+test("DevSpace discovers a deferred spawn tool when tool_search is advertised", () => {
+  const parsed = request("high");
+  parsed.context.tools = [
+    { name: "open_workspace", namespace: "mcp__Codex_Native2", description: "Open workspace", parameters: { type: "object" } },
+    { name: "tool_search", description: "Search deferred tools", parameters: { type: "object" }, toolSearch: true },
+  ];
+  const compiled = compileChatGptWebPrompt(parsed, {
+    localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  }, "turn_12345678901234567890123456789012");
+  expect(compiled.text).toContain("Search for spawn_agent using the advertised tool_search capability");
+  expect(compiled.text).not.toContain("No native spawn_agent or deferred discovery was advertised");
+});
+
 test("local GIF delivery requires the viewer receipt instead of a file link or static conversion", () => {
   const compiled = compileChatGptWebPrompt(request("high"), { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true }, "turn_12345678901234567890123456789012");
   expect(compiled.text).toContain("animated GIF");

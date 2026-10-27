@@ -300,6 +300,7 @@ export class ChatGptTurnSession {
   readonly physicalSettlement: Promise<void>;
   private readonly outstandingById = new Map<string, BrokerToolRequest>();
   private readonly deliveredResultIds = new Set<string>();
+  private readonly deliveredResultContents = new Map<string, string>();
   private outstandingReasoning: string[] = [];
   private finalReasoning: string[] = [];
   private outstandingPrelude: AdapterEvent[] = [];
@@ -411,6 +412,17 @@ export class ChatGptTurnSession {
 
   hasOutstanding(callId: string): boolean {
     return this.outstandingById.has(callId);
+  }
+
+  checkDeliveredResult(callId: string, content: string): void {
+    const previous = this.deliveredResultContents.get(callId);
+    if (previous !== undefined && previous !== content) {
+      throw new Error(`conflicting native result for already acknowledged tool call ${callId}`);
+    }
+  }
+
+  rememberDeliveredResult(callId: string, content: string): void {
+    this.deliveredResultContents.set(callId, content);
   }
 
   markResultDelivered(callId: string): void {

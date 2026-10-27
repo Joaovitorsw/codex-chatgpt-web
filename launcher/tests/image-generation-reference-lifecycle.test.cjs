@@ -23,6 +23,7 @@ test("image generation publishes its exact auxiliary target before the reference
     insertText() {},
     executeJavaScript: async script => {
       if (script.includes("temporaryFromUrl")) return { ready: true };
+      if (script.includes("readChatGptAuthSession")) return { sessionAuthenticated: true, sessionCheckError: null };
       if (script.includes(".map(image => image.currentSrc")) return [];
       return true;
     },
@@ -51,4 +52,32 @@ test("image generation publishes its exact auxiliary target before the reference
   assert.equal(helperCalled, true);
   assert.equal(host.turnTabs.size, 0);
   assert.equal(fs.existsSync(path.join(root, "next.png")), false);
+});
+
+test("image generation reports an expired ChatGPT session before waiting for a composer", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-image-auth-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let url = "about:blank";
+  const contents = Object.assign(new EventEmitter(), {
+    isDestroyed: () => false,
+    getURL: () => url,
+    loadURL: async value => { url = value; },
+    executeJavaScript: async script => {
+      if (script.includes("temporaryFromUrl")) return { ready: true };
+      if (script.includes("readChatGptAuthSession")) return { sessionAuthenticated: false, sessionCheckError: null };
+      return false;
+    },
+  });
+  const tab = { id: "image-auth-tab", view: { webContents: contents } };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    selectedTabId: "home", turnTabs: new Map(),
+    ready: async () => {},
+    createTurnTab: async () => { host.turnTabs.set(tab.id, tab); return tab; },
+    snapshot: () => ({}), publishState() {}, syncViewVisibility() {}, writeDescriptor() {},
+    removeTurnTab: () => host.turnTabs.delete(tab.id),
+  });
+  await assert.rejects(host.generateImageAsset({
+    traceId: "expired_image_session", prompt: "test image", outputPath: path.join(root, "next.png"),
+  }), /Sign in to ChatGPT/);
+  assert.equal(host.turnTabs.size, 0);
 });

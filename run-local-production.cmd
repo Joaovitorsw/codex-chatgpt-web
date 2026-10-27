@@ -29,7 +29,7 @@ if not defined CODEX_WEB_GPT_BUN (
   echo Instale o Codex Web GPT ou defina CODEX_WEB_GPT_BUN com o caminho do bun.exe.
   echo A janela permanecera aberta para que este erro possa ser copiado.
   echo.
-  pause
+  if /i not "%CODEX_WEB_GPT_SILENT%"=="1" pause
   exit /b 1
 )
 
@@ -38,7 +38,7 @@ echo Runtime: "%CODEX_WEB_GPT_BUN%"
 if not exist "package.json" (
   echo [ERRO] package.json nao foi encontrado em "%CD%".
   echo Execute este arquivo dentro da pasta raiz do codigo-fonte.
-  pause
+  if /i not "%CODEX_WEB_GPT_SILENT%"=="1" pause
   exit /b 1
 )
 if not exist "node_modules" (
@@ -48,7 +48,7 @@ if not exist "node_modules" (
     echo.
     echo [ERRO] A instalacao das dependencias falhou.
     echo Verifique a conexao, proxy ou antivirus e copie a mensagem acima.
-    pause
+    if /i not "%CODEX_WEB_GPT_SILENT%"=="1" pause
     exit /b 1
   )
 )
@@ -59,7 +59,7 @@ if not exist "launcher\node_modules\vite\package.json" (
     echo.
     echo [ERRO] A instalacao das dependencias do launcher falhou.
     echo Verifique a conexao, proxy ou antivirus e copie a mensagem acima.
-    pause
+    if /i not "%CODEX_WEB_GPT_SILENT%"=="1" pause
     exit /b 1
   )
 )

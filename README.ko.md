@@ -28,6 +28,32 @@ Codex의 네이티브 모델 선택기에서 Pro를 포함해 계정에 제공�
 
 Full harness 모드는 MCP를 통해 ChatGPT를 현재 작업의 파일, 터미널, 도구 및 승인 절차에 연결합니다. 대화는 Codex 작업에 계속 연결되어 있으므로 컨텍스트가 늘어나도 작업을 이어갈 수 있습니다.
 
+## Tailscale Funnel을 사용하는 DevSpace (Windows, 소스 코드)
+
+이 선택적 로컬 설정은 Funnel을 통해 DevSpace 게이트웨이를 인터넷에 공개하며 Full harness 터널과는 별개입니다. Node.js/npm, Git Bash, Bun(또는 설치된 launcher의 Bun 런타임), [Windows용 Tailscale](https://tailscale.com/download/windows)이 필요합니다. Tailscale에 로그인하고 tailnet에서 MagicDNS, HTTPS 및 Funnel을 활성화하고 정책에서 Funnel을 허용하세요. [Funnel 공식 문서](https://tailscale.com/kb/1223/funnel)를 참고하세요.
+
+PowerShell에서 실행하세요.
+
+```powershell
+npm install -g @waishnav/devspace
+tailscale status
+$dns = (tailscale status --json | ConvertFrom-Json).Self.DNSName.TrimEnd('.')
+"https://$dns"
+devspace init
+```
+
+설정에서 ChatGPT를 선택하고 필요한 폴더를 허용한 다음 출력된 `https://<device>.<tailnet>.ts.net`을 경로나 `/mcp` 없이 입력하세요. 표시되는 소유자 비밀번호를 보관하세요. 호스트는 현재 Tailscale 장치와 일치해야 합니다. 기본 설정은 `%USERPROFILE%\.devspace\config.json`, 기본 포트는 `7676`입니다.
+
+저장소 루트에서 실행하세요.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-local-production-silent.ps1 -DevSpaceOnly
+```
+
+스크립트는 네이티브 모드 게이트웨이를 시작하거나 재사용하고 Tailscale unattended 모드를 활성화하며, 기존 포워딩이 없으면 Funnel을 만들고 로컬 및 공개 연결을 확인합니다. 충돌하는 포워딩은 덮어쓰지 않습니다. 중지된 서비스에 대한 접근이 거부되면 관리자 PowerShell에서 실행하세요. 오류는 `work\devspace\startup.log`에서 확인하세요. `run-local-production-silent.cmd`도 백그라운드에서 통합을 시작합니다.
+
+ChatGPT 개발자 모드에서 `https://<device>.<tailnet>.ts.net/mcp` 커넥터를 만들거나 갱신하고 OAuth와 소유자 비밀번호로 인증하세요. Funnel은 엔드포인트를 인터넷에 공개하므로 필요한 사람에게만 접근을 허용하세요. [DevSpace 설정 가이드](https://github.com/Waishnav/devspace/blob/main/docs/setup.md).
+
 <div id="get-started"><a id="quick-start"></a></div>
 
 ## 시작하기

@@ -29,13 +29,18 @@ export function useLimits(api: LimitsApi, manualMode: boolean) {
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     const read = async () => {
       if (cancelled) return;
       if (!setupInFlight.current) {
         const version = requestVersion.current;
         setReading(true);
         try {
-          const next = await api.getLimits();
+          // Bound the wait even when the API cannot cancel its underlying request.
+          const timeout = new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("Reading limits timed out.")), 15_000);
+          });
+          const next = await Promise.race([api.getLimits(), timeout]);
           if (!cancelled && version === requestVersion.current) {
             setSnapshot(next);
             setReadError(null);
@@ -43,7 +48,8 @@ export function useLimits(api: LimitsApi, manualMode: boolean) {
         } catch (cause) {
           if (!cancelled && version === requestVersion.current) setReadError(errorMessage(cause));
         } finally {
-          if (!cancelled) setReading(false);
+          clearTimeout(deadline);
+          if (!cancelled && version === requestVersion.current) setReading(false);
         }
       }
       if (!cancelled) timer = setTimeout(() => void read(), 10_000);
@@ -52,6 +58,7 @@ export function useLimits(api: LimitsApi, manualMode: boolean) {
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      clearTimeout(deadline);
     };
   }, [api, manualMode, refreshVersion]);
 

@@ -11,7 +11,7 @@ import {
   requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
 } from "../chatgpt-web-models";
-import type { AppConfig } from "../config";
+import { getConfigDir, type AppConfig } from "../config";
 import { parseRequest } from "../responses/parser";
 import { compactRequest, responseRequest, routeChatGptWebRequest } from "../server";
 import { namespacedToolName, type AdapterEvent, type CodexProviderConfig } from "../types";
@@ -405,7 +405,7 @@ export function createLauncherDevAdapter(
         ? { experimentalBiggerContext: true }
         : {}),
     },
-  }, { broker });
+    }, { broker, nativeToolRelayCommand: [process.execPath, resolve(import.meta.dir, "../cli.ts"), "--home", getConfigDir(), "tool-relay"] });
   return { broker, adapterFactory };
 }
 

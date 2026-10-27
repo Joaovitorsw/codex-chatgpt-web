@@ -33,6 +33,14 @@ if (-not $Worker) {
   exit 0
 }
 
+$restartMutex = [Threading.Mutex]::new($false, 'Local\CodexWebGptLocalProductionRecovery')
+try { $restartLockHeld = $restartMutex.WaitOne(0) }
+catch [Threading.AbandonedMutexException] { $restartLockHeld = $true }
+if (-not $restartLockHeld) {
+  Write-Output 'Local production recovery is already in progress.'
+  exit 0
+}
+
 function Write-RestartLog([string]$Message) {
   New-Item -ItemType Directory -Force -Path $logDir | Out-Null
   Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format o) $Message"
@@ -104,13 +112,20 @@ function Stop-ProcessTree([int]$RootPid) {
 
 Write-RestartLog 'Waiting for the Codex Web runtime to become idle.'
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+$consecutiveHealthFailures = 0
 while (-not $Force -and (Get-Date) -lt $deadline) {
   try {
     $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 3
+    $consecutiveHealthFailures = 0
     if ($health.active_http_turns -eq 0 -and $health.active_browser_turns -eq 0) { break }
     Write-RestartLog "Still active: http=$($health.active_http_turns) browser=$($health.active_browser_turns)."
   } catch {
+    $consecutiveHealthFailures++
     Write-RestartLog "Health unavailable while waiting: $($_.Exception.Message)"
+    if ($consecutiveHealthFailures -ge 3) {
+      Write-RestartLog 'Three consecutive health failures; recovering the unresponsive owned launcher/runtime.'
+      break
+    }
   }
   Start-Sleep -Seconds 2
 }

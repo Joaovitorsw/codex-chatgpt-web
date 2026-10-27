@@ -13,11 +13,56 @@ function isPortuguese(language: string): boolean {
   return language.toLowerCase().startsWith("pt");
 }
 
+/** State copy for display only; logs and native tool outcomes keep their original details. */
+export function failurePresentation(value: unknown, language = "en") {
+  const message = unwrapElectronError(rawMessage(value));
+  const pt = isPortuguese(language);
+  if (/codex_tool_timeout|Tempo limite de transporte|Tool transport timeout|did not return a result within|MCP transport deadline/i.test(message)) {
+    return {
+      title: pt ? "Tempo limite de transporte" : "Tool transport timeout",
+      message: pt
+        ? "Tempo limite de transporte. A ferramenta não confirmou o resultado. Confira se o processo continua ativo ou aguarda aprovação antes de repetir a ação."
+        : "Tool transport timeout. The tool did not confirm its result. Check whether the process is still running or awaiting approval before retrying.",
+      tone: "error" as const,
+    };
+  }
+  if (/chatgpt_tool_approval_required|Aprovação pendente|Permission required|waiting for plugin permission/i.test(message)) {
+    return {
+      title: pt ? "Aprovação pendente" : "Permission required",
+      message: pt
+        ? "Aprovação pendente. Revise a ação solicitada no ChatGPT para decidir se deseja autorizá-la."
+        : "Permission required. Review the pending action in ChatGPT to decide whether to approve it.",
+      tone: "busy" as const,
+    };
+  }
+  if (/client_cancelled|Execução interrompida|Request interrupted|turn was cancelled|response was cancelled/i.test(message)) {
+    return {
+      title: pt ? "Execução interrompida" : "Request interrupted",
+      message: pt
+        ? "Execução interrompida. A solicitação foi cancelada; isso não confirma o término de um processo já iniciado."
+        : "Request interrupted. The request was cancelled; this does not confirm that an already started process has exited.",
+      tone: "idle" as const,
+    };
+  }
+  const exit = message.match(/\b(?:exit(?:[_ ]?code)?|código de saída)\s*[:=]?\s*(-?\d+)\b/i);
+  if (exit && Number(exit[1]) !== 0) {
+    return {
+      title: pt ? "Falha no comando" : "Command failed",
+      message: pt ? `Falha no comando (código de saída ${exit[1]}). Confira a saída no card da execução.`
+        : `Command failed (exit code ${exit[1]}). Check the output in the command card.`,
+      tone: "error" as const,
+    };
+  }
+  return null;
+}
+
 /** Converts internal launcher/runtime failures into actionable UI copy without
  * changing the original error kept in the activity log. */
 export function friendlyErrorMessage(value: unknown, language = "en"): string {
   const message = unwrapElectronError(rawMessage(value));
   const pt = isPortuguese(language);
+  const failure = failurePresentation(message, language);
+  if (failure) return failure.message;
 
   const activeTurns = message.match(/daemon has (\d+) active HTTP turn\(s\) and (\d+) active browser turn\(s\)/i);
   if (/atomic idleness could not be proven|finish or cancel active ChatGPT turns/i.test(message)) {

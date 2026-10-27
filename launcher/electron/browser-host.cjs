@@ -774,6 +774,7 @@ class BrowserHost {
                 credentials: "include",
                 cache: "no-store",
                 headers: { accept: "application/json" },
+                signal: AbortSignal.timeout(${CHATGPT_AUTH_SESSION_TIMEOUT_MS}),
               });
               if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) return false;
               const payload = await response.json();
@@ -821,7 +822,7 @@ class BrowserHost {
     if (!this.prewarmedTurnTab && this.prewarmTurnTabOperation) {
       await Promise.race([
         this.prewarmTurnTabOperation,
-        new Promise(resolve => setTimeout(resolve, 35_000)),
+        new Promise(resolve => setTimeout(resolve, 2_000)),
       ]);
     }
     signal?.throwIfAborted();
@@ -913,6 +914,13 @@ class BrowserHost {
           throw new Error(`ChatGPT image generation could not leave Temporary Chat (${savedChat?.href || "unknown URL"})`);
         }
         await sleep(500);
+      }
+      const imageSession = await contents.executeJavaScript(`(${readChatGptAuthSession.toString()})(
+        fetch.bind(globalThis), ${javaScriptLiteral(CHATGPT_ORIGIN)}, ${CHATGPT_AUTH_SESSION_TIMEOUT_MS}
+      )`, true);
+      if (!imageSession?.sessionAuthenticated) {
+        throw new Error(imageSession?.sessionCheckError
+          || "Sign in to ChatGPT in the launcher, then retry image generation; the new image conversation is not authenticated");
       }
       const readyDeadline = Date.now() + 60_000;
       for (;;) {
@@ -2284,7 +2292,9 @@ class BrowserHost {
     if (this.authView) this.closeAuthView(this.authView, true);
     this.selectedTabId = tabId;
     this.syncViewVisibility();
-    if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
+    // Tab activation belongs to the launcher chrome. Keep keyboard navigation
+    // there until the user explicitly enters the selected page.
+    if (this.visible && this.surfaceActive) this.window.webContents.focus();
     this.publishState?.(this.snapshot());
     this.writeDescriptor();
     return this.snapshot();
@@ -2296,9 +2306,13 @@ class BrowserHost {
       candidate.id !== tab.id && candidate.status === "running"
     ));
     if (!running) return false;
+    const launcherHasFocus = this.window.webContents.isFocused();
     this.selectedTabId = running.id;
     this.syncViewVisibility();
-    if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
+    if (this.visible && this.surfaceActive) {
+      const contents = launcherHasFocus ? this.window.webContents : this.activeView().webContents;
+      contents.focus();
+    }
     return true;
   }
 

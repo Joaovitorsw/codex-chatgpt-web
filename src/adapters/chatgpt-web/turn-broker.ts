@@ -37,6 +37,7 @@ export interface BrokerToolRequest {
   freeform: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
+  progressLabel?: string;
 }
 
 export interface BrokerToolResult {
@@ -106,6 +107,7 @@ interface TurnChannel {
   bindingId?: string;
   queuedCallIds: string[];
   deliveredCallIds: Set<string>;
+  completedCallIds: Map<string, string>;
   invocations: Map<string, PendingInvocation>;
   waiters: Set<ToolWaiter>;
   compactionRequested: boolean;
@@ -156,6 +158,7 @@ interface BrokerRequest {
   token?: string;
   bindingId?: string;
   wireName?: string;
+  progressLabel?: string;
   freeform?: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
@@ -374,6 +377,7 @@ export class TurnBroker implements TurnBrokerOwner {
       },
       queuedCallIds: [],
       deliveredCallIds: new Set(),
+      completedCallIds: new Map(),
       invocations: new Map(),
       waiters: new Set(),
       compactionRequested: false,
@@ -512,12 +516,27 @@ export class TurnBroker implements TurnBrokerOwner {
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
     this.assertSafeHarnessRunning(channel, true);
+    const canonicalize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonicalize);
+      if (value && typeof value === "object") {
+        return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, entry]) => [key, canonicalize(entry)]));
+      }
+      return value;
+    };
+    const fingerprint = createHash("sha256").update(JSON.stringify(canonicalize(result))).digest("hex");
+    const completedFingerprint = channel.completedCallIds.get(callId);
+    if (completedFingerprint !== undefined) {
+      if (completedFingerprint !== fingerprint) throw new Error(`conflicting duplicate tool result: ${callId}`);
+      return;
+    }
     const invocation = channel.invocations.get(callId);
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (!channel.deliveredCallIds.delete(callId)) {
       throw new Error(`tool call was completed before it was delivered: ${callId}`);
     }
     channel.invocations.delete(callId);
+    channel.completedCallIds.set(callId, fingerprint);
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size} isError=${result.isError === true}`);
     invocation.resolve(result);
   }
@@ -1262,11 +1281,15 @@ export class TurnBroker implements TurnBrokerOwner {
 
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
+    if (request.progressLabel !== undefined && (typeof request.progressLabel !== "string" || request.progressLabel.length > 1_000)) {
+      throw new Error("Invalid native tool progress label");
+    }
     const callId = opaqueId("call");
     const toolRequest: BrokerToolRequest = {
       callId,
       wireName,
       freeform: request.freeform === true,
+      ...(request.progressLabel ? { progressLabel: request.progressLabel } : {}),
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
@@ -1418,9 +1441,12 @@ export async function callTurnBroker<T>(
     }
     socket.setEncoding("utf8");
     socket.once("error", error => finishError(new Error(`ChatGPT web turn broker unavailable: ${error.message}`)));
-    // The server owns response termination. Bounded calls wait for the pipe/socket to close
-    // before their callers can advance the lifecycle while Bun drains named-pipe writes.
+    // Server EOF (or socket closure) settles bounded calls after frame validation.
     socket.once("close", finishResponse);
+    socket.once("end", () => {
+      finishResponse();
+      socket.end();
+    });
     socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...wireRequest })}\n`));
     socket.on("data", chunk => {
       if (settled || response) return;

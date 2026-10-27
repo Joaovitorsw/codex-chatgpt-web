@@ -18,7 +18,7 @@ type Snapshot = {
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
   completionActionVisible: boolean;
-  traceBlocks: { kind: "answer" | "commentary" | "status"; text: string }[];
+  traceBlocks: { kind: "answer" | "commentary" | "status"; text: string; key?: string }[];
 };
 
 // Execute the production page callback, with only missing Domino browser APIs supplied.
@@ -169,6 +169,31 @@ test("captured activity summaries use the status stream and keep actual commenta
       '<div style="display:none"><div data-markdown-text-style="assistant-message" data-markdown-text-tone="tertiary">')
     .replace('<p>status 1</p>\n</div>', '<p>status 1</p>\n</div></div>'));
   expect(hidden.traceBlocks.some(block => block.text === "status 1")).toBeFalse();
+});
+
+test("separate DevSpace tool cards retain repeated action labels", async () => {
+  const repeated = await snapshot(activitySummariesHtml.replace("<p>status 3</p>", "<p>status 2</p>"));
+  const cards = repeated.traceBlocks.filter(block => block.kind === "status" && block.text === "status 2");
+  expect(cards).toHaveLength(2);
+  expect(new Set(cards.map(card => card.key)).size).toBe(2);
+});
+
+test("live activity status keeps its identity when a DevSpace tool updates the same card", async () => {
+  const [before, after] = await snapshots(activitySummariesHtml, [document => {
+    const label = [...document.querySelectorAll("p")].find(element => element.textContent === "status 2");
+    if (!label) throw new Error("activity status fixture is missing");
+    label.textContent = "status 2: reading src/main.ts";
+  }]);
+  const original = before!.traceBlocks.find(block => block.text === "status 2");
+  const updated = after!.traceBlocks.find(block => block.text === "status 2: reading src/main.ts");
+  expect(original?.key).toMatch(/^status:activity-header:/);
+  expect(updated?.key).toBe(original?.key);
+
+  const tracker = new ChatGptVisibleTraceTracker(0);
+  tracker.observe(before!.traceBlocks, true);
+  expect(tracker.observe(after!.traceBlocks, true)).toEqual([
+    { kind: "reasoning", text: ": reading src/main.ts", continuation: true },
+  ]);
 });
 
 test("keeps an unfinished hyperlink buffered and preserves delivered destinations after later rewrites", async () => {

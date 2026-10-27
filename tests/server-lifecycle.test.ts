@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
@@ -1053,6 +1053,13 @@ test("a full-mode runtime exposes its broker endpoint before any turn registers"
   const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
   const server = startServer(config);
   try {
+    const endpoint = `http://127.0.0.1:${server.port}/healthz`;
+    const initial = await fetch(endpoint);
+    const initialBody = await initial.json() as { status: string; accepting_turns: boolean };
+    expect([200, 503]).toContain(initial.status);
+    if (initial.status === 503) {
+      expect(initialBody).toMatchObject({ status: "starting", accepting_turns: false });
+    }
     const deadline = Date.now() + 5_000;
     let message = "";
     for (;;) {
@@ -1069,7 +1076,61 @@ test("a full-mode runtime exposes its broker endpoint before any turn registers"
       await Bun.sleep(20);
     }
     expect(message).toContain("turn token is invalid");
+    const ready = await fetch(endpoint);
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toMatchObject({ status: "ok", accepting_turns: true });
   } finally {
+    await server.stop(true);
+    await closeTurnBrokers();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a broker startup bind failure recovers after the endpoint becomes available", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-retry-"));
+  const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
+  const blocker = createServer(socket => socket.destroy());
+  await new Promise<void>((resolve, reject) => {
+    blocker.once("error", reject);
+    blocker.listen(config.brokerSocketPath, resolve);
+  });
+  const server = startServer(config);
+  const health = () => fetch(`http://127.0.0.1:${server.port}/healthz`);
+  try {
+    let unavailable: Response | undefined;
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const response = await health();
+      if ((await response.json() as { status: string }).status === "error") {
+        unavailable = response;
+        break;
+      }
+      await Bun.sleep(20);
+    }
+    expect(unavailable?.status).toBe(503);
+    const unauthorized = await fetch(`http://127.0.0.1:${server.port}/admin/drain`, { method: "POST" });
+    expect(unauthorized.status).toBe(401);
+    const control = await fetch(`http://127.0.0.1:${server.port}/admin/resume`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.controlToken}` },
+    });
+    expect(control.status).toBe(200);
+    expect(await control.json()).toMatchObject({ status: "ok", accepting_turns: false });
+    await new Promise<void>((resolve, reject) => blocker.close(error => error ? reject(error) : resolve()));
+    let ready = false;
+    const recoveryDeadline = Date.now() + 6_000;
+    while (Date.now() < recoveryDeadline) {
+      const response = await health();
+      if (response.status === 200) {
+        expect(await response.json()).toMatchObject({ status: "ok", accepting_turns: true });
+        ready = true;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(ready).toBe(true);
+  } finally {
+    if (blocker.listening) await new Promise<void>(resolve => blocker.close(() => resolve()));
     await server.stop(true);
     await closeTurnBrokers();
     rmSync(root, { recursive: true, force: true });

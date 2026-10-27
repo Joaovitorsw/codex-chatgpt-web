@@ -4,6 +4,7 @@ import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../r
 import { isNativeAgentsMdContext } from "../../responses/native-context";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 import { isAcceptedCompactionContinuation, recoverCompactionInstruction } from "./compaction-continuation";
+import { authenticatesInterruptedTaskResume } from "./interrupted-task-resume";
 
 export type ChatGptSandboxPolicy =
   | { type: "dangerFullAccess" }
@@ -276,12 +277,20 @@ export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unkn
   // checkpoint; an arbitrary older prompt is still not a new instruction or a valid handoff.
   if (revision.turnId !== undefined && revision.turnId !== turnId) {
     const acceptedCompaction = isAcceptedCompactionContinuation(parsed, identity, revision);
-    if (priorChatGptAbortedTurnIds(parsed).includes(revision.turnId)
-      || (!acceptedCompaction && !isTerminalDirectUserRevision(parsed, revision))) {
+    if (!authenticatesInterruptedTaskResume(parsed, identity, revision)
+      && (priorChatGptAbortedTurnIds(parsed).includes(revision.turnId)
+      || (!acceptedCompaction && !isTerminalDirectUserRevision(parsed, revision)))) {
       throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
     }
   }
   return revision.content;
+}
+
+/** Coordinator signal to release the retained browser conversation once at runtime start. */
+export function isChatGptInterruptedTaskResume(parsed: CodexParsedRequest): boolean {
+  const identity = extractChatGptTurnIdentity(parsed);
+  const revision = latestChatGptTurnUserRevision(parsed, identity.turnId);
+  return revision !== undefined && authenticatesInterruptedTaskResume(parsed, identity, revision);
 }
 
 /**

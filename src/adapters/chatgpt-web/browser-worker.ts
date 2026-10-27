@@ -3569,8 +3569,9 @@ export class ChatGptBrowserWorker {
     page: Page,
     _submittedText?: string,
     _initialTurnIdentities: readonly string[] = [],
+    responseIdentity?: string,
   ): Promise<string> {
-    return page.evaluate(stopButtonSelector => {
+    return page.evaluate(({ stopButtonSelector, turnSelector }) => {
       const text = (element: Element | null): string => {
         const value = (element as HTMLElement | null)?.innerText?.replace(/\s+/g, " ").trim() ?? "";
         // Activity headers contain both their accessible label and its nested visual label in the
@@ -3591,7 +3592,9 @@ export class ChatGptBrowserWorker {
       // boundary: it proves this is an in-progress response. Within that boundary, the last
       // visible activity header is the current public action, not retained answer content.
       if (![...document.querySelectorAll(stopButtonSelector)].some(visible)) return "";
-      const activityHeaders = [...document.querySelectorAll('[class*="group/activity-header"]')]
+      const scope = turnSelector ? document.querySelector(turnSelector) : document;
+      if (!scope) return "";
+      const activityHeaders = [...scope.querySelectorAll('[class*="group/activity-header"]')]
         .filter(visible);
       const latestActivity = activityHeaders.at(-1);
       if (latestActivity) {
@@ -3602,7 +3605,7 @@ export class ChatGptBrowserWorker {
         if (/^(?:thinking|worked for\s+\d+)/i.test(activity)) return "";
         return activity.slice(-4_000);
       }
-      const currentTurn = [...document.querySelectorAll("[data-turn-key], [data-content-search-turn-key]")].at(-1);
+      const currentTurn = turnSelector ? scope : [...scope.querySelectorAll("[data-turn-key], [data-content-search-turn-key]")].at(-1);
       if (!currentTurn) return "";
       const roots = [
         ...currentTurn.querySelectorAll("[data-chatgpt-agent-turn-start]"),
@@ -3619,40 +3622,10 @@ export class ChatGptBrowserWorker {
         && !/<codex_(?:context_json|transport_resume)>/i.test(candidate)
         && !/You are Codex,|Codex requested low response verbosity/i.test(candidate));
       return (safe.at(-1) ?? "").slice(-4_000);
-    }, CHATGPT_STOP_BUTTON_SELECTOR).catch(() => "");
-  }
-
-  /**
-   * ChatGPT's visible phase notes live beside the Activity rows, not inside the mutable assistant
-   * Markdown root. Read only that public surface while a generation is demonstrably running so
-   * Codex can show meaningful progress before the final answer is fenced and delivered.
-   */
-  private async livePublicCommentaryText(page: Page): Promise<string> {
-    return page.evaluate(stopButtonSelector => {
-      const visible = (element: Element): boolean => {
-        const style = globalThis.getComputedStyle(element as HTMLElement);
-        const rect = (element as HTMLElement).getBoundingClientRect();
-        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
-      };
-      if (![...document.querySelectorAll(stopButtonSelector)].some(visible)) return "";
-      const text = (element: Element): string => (element as HTMLElement).innerText
-        .replace(/\s+/g, " ")
-        .trim();
-      // `.pt-2.pb-1` is a turn panel, not one note: it accumulates every prior public phase
-      // plus the status rows.  Read its individual Markdown children instead, otherwise each
-      // poll replays the whole turn and duplicates both function activity and final prose.
-      const note = [...document.querySelectorAll(".pt-2.pb-1")]
-        .filter(visible)
-        .flatMap(panel => [...panel.children]
-          .filter(child => child.matches('[class*="MarkdownRoot-"]') && visible(child))
-          .map(text))
-        .filter(candidate => candidate.length > 0
-          && candidate.length <= 12_000
-          && !/<codex_(?:context_json|transport_resume)>/i.test(candidate)
-          && !/You are Codex,|Codex requested low response verbosity/i.test(candidate))
-        .at(-1);
-      return (note ?? "").slice(-4_000);
-    }, CHATGPT_STOP_BUTTON_SELECTOR).catch(() => "");
+    }, {
+      stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR,
+      turnSelector: responseIdentity ? chatGptTurnContainerSelector(responseIdentity) : undefined,
+    }).catch(() => "");
   }
 
   private async submissionDomState(
@@ -4873,7 +4846,7 @@ export class ChatGptBrowserWorker {
         signal: abortSignal,
         timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
       });
-      await priorStop.waitFor({ state: "hidden", timeout: 0, signal: abortSignal });
+      await priorStop.waitFor({ state: "hidden", timeout: 10_000, signal: abortSignal });
       await settleChatGptUi();
       const retainedPrompt = await this.attachedPromptText(page, abortSignal);
       if (!this.promptTextEquivalent(pendingPrompt, retainedPrompt)) {
@@ -6082,6 +6055,22 @@ export class ChatGptBrowserWorker {
         return screenReaderText || semanticCandidate.innerText.trim() || ariaLabel || "";
       };
       const traceKey = (candidate: HTMLElement, kind: ChatGptVisibleTraceBlock["kind"]): string | undefined => {
+        if (kind === "status") {
+          const activityIndex = activityContainers.findIndex(container => container.contains(candidate));
+          if (activityIndex >= 0) {
+            const activityContainer = activityContainers[activityIndex]!;
+            const header = candidate.closest<HTMLElement>('[class*="group/activity-header"]');
+            if (header) {
+              const headerIndex = [...activityContainer.querySelectorAll<HTMLElement>('[class*="group/activity-header"]')].indexOf(header);
+              if (headerIndex >= 0) return `status:activity-header:${activityIndex}:${headerIndex}`;
+            }
+            const summary = candidate.closest<HTMLElement>('[data-markdown-text-tone="tertiary"]');
+            if (summary) {
+              const summaryIndex = [...activityContainer.querySelectorAll<HTMLElement>('[data-markdown-text-tone="tertiary"]')].indexOf(summary);
+              if (summaryIndex >= 0) return `status:activity-summary:${activityIndex}:${summaryIndex}`;
+            }
+          }
+        }
         const statusContainer = candidate.closest<HTMLElement>("[data-streaming-response-status]");
         const itemAnchor = candidate.closest<HTMLElement>("[data-item-anchor]");
         if (!statusContainer || !itemAnchor) return undefined;
@@ -6153,6 +6142,7 @@ export class ChatGptBrowserWorker {
         }
       });
       const traceByKey = new Map<string, ChatGptVisibleTraceBlock>();
+      const seenStatusTexts = new Set<string>();
       [...candidates]
         .filter(([candidate]) => renderedInDom(candidate))
         .sort(([left], [right]) => left === right
@@ -6171,12 +6161,10 @@ export class ChatGptBrowserWorker {
         }))
         .filter(block => block.text.length > 0)
         .forEach((block, index) => {
-          // Leaf rows and their enclosing status container can carry the same visible activity
-          // text. Make that identity textual for status only, so one ChatGPT action reaches
-          // Codex once instead of as duplicated gray events.
-          const key = block.kind === "status"
-            ? `status:text:${block.text.replace(/\s+/g, " ").trim()}`
-            : block.key ?? `${block.kind}:fallback:${index}`;
+          const statusText = block.kind === "status" ? block.text.replace(/\s+/g, " ").trim() : "";
+          if (statusText && seenStatusTexts.has(statusText)) return;
+          if (statusText) seenStatusTexts.add(statusText);
+          const key = block.key ?? (statusText ? `status:text:${statusText}` : `${block.kind}:fallback:${index}`);
           const previous = traceByKey.get(key);
           if (!previous || block.text.length > previous.text.length) traceByKey.set(key, block);
         });
@@ -7035,19 +7023,6 @@ export class ChatGptBrowserWorker {
         }
         turn.onReasoningSummary?.(`@ ${text}`);
       };
-      let livePublicCommentary = "";
-      const publishLivePublicCommentary = (value: string): void => {
-        const text = value.replace(/\s+/g, " ").trim();
-        if (!text || text === livePublicCommentary) return;
-        const previous = livePublicCommentary;
-        livePublicCommentary = text;
-        if (previous && text.startsWith(previous)) {
-          const delta = text.slice(previous.length).trimStart();
-          if (delta) turn.onCommentary?.(delta, true);
-          return;
-        }
-        turn.onCommentary?.(text);
-      };
       const recordFinalUsage = await usageSubmission();
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
@@ -7123,14 +7098,6 @@ export class ChatGptBrowserWorker {
       const completedActionLabels: string[] = [];
       const deferAnswerMarkdownUntilCompletion = turn.completionFence !== undefined;
       const markdownDelivery = new ChatGptAnswerMarkdownDelivery(deferAnswerMarkdownUntilCompletion);
-      // Tool-capable turns keep the authoritative Markdown behind the completion fence, but the
-      // browser can already show a stable public paragraph while it is still running. Keep a
-      // separate append-only projection solely for one bounded progress preview; this cannot
-      // mutate or contaminate the final answer buffer.
-      const liveMarkdownPreview = deferAnswerMarkdownUntilCompletion
-        ? new ChatGptAnswerMarkdownDelivery(false)
-        : undefined;
-      let publishedLiveMarkdownPreview = false;
       // Tool-capable turns expose mutable planning/progress prose in the same DOM roots later
       // reused for the human conclusion. Streaming those roots as answer bytes makes the
       // Responses stream append-only while React is still free to rewrite/reorder them. Once
@@ -7237,10 +7204,8 @@ export class ChatGptBrowserWorker {
         // without changing the assistant Markdown root. Keep polling that live surface here;
         // otherwise only the first "Thinking" row reaches Codex and later "Inspected/Edited"
         // steps are stranded until the final answer.
-        const liveActivity = await this.preResponseActivityText(page);
+        const liveActivity = await this.preResponseActivityText(page, undefined, [], responseTurn.identity);
         if (liveActivity) publishPreResponseActivity(liveActivity);
-        const liveCommentary = await this.livePublicCommentaryText(page);
-        if (liveCommentary) publishLivePublicCommentary(liveCommentary);
         await throwIfChatGptToolApprovalRequired(page.locator(chatGptTurnContainerSelector(responseTurn.identity)));
 
         let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
@@ -7357,52 +7322,20 @@ export class ChatGptBrowserWorker {
               return throwMarkdownConsistencyError(error);
             }
           })();
-          if (!snapshot.completionActionVisible && !publishedLiveMarkdownPreview && liveMarkdownPreview
-            && !livePublicCommentary) {
-            // Current Codex-flavoured MarkdownRoot is often a single non-streamable segment.
-            // Its public visible text is still stable once the root is rendered, so use it as a
-            // bounded preview instead of waiting for a later sibling segment that may never come.
-            const preview = liveMarkdownPreview.observe(snapshot.markdownSegments)
-              || snapshot.visibleText;
-            if (preview) {
-              // A single bounded preview makes live Web work visible in Codex without creating a
-              // second full answer card. The completed, fenced response remains the final item.
-              const compactPreview = preview.replace(/\s+/g, " ").trim().slice(0, 700);
-              if (compactPreview) {
-                publishedLiveMarkdownPreview = true;
-                turn.onCommentary?.(compactPreview);
-              }
-            }
-          }
           // A newly observed MCP batch is also a hard semantic boundary: any prose rendered
           // immediately before it belongs before that tool call. Flush it even when the normal
           // anti-flicker stability window has not elapsed yet.
           const traceBoundaryVisible = snapshot.completionActionVisible
             || toolBatchRevisionToAcknowledge !== undefined;
-          // The generic assistant Markdown root is mutable while ChatGPT is still working.
-          // Mirror it as commentary only before completion so public planning/progress reaches
-          // Codex in real time. Once ChatGPT renders its completion action, stop mirroring that
-          // root and reserve it for the authoritative final Markdown response below.
-          const liveTraceBlocks = snapshot.completionActionVisible
-            ? snapshot.traceBlocks
-            : snapshot.traceBlocks.map(block => block.kind === "answer"
-              ? { ...block, kind: "commentary" as const, complete: false }
-              : block);
-          const normalizedLivePublicCommentary = livePublicCommentary.replace(/\s+/g, " ").trim();
-          for (const trace of visibleTrace.observe(liveTraceBlocks, traceBoundaryVisible)) {
+          // Only structurally identified progress may become commentary. A mutable answer root
+          // remains an answer even before completion; promoting it publishes fragments and then
+          // duplicates the same conclusion when the completion fence delivers the final item.
+          for (const trace of visibleTrace.observe(snapshot.traceBlocks, traceBoundaryVisible)) {
             if (trace.kind === "reasoning" && !trace.continuation && trace.text.startsWith("@ ")) {
               const label = trace.text.slice(2).trim();
               if (label && completedActionLabels.at(-1) !== label) completedActionLabels.push(label);
             }
             if (trace.kind === "commentary") {
-              const normalizedTrace = trace.text.replace(/\s+/g, " ").trim();
-              // The direct public-note poll already published this exact phase. The trace
-              // projection sees the same DOM node later, so emitting it again creates a second
-              // assistant card and makes a function/action look duplicated in Codex.
-              if (normalizedLivePublicCommentary
-                && (normalizedTrace === normalizedLivePublicCommentary
-                  || normalizedTrace.startsWith(normalizedLivePublicCommentary)
-                  || normalizedLivePublicCommentary.startsWith(normalizedTrace))) continue;
               turn.onCommentary?.(trace.text, trace.continuation === true);
             }
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
@@ -7590,6 +7523,22 @@ export class ChatGptBrowserWorker {
       );
       return finalText;
     } catch (error) {
+      // An abort inside an awaited observation skips the loop's cancellation check.
+      // Stop the owned response before releasing its page so steering can submit again.
+      // Cleanup deliberately uses its own bounded operations, not the aborted turn signal.
+      if (turn.abortSignal?.aborted && diagnosticPage && !diagnosticPage.isClosed()) {
+        try {
+          const stop = chatGptStopButton(diagnosticPage);
+          if (await stop.isVisible()) {
+            await stop.click({ noWaitAfter: true, timeout: 5_000 });
+            await stop.waitFor({ state: "hidden", timeout: 10_000 });
+          }
+        } catch (stopError) {
+          console.warn(`[chatgpt-web] interrupted response stop failed: ${redactChatGptUiDiagnostic(
+            stopError instanceof Error ? stopError.message : String(stopError),
+          )}`);
+        }
+      }
       if (!(error instanceof DOMException && error.name === "AbortError")
         && !(error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")) {
         error = await submissionRejection.failure() ?? error;

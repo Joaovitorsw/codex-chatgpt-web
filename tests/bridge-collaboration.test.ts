@@ -22,6 +22,42 @@ async function* streamed(events: AdapterEvent[]): AsyncGenerator<AdapterEvent> {
   yield* events;
 }
 
+test("native DevSpace subagent lifecycle keeps one structured tool item per action", async () => {
+  const namespace = "multi_agent_v1";
+  const actions = [
+    { id: "spawn-1", name: "spawn_agent", args: { message: "Inspect read-only files", fork_context: false } },
+    { id: "wait-1", name: "wait_agent", args: { targets: ["agent-1"], timeout_ms: 30000 } },
+    { id: "close-1", name: "close_agent", args: { target: "agent-1" } },
+  ];
+  const names = new Map(actions.map(action => [
+    `${namespace}__${action.name}`,
+    { namespace, name: action.name },
+  ]));
+  async function* events(): AsyncGenerator<AdapterEvent> {
+    for (const action of actions) {
+      yield { type: "tool_call_start", id: action.id, name: `${namespace}__${action.name}` };
+      yield { type: "tool_call_delta", arguments: JSON.stringify(action.args) };
+      yield { type: "tool_call_end" };
+    }
+    yield { type: "done", endTurn: false, stopReason: "tool_use" };
+  }
+  const body = await new Response(bridgeToResponsesSSE(events(), "chatgpt-web/test", names)).text();
+  const items = body.split("\n").filter(line => line.startsWith("data: "))
+    .flatMap(line => {
+      const payload = line.slice(6);
+      if (payload === "[DONE]") return [];
+      const event = JSON.parse(payload) as { type?: string; item?: Record<string, unknown> };
+      return event.type === "response.output_item.done" && event.item ? [event.item] : [];
+    });
+  expect(items).toHaveLength(3);
+  expect(items.map(item => [item.call_id, item.namespace, item.name])).toEqual([
+    ["spawn-1", namespace, "spawn_agent"],
+    ["wait-1", namespace, "wait_agent"],
+    ["close-1", namespace, "close_agent"],
+  ]);
+  expect(items.map(item => JSON.parse(item.arguments as string))).toEqual(actions.map(action => action.args));
+});
+
 describe("MultiAgent V2 plaintext collaboration contract", () => {
   for (const name of ["spawn_agent", "send_message", "followup_task"]) {
     test(`marks ${name} arguments as explicit plaintext in JSON and SSE`, async () => {

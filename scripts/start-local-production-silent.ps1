@@ -52,7 +52,7 @@ function Start-DevSpaceIfNeeded {
   $existing = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
       $_.Name -ieq 'node.exe' -and
-      ($_.CommandLine -match '@waishnav[\\/]devspace[\\/]dist[\\/]cli\.js"?\s+serve' -or $_.CommandLine -match $gatewayPattern)
+      $_.CommandLine -match $gatewayPattern
     } |
     Select-Object -First 1
 
@@ -120,7 +120,11 @@ function Start-DevSpaceIntegration {
   New-Item -ItemType Directory -Force -Path $devSpaceLogDir | Out-Null
   $integrationLog = Join-Path $devSpaceLogDir 'startup.log'
   Add-Content -LiteralPath $integrationLog -Value "$(Get-Date -Format o) Starting DevSpace/Tailscale integration."
+  $integrationCallerPort = [Environment]::GetEnvironmentVariable('PORT', 'Process')
   try {
+    . (Join-Path $PSScriptRoot 'devspace-settings.ps1')
+    $integrationSettings = Get-DevSpaceSettings -IgnoreInheritedPort
+    $env:PORT = [string]$integrationSettings.Port
     Start-DevSpaceIfNeeded | ForEach-Object { Add-Content -LiteralPath $integrationLog -Value $_ -Encoding UTF8; Write-Output $_ }
     & (Join-Path $PSScriptRoot 'ensure-devspace-tunnel.ps1') | ForEach-Object { Add-Content -LiteralPath $integrationLog -Value $_ -Encoding UTF8; Write-Output $_ }
   } catch {
@@ -132,12 +136,20 @@ function Start-DevSpaceIntegration {
     }
     if ($DevSpaceOnly) { throw }
     Write-Warning "DevSpace integration is not ready: $($_.Exception.Message)"
+  } finally {
+    [Environment]::SetEnvironmentVariable('PORT', $integrationCallerPort, 'Process')
   }
 }
 
 if ($DevSpaceOnly -or $IntegrationWorker) {
   Start-DevSpaceIntegration
   exit 0
+}
+
+try {
+  & (Join-Path $PSScriptRoot 'start-opencodex-silent.ps1')
+} catch {
+  Write-Warning "OpenCodex could not start: $($_.Exception.Message)"
 }
 
 function Start-IntegrationInBackground {
@@ -196,7 +208,7 @@ $priorStartHidden = $env:CODEX_WEB_GPT_START_HIDDEN
 try {
   $env:CODEX_WEB_GPT_SILENT = '1'
   $env:CODEX_WEB_GPT_START_HIDDEN = '0'
-  $process = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/c', $runner) `
+  $process = Start-Process -FilePath 'cmd.exe' -ArgumentList ('/d /s /c ""' + $runner + '""') `
     -WorkingDirectory $repoRoot -WindowStyle Hidden -RedirectStandardOutput $stdout `
     -RedirectStandardError $stderr -PassThru
 } finally {

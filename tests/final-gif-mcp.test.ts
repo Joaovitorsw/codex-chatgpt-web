@@ -18,7 +18,7 @@ test("animated GIF registers final media and survives MCP, broker and Responses 
   const oversized = join(root, "oversized.gif");
   writeFileSync(path, gif);
   writeFileSync(oversized, gif);
-  truncateSync(oversized, 12 * 1024 * 1024 + 1);
+  truncateSync(oversized, 14 * 1024 * 1024 + 1);
   const socket = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socket);
   const token = await broker.register({ cwd: root, roots: [root], writableRoots: [root], sandboxPolicy: { type: "readOnly", networkAccess: false }, tools: [] }, 30_000);
@@ -49,6 +49,15 @@ test("animated GIF registers final media and survives MCP, broker and Responses 
     const json = buildResponseJSON([{ type: "text_delta", text: final, phase: "final_answer" }, { type: "done", endTurn: true }], "chatgpt-web/gif-test");
     expect(JSON.stringify(json)).toContain(final);
     expect(JSON.stringify(json)).not.toContain("CODEXIMAGE:");
+    const largeGif = Buffer.alloc(13 * 1024 * 1024);
+    gif.copy(largeGif);
+    writeFileSync(path, largeGif);
+    const largeResponse = await client.callTool({ name: "codex_view_image", arguments: { turn_token: token, path } });
+    expect(largeResponse.isError).not.toBe(true);
+    const largeImage = (await new RemoteTurnBroker(socket).finalImages(token)).at(-1)!;
+    expect(Buffer.from(largeImage.data, "base64")).toEqual(largeGif);
+    expect(materializeFinalImages(presentedImageRef(largeImage), [largeImage]))
+      .toBe(`![Image](data:image/gif;base64,${largeGif.toString("base64")})`);
   } finally {
     await client.close();
     await transport.close();

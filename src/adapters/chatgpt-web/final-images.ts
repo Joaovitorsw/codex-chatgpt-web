@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 
+export const MAX_PRESENTED_IMAGE_BYTES = 14 * 1024 * 1024;
+const MAX_PRESENTED_IMAGE_BASE64_CHARS = 4 * Math.ceil(MAX_PRESENTED_IMAGE_BYTES / 3);
+
 export interface PresentedImage {
   data: string;
   mimeType: string;
@@ -37,10 +40,11 @@ export function summarizeDeliveredImages(text: string): string {
 export function assertPresentedImage(value: unknown): asserts value is PresentedImage {
   if (!value || typeof value !== "object") throw new Error("Invalid presented image");
   const image = value as Partial<PresentedImage>;
-  if (typeof image.data !== "string" || image.data.length > 16 * 1024 * 1024
+  if (typeof image.data !== "string" || image.data.length > MAX_PRESENTED_IMAGE_BASE64_CHARS
     || typeof image.alt !== "string" || image.alt.length > 500) throw new Error("Invalid presented image payload");
   const bytes = Buffer.from(image.data, "base64");
-  if (bytes.length === 0 || bytes.toString("base64") !== image.data) throw new Error("Invalid presented image Base64");
+  if (bytes.length === 0 || bytes.length > MAX_PRESENTED_IMAGE_BYTES
+    || bytes.toString("base64") !== image.data) throw new Error("Invalid presented image Base64");
   const png = image.mimeType === "image/png" && bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"));
   const jpeg = image.mimeType === "image/jpeg" && bytes.subarray(0, 3).equals(Buffer.from("ffd8ff", "hex"));
   const webp = image.mimeType === "image/webp" && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";

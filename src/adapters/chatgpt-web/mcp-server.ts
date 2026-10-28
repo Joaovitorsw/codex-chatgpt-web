@@ -12,7 +12,7 @@ import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control"
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerRetirementDiagnostics, type BrokerToolResult } from "./turn-broker";
 import { observeMcpToolCalls } from "./mcp-observation";
 import { chatGptToolProgressLabel } from "./tool-progress";
-import { assertPresentedImage } from "./final-images";
+import { assertPresentedImage, MAX_PRESENTED_IMAGE_BYTES } from "./final-images";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -350,7 +350,6 @@ function assertGatewayToolArguments(name: string, args: Record<string, unknown>)
   }
 }
 
-const LOCAL_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
 
 function localImageMimeType(path: string): string | undefined {
   const suffix = path.slice(path.lastIndexOf(".")).toLowerCase();
@@ -382,8 +381,8 @@ function readWorkspaceImage(environment: ChatGptTurnEnvironment, inputPath: stri
   const mimeType = localImageMimeType(path);
   if (!mimeType) throw new Error("Only PNG, JPEG, WebP, and GIF workspace images can be inspected");
   const stat = statSync(path);
-  if (!stat.isFile() || stat.size > LOCAL_IMAGE_MAX_BYTES) {
-    throw new Error(`Workspace image is unavailable or exceeds ${LOCAL_IMAGE_MAX_BYTES} bytes`);
+  if (!stat.isFile() || stat.size > MAX_PRESENTED_IMAGE_BYTES) {
+    throw new Error(`Workspace image is unavailable or exceeds ${MAX_PRESENTED_IMAGE_BYTES} bytes`);
   }
   return {
     content: [{ type: "image" as const, data: readFileSync(path).toString("base64"), mimeType }],

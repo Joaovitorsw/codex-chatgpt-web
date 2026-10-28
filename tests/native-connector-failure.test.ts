@@ -6,6 +6,13 @@ const recurringReport = "Nesta execução, consegui localizar a ferramenta de co
 test.each([
   recurringReport,
   recurringReport.toUpperCase(),
+  "As tentativas de inspecionar novamente o posicionamento retornaram erros internos do Codex Native2. Por isso, **nenhuma alteração foi aplicada nem validada nesta etapa**.",
+  "Codex Native2 returned an internal error. I could not run commands.",
+  "O Native2 retornou erros internos. Não consegui executar comandos.",
+  "Nesta etapa, a tentativa de consultar o código local retornou um erro interno do Codex Native2. A consulta de capacidades da ferramenta funcionou, mas não resolveu o impedimento de acesso ao código. Nenhuma correção foi aplicada ou validada.",
+  "A validação de produção não foi concluída devido a uma falha interna na conexão Codex Native2. As tentativas de leitura da skill, execução do PowerShell e apresentação do GIF retornaram erro interno. Não posso confirmar a execução ou a entrega da animação.",
+  "O Native2 retornou erros internos. Não consegui executar comandos. Quer tentar novamente?",
+  "Codex Native2 returned an internal error. It is not resolved. I could not run commands.",
   "The Codex native tool failed internally. I could not run commands or tests.",
   "The tool failed internally in the local connector.",
   "The plugin tool failed internally in this execution context.",
@@ -20,6 +27,10 @@ test.each([
 
 test.each([
   "",
+  "O Native2 não retornou erros internos. Nenhuma alteração foi aplicada.",
+  "Se o Codex Native2 retornar erros internos, nenhuma alteração será aplicada.",
+  "O Native2 retornou erros internos? Nenhuma alteração foi aplicada?",
+  "O servidor da aplicação retornou erro interno. Codex Native2 executou a inspeção.",
   "The tool failed internally.",
   "Codex ran npm test; the command failed with exit code 1.",
   "O comando do Codex saiu com código 1. Não consegui realizar testes.",

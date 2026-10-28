@@ -24,6 +24,7 @@ import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapte
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultBrokerEndpoint } from "../src/config";
+import * as launcherBrowserHost from "../src/launcher-browser-host";
 import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
@@ -411,6 +412,77 @@ function canonicalJson(value: unknown): string {
 }
 
 describe("ChatGPT outer-native harness v4", () => {
+  test.each([
+    { name: "exec_command", arguments: { cmd: "pwd" }, label: "Executando no shell" },
+    { name: "tool_search", arguments: { query: "browser info" }, label: "Consultando ferramentas nativas" },
+    { name: "mcp__codex_browser__codex_get_info", arguments: {}, label: "Executando codex get info" },
+    { name: "write_stdin", arguments: { session_id: 42, chars: "" }, label: "Acompanhando processo nativo" },
+  ])("native activity and replay preserve $name without synthetic commentary", async operation => {
+    const socketPath = brokerTestEndpoint(`activity-${operation.name}-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://activity-${operation.name}`,
+      chatgptWeb: { ...toolCapabilities, brokerSocketPath: socketPath },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    worker.run = async turn => {
+      const prepared = await turn.prepare();
+      try {
+        const token = /turn_token (turn_[A-Za-z0-9_-]+)/.exec(prepared.text)![1]!;
+        const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+        turn.onCommentary?.("Vou verificar o resultado.");
+        await invokeAfterBrowserBoundary(turn, () => callTurnBroker(socketPath, {
+          method: "invoke", bindingId: claimed.bindingId, wireName: operation.name,
+          freeform: false, arguments: operation.arguments, progressLabel: operation.label,
+        }));
+        turn.onTextDelta("Complete");
+        return "Complete";
+      } finally {
+        prepared.release();
+      }
+    };
+    try {
+      const request = rawWireRequest(environmentXml);
+      request.context.tools = [{ name: operation.name, description: "Native activity fixture", parameters: { type: "object" } }];
+      const adapter = createChatGptWebAdapter(provider);
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(events.filter(event => event.type === "text_delta")).toEqual([
+        { type: "text_delta", text: "Vou verificar o resultado.", phase: "commentary" },
+      ]);
+      const start = events.find(event => event.type === "tool_call_start");
+      expect(start).toMatchObject({ name: operation.name });
+      expect(events.find(event => event.type === "tool_call_delta")).toEqual({ type: "tool_call_delta", arguments: JSON.stringify(operation.arguments) });
+      const replay: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => replay.push(event));
+      expect(replay.filter(event => event.type === "text_delta")).toEqual(events.filter(event => event.type === "text_delta"));
+      expect(replay.find(event => event.type === "tool_call_start")).toEqual(start);
+      const response = buildResponseJSON(events, "chatgpt-web/test", { toolSearchToolNames: new Set(["tool_search"]) });
+      expect((response.output as Array<{ type: string }>).map(item => item.type)).toEqual([
+        "message", operation.name === "tool_search" ? "tool_search_call" : "function_call",
+      ]);
+      if (!start || start.type !== "tool_call_start") throw new Error("native activity call missing");
+      const continuation = structuredClone(request);
+      const result = JSON.stringify({ output: "verified", exit_code: 0 });
+      continuation.context.messages.push(
+        { role: "assistant", content: [{ type: "toolCall", id: start.id, name: operation.name, arguments: operation.arguments }], timestamp: 3 },
+        { role: "toolResult", toolCallId: start.id, toolName: operation.name, content: result, isError: false, timestamp: 4 },
+      );
+      (continuation._rawBody as { input: unknown[] }).input.push(
+        { type: "function_call", call_id: start.id, name: operation.name, arguments: JSON.stringify(operation.arguments) },
+        { type: "function_call_output", call_id: start.id, output: result },
+      );
+      const completed: AdapterEvent[] = [];
+      await adapter.runTurn!(continuation, { headers: new Headers() }, event => completed.push(event));
+      expect(completed.at(-1)).toMatchObject({ type: "done", endTurn: true, stopReason: "stop" });
+      expect(completed.some(event => event.type === "tool_call_start")).toBe(false);
+      expect(completed.some(event => event.type === "text_delta" && event.text.includes(operation.label))).toBe(false);
+    } finally {
+      worker.run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test("extracts authoritative environment, tool registry, and turn identity from the Codex wire envelope", () => {
     const request = rawWireRequest(environmentXml);
     expect(extractChatGptTurnEnvironment(request)).toEqual({
@@ -1547,15 +1619,97 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test.each([false, true])("connector retry awaits retained release and blocks resend on release failure=%s", async releaseFails => {
+    const socketPath = brokerTestEndpoint(`cgw-connector-release-${process.pid}-${Date.now()}-${releaseFails}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://connector-release-${socketPath}`,
+      chatgptWeb: {
+        browserHost: "launcher", browserHostDescriptorPath: join(tempRoot, "connector-release-launcher.json"),
+        brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+      },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    let retained = false;
+    let browserStarts = 0;
+    let releaseStarted = false;
+    let finishRelease!: () => void;
+    const releaseGate = new Promise<void>(resolveRelease => { finishRelease = resolveRelease; });
+    const preparedPrompts: string[] = [];
+    const run = spyOn(worker, "run").mockImplementation(async turn => {
+      browserStarts += 1;
+      const prepared = retained ? await turn.prepareResume!() : await turn.prepare();
+      preparedPrompts.push(prepared.text);
+      prepared.release();
+      retained = true;
+      const answer = browserStarts === 1 ? "The Codex native tool failed internally." : "Fresh conversation succeeded.";
+      turn.onTextDelta(answer);
+      return answer;
+    });
+    const recovery = spyOn(launcherBrowserHost, "requestLauncherRuntimeRecovery").mockResolvedValue("queued");
+    const request = rawWireRequest(environmentXml);
+    request.context.messages.unshift({ role: "assistant", content: [{ type: "text", text: "Previously confirmed history marker" }], timestamp: 1 });
+    request.context.messages.push({
+      role: "toolResult", toolCallId: "confirmed_before_retry", toolName: "exec_command",
+      content: "Confirmed native result marker", isError: false, timestamp: 3,
+    });
+    (request._rawBody as { input: unknown[] }).input.push({
+      type: "function_call_output", call_id: "confirmed_before_retry", output: "Confirmed native result marker",
+    });
+    const release = async (_descriptor: string, key: string): Promise<number> => {
+      expect(key).toBe(chatGptConversationKey(request, chatGptWebExecutionNamespace(provider))!);
+      releaseStarted = true;
+      await releaseGate;
+      if (releaseFails) throw new Error("Physical release failed");
+      retained = false;
+      return 1;
+    };
+    const events: AdapterEvent[] = [];
+    try {
+      const first = createChatGptWebAdapter(provider, { releaseRetainedConversation: release }).runTurn!(
+        request, { headers: new Headers() }, event => events.push(event),
+      );
+      for (let tick = 0; tick < 100 && !releaseStarted && !events.some(event => event.type === "error"); tick += 1) {
+        await Bun.sleep(5);
+      }
+      expect(releaseStarted).toBe(true);
+      expect(events.some(event => event.type === "error")).toBe(false);
+      finishRelease();
+      await first;
+      expect(events.at(-1)).toMatchObject({ type: "error", retryable: !releaseFails });
+      expect(events.some(event => event.type === "text_delta" && event.phase === "final_answer")).toBe(false);
+      const next: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider, { releaseRetainedConversation: release }).runTurn!(
+        request, { headers: new Headers() }, event => next.push(event),
+      );
+      expect(browserStarts).toBe(releaseFails ? 1 : 2);
+      if (releaseFails) {
+        expect(next.at(-1)).toMatchObject({ type: "error", code: "native_connector_conversation_release_failed", retryable: false });
+      } else {
+        expect(next.at(-1)).toMatchObject({ type: "done" });
+        expect(preparedPrompts[1]).toContain("Previously confirmed history marker");
+        expect(preparedPrompts[1]).toContain("Confirmed native result marker");
+        expect(preparedPrompts[1]).toContain("Inspect the project");
+      }
+      expect(recovery).not.toHaveBeenCalled();
+    } finally {
+      finishRelease();
+      run.mockRestore();
+      recovery.mockRestore();
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test("retries a connector failure before native dispatch instead of publishing a successful final", async () => {
     const socketPath = brokerTestEndpoint(`cgw-connector-retry-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web", baseUrl: `browser://connector-retry-${Date.now()}`,
-      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(tempRoot, "connector-exhausted-launcher.json"), brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run;
     let browserStarts = 0;
+    let releases = 0;
+    const recovery = spyOn(launcherBrowserHost, "requestLauncherRuntimeRecovery").mockResolvedValue("queued");
     worker.run = async turn => {
       browserStarts += 1;
       const prepared = await turn.prepare();
@@ -1567,12 +1721,15 @@ describe("ChatGPT outer-native harness v4", () => {
     try {
       for (let attempt = 0; attempt < 7; attempt += 1) {
         const events: AdapterEvent[] = [];
-        await createChatGptWebAdapter(provider).runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, event => events.push(event));
+        await createChatGptWebAdapter(provider, { releaseRetainedConversation: async () => { releases += 1; return 1; } }).runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, event => events.push(event));
         expect(events.at(-1)).toMatchObject({ type: "error", code: "native_connector_internal_error", retryable: attempt < 5 });
         expect(events.some(event => event.type === "text_delta" && event.phase === "final_answer")).toBe(false);
       }
       expect(browserStarts).toBe(6);
+      expect(releases).toBe(6);
+      expect(recovery).not.toHaveBeenCalled();
     } finally {
+      recovery.mockRestore();
       worker.run = originalRun;
       await TurnBroker.forSocket(socketPath).close();
     }
@@ -3058,12 +3215,9 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(Number.isFinite(firstDone.usage?.outputTokens)).toBe(true);
       const firstResponse = buildResponseJSON(firstEvents, "gpt-5.6-sol") as { output: Array<Record<string, unknown>>; usage: { total_tokens: number } };
       expect(firstResponse.usage.total_tokens).toBeGreaterThan(0);
-      expect(firstResponse.output.map(item => item.type)).toEqual(["reasoning", "reasoning", "message", "function_call"]);
+      expect(firstEvents.filter(event => event.type === "text_delta" && event.phase === "commentary")).toEqual([]);
+      expect(firstResponse.output.map(item => item.type)).toEqual(["reasoning", "reasoning", "function_call"]);
       expect(firstResponse.output[2]).toMatchObject({
-        type: "message",
-        role: "assistant",
-      });
-      expect(firstResponse.output[3]).toMatchObject({
         type: "function_call",
         call_id: callStart!.id,
         name: "exec_command",

@@ -29,6 +29,23 @@ function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexP
   };
 }
 
+test.each(["low", "high", "max"] as const)("%s Web prompts require bounded early skill discovery and evidence-based application", reasoning => {
+  const compiled = compileChatGptWebPrompt(request(reasoning), {
+    localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  }, "turn_12345678901234567890123456789012");
+  const transport = compiled.text.split("<codex_context_json>")[0]!;
+
+  expect(transport).toContain("At the start of task work, before substantive decisions or implementation, make a task-relevant pass over the supplied skill catalog");
+  expect(transport).toContain("Read the applicable process skills and specialist SKILL.md files before using their guidance");
+  expect(transport).toContain("Resolve skill-root aliases using the supplied root mapping");
+  expect(transport).toContain("follow the relevant referenced resources using the skill's declared access mechanism");
+  expect(transport).toContain("Do not load every skill or run large recursive searches merely to discover skills");
+  expect(transport).toContain("Recover missing sections from truncated reads with targeted reads before claiming complete reading");
+  expect(transport).toContain("Distinguish discovering a skill, successfully reading it, and applying its guidance");
+  expect(transport).toContain("Tie the concise user-facing progress announcement to actual successful reads and the purpose of the next action");
+  expect(transport).toContain("avoid rote claims that skills were used");
+});
+
 test("browser work resumes relevant Chrome tabs before creating another tab", () => {
   const compiled = compileChatGptWebPrompt(request("high"), {
     localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
@@ -100,6 +117,31 @@ test("DevSpace discovers a deferred spawn tool when tool_search is advertised", 
   }, "turn_12345678901234567890123456789012");
   expect(compiled.text).toContain("Search for spawn_agent using the advertised tool_search capability");
   expect(compiled.text).not.toContain("No native spawn_agent or deferred discovery was advertised");
+});
+
+test("generated image and oversized GIF delivery requires a presentation attempt and a supported fallback", () => {
+  const parsed = request("high");
+  parsed.context.messages.push({ role: "user", content: "Present the generated GIF: 14,070,536 bytes, exceeding the reported 12 MiB limit.", timestamp: 3 });
+  const compiled = compileChatGptWebPrompt(parsed, { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true }, "turn_12345678901234567890123456789012");
+  const transport = compiled.text.split("<codex_context_json>")[0]!;
+
+  expect(transport).toContain("For a generated local image or animated GIF that is a requested deliverable, actually present it through the attached local image-viewing capability");
+  expect(transport).toContain("use its returned image_ref receipt in the final answer");
+  expect(transport).toContain("If the presentation attempt exceeds a size limit, report the measured file size and the actual reported limit");
+  expect(transport).toContain("only when the receiving client supports absolute local Markdown media embeds, use ![description](/absolute/path/to/file.gif)");
+  expect(transport).toContain("A relative or plain path alone is not a media presentation and must never be described as playable");
+  expect(transport).toContain("Preserve actual animation; never substitute a static frame or claim playback was verified from a receipt or embed alone");
+  expect(transport).toContain("This image/GIF delivery route does not establish MP4 or other video support");
+});
+
+test("authorized GIF compression preserves the original and verifies a distinct delivery preview", () => {
+  const compiled = compileChatGptWebPrompt(request("high"), { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true }, "turn_12345678901234567890123456789012");
+  const transport = compiled.text.split("<codex_context_json>")[0]!;
+  expect(transport).toContain("When the user authorizes compression or lower quality for chat delivery, preserve the original file and create a clearly named delivery derivative");
+  expect(transport).toContain("reduce resolution, palette, or frame rate as needed while preserving actual animation");
+  expect(transport).toContain("Verify the derivative's measured size against the actual delivery limit, inspect its frame count and timing, and verify playback before presenting the derivative");
+  expect(transport).toContain("Label the compressed preview separately from the byte-preserving original");
+  expect(transport).not.toContain("Do not flatten, resize or transcode a GIF merely to display it");
 });
 
 test("local GIF delivery requires the viewer receipt instead of a file link or static conversion", () => {

@@ -1,7 +1,8 @@
 @echo off
 setlocal
 title Codex Web GPT - Safe Restart Queue
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\restart-local-production-safe.ps1"
+rem Restarts Codex Desktop, launcher/bridge, native DevSpace and OpenCodex.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0scripts\restart-local-production-safe.ps1" %*
 if errorlevel 1 (
   echo Safe restart could not be queued.
   pause

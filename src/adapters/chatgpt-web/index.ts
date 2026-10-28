@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chatGptFailureLabel, chatGptToolProgressLabel } from "./tool-progress";
+import { chatGptFailureLabel } from "./tool-progress";
 export { chatGptToolProgressLabel } from "./tool-progress";
 import { join, resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
@@ -12,7 +12,6 @@ import {
   LauncherManualTurnTimedOutError,
   markLauncherManualTurnStarted,
   releaseLauncherRetainedConversation,
-  requestLauncherRuntimeRecovery,
   startLauncherManualTurn,
   waitForLauncherManualSent,
   waitForLauncherManualTerminal,
@@ -267,19 +266,7 @@ export function chatGptCapabilityRetirementRequiresBrowserAbort(
 
 function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
   for (const request of requests) {
-    // ChatGPT can execute an MCP call before it has rendered any public planning prose. Give
-    // Codex a compact, truthful progress milestone in that gap; the native tool card supplies
-    // the authoritative arguments and result immediately after this line.
-    const label = request.progressLabel ?? chatGptToolProgressLabel(request.wireName, request);
-    // A tool boundary is semantically different from the preceding public ChatGPT prose.
-    // Without it Codex appends "Executando ..." to the final word of that prose, hiding the
-    // gray action/card transition that remains visibly separate in the ChatGPT Activity UI.
     emit({ type: "assistant_boundary" });
-    emit({
-      type: "text_delta",
-      text: `${label}.`,
-      phase: "commentary",
-    });
     emit({ type: "tool_call_start", id: request.callId, name: request.wireName });
     emit({
       type: "tool_call_delta",
@@ -1373,7 +1360,7 @@ export function createChatGptWebAdapter(
           chatGptTurnSessions.retireAbortedOwnerTurns(ownerKey, abortedTurnIds, executionKey);
         }
         const traceId = chatGptWebTraceId(provider, parsed);
-        const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
+        let session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
           executionKey,
           ownerKey,
           () => startRuntime(parsed, environment, traceId, turnCapabilities),
@@ -1695,11 +1682,29 @@ export function createChatGptWebAdapter(
             throw error;
           }
           const turnError = submittedTurnFailure(session, error);
-          const handledError = turnError instanceof ChatGptWebAdapterError && turnError.retryable
+          let handledError = turnError instanceof ChatGptWebAdapterError && turnError.retryable
             ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, turnError)
             : turnError;
           if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {
             chatGptWebTurnRetryPolicy.clear(retryKey);
+          }
+          const failedConversationKey = session.conversationKey();
+          if (handledError instanceof ChatGptWebAdapterError
+            && handledError.code === "native_connector_internal_error" && failedConversationKey) {
+            try {
+              await chatGptTurnSessions.retireConversationAndWait(failedConversationKey);
+            } catch (cause) {
+              handledError = new ChatGptWebAdapterError(
+                "The failed ChatGPT conversation could not be released. No automatic resend was attempted.",
+                { status: 502, errorType: "server_error", code: "native_connector_conversation_release_failed", retryable: false, cause },
+              );
+              chatGptWebTurnRetryPolicy.clear(retryKey);
+              const failedRuntime = session.runtime;
+              session = chatGptTurnSessions.getOrCreate(
+                executionKey, () => failedRuntime, traceId, ownerKey, nativeTurnId, nativeIdentity.threadId,
+                chatGptInstructionLineage(parsed)?.current,
+              );
+            }
           }
           const partialNativeResults = handledError instanceof ChatGptWebAdapterError
             && handledError.code === "partial_native_tool_results";
@@ -1721,11 +1726,6 @@ export function createChatGptWebAdapter(
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
           if (handledError instanceof ChatGptWebAdapterError) {
-            if (handledError.code === "native_connector_internal_error" && !handledError.retryable
-              && provider.chatgptWeb?.browserHostDescriptorPath) {
-              void requestLauncherRuntimeRecovery(provider.chatgptWeb.browserHostDescriptorPath, "native_connector_internal_error")
-                .catch(error => console.warn("[chatgpt-web] could not queue bridge recovery:", error instanceof Error ? error.message : String(error)));
-            }
             const failureLabel = chatGptFailureLabel(handledError.code);
             emitRoundEvent({
               type: "error",

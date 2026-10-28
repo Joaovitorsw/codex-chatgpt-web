@@ -1,5 +1,6 @@
 @echo off
 setlocal
+rem Starts the local production launcher, DevSpace and OpenCodex web at http://127.0.0.1:3737.
 cd /d "%~dp0"
 
 if not exist "work\local-production" mkdir "work\local-production"

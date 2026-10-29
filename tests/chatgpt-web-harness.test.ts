@@ -1663,22 +1663,25 @@ describe("ChatGPT outer-native harness v4", () => {
       retained = false;
       return 1;
     };
+    let gatewayRecoveries = 0;
+    const recoverNativeGateway = async () => { gatewayRecoveries += 1; };
     const events: AdapterEvent[] = [];
     try {
-      const first = createChatGptWebAdapter(provider, { releaseRetainedConversation: release }).runTurn!(
+      const first = createChatGptWebAdapter(provider, { releaseRetainedConversation: release, recoverNativeGateway }).runTurn!(
         request, { headers: new Headers() }, event => events.push(event),
       );
       for (let tick = 0; tick < 100 && !releaseStarted && !events.some(event => event.type === "error"); tick += 1) {
         await Bun.sleep(5);
       }
       expect(releaseStarted).toBe(true);
+      expect(gatewayRecoveries).toBe(1);
       expect(events.some(event => event.type === "error")).toBe(false);
       finishRelease();
       await first;
       expect(events.at(-1)).toMatchObject({ type: "error", retryable: !releaseFails });
       expect(events.some(event => event.type === "text_delta" && event.phase === "final_answer")).toBe(false);
       const next: AdapterEvent[] = [];
-      await createChatGptWebAdapter(provider, { releaseRetainedConversation: release }).runTurn!(
+      await createChatGptWebAdapter(provider, { releaseRetainedConversation: release, recoverNativeGateway }).runTurn!(
         request, { headers: new Headers() }, event => next.push(event),
       );
       expect(browserStarts).toBe(releaseFails ? 1 : 2);
@@ -1709,6 +1712,8 @@ describe("ChatGPT outer-native harness v4", () => {
     const originalRun = worker.run;
     let browserStarts = 0;
     let releases = 0;
+    let gatewayRecoveries = 0;
+    const recoverNativeGateway = async () => { gatewayRecoveries += 1; };
     const recovery = spyOn(launcherBrowserHost, "requestLauncherRuntimeRecovery").mockResolvedValue("queued");
     worker.run = async turn => {
       browserStarts += 1;
@@ -1721,16 +1726,76 @@ describe("ChatGPT outer-native harness v4", () => {
     try {
       for (let attempt = 0; attempt < 7; attempt += 1) {
         const events: AdapterEvent[] = [];
-        await createChatGptWebAdapter(provider, { releaseRetainedConversation: async () => { releases += 1; return 1; } }).runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, event => events.push(event));
+        await createChatGptWebAdapter(provider, { recoverNativeGateway, releaseRetainedConversation: async () => { releases += 1; return 1; } }).runTurn!(rawWireRequest(environmentXml), { headers: new Headers() }, event => events.push(event));
         expect(events.at(-1)).toMatchObject({ type: "error", code: "native_connector_internal_error", retryable: attempt < 5 });
         expect(events.some(event => event.type === "text_delta" && event.phase === "final_answer")).toBe(false);
       }
       expect(browserStarts).toBe(6);
       expect(releases).toBe(6);
+      expect(gatewayRecoveries).toBe(6);
       expect(recovery).not.toHaveBeenCalled();
     } finally {
       recovery.mockRestore();
       worker.run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test.each(["success", "failure", "new-batch", "active", "outstanding", "abort"])("connector gateway recovery blocks unsafe retry: %s", async scenario => {
+    const socketPath = brokerTestEndpoint(`gateway-recovery-${process.pid}-${Date.now()}-${scenario}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://gateway-recovery-${socketPath}`,
+      chatgptWeb: { ...toolCapabilities, brokerSocketPath: socketPath },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const request = rawWireRequest(environmentXml);
+    const abort = new AbortController();
+    let recoveries = 0;
+    let enteredRecovery!: () => void;
+    let finishRecovery!: () => void;
+    const entered = new Promise<void>(resolve => { enteredRecovery = resolve; });
+    const gate = new Promise<void>(resolve => { finishRecovery = resolve; });
+    const run = spyOn(worker, "run").mockImplementation(async turn => {
+      const prepared = await turn.prepare();
+      prepared.release();
+      const answer = "The Codex native tool failed internally.";
+      turn.onTextDelta(answer);
+      return answer;
+    });
+    const snapshot = spyOn(ChatGptExternalTurnProgress.prototype, "snapshot");
+    const events: AdapterEvent[] = [];
+    const recoverNativeGateway = async () => {
+      recoveries += 1;
+      enteredRecovery();
+      await gate;
+      if (scenario === "failure") throw new Error("Recovery failed");
+    };
+    try {
+      const pending = createChatGptWebAdapter(provider, {
+        recoverNativeGateway, releaseRetainedConversation: async () => 1,
+      }).runTurn!(request, { headers: new Headers(), abortSignal: abort.signal }, event => events.push(event));
+      await Promise.race([entered, pending]);
+      expect(recoveries).toBe(1);
+      expect(events.some(event => event.type === "error")).toBe(false);
+      if (scenario === "new-batch" || scenario === "active") {
+        snapshot.mockImplementation(() => ({ revision: 1, lastToolBatchRevision: scenario === "new-batch" ? 1 : 0,
+          observedToolBatchRevision: 0, activeToolCalls: scenario === "active" ? 1 : 0 }));
+      }
+      if (scenario === "outstanding") {
+        // The session registry retains the actual session while recovery is awaited.
+        const key = `${chatGptWebExecutionNamespace(provider)}:${chatGptTurnExecutionKey(request)}`;
+        const session = chatGptTurnSessions.getOrCreate(key, () => { throw new Error("Missing active session"); });
+        session.setOutstanding([{ callId: "late", wireName: "exec_command", freeform: false, arguments: { command: "write" } }], [], []);
+      }
+      if (scenario === "abort") abort.abort();
+      finishRecovery();
+      await pending;
+      expect(events.at(-1)).toMatchObject({ type: "error", retryable: scenario === "success" });
+      expect(events.some(event => event.type === "done")).toBe(false);
+    } finally {
+      finishRecovery();
+      run.mockRestore();
+      snapshot.mockRestore();
       await TurnBroker.forSocket(socketPath).close();
     }
   });

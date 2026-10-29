@@ -31,6 +31,7 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, largeContextAsA
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { canRetryNativeConnectorFailure, chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { hasNativeConnectorInternalFailure } from "./native-connector-failure";
+import { recoverNativeGateway } from "./native-gateway-recovery";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptInstructionLineage, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveResilientMultipartParts } from "./usage";
@@ -424,6 +425,7 @@ export function createChatGptWebAdapter(
     zeroRiskManualControl?: ChatGptZeroRiskManualControl;
     nativeToolRelayCommand?: string[];
     releaseRetainedConversation?: typeof releaseLauncherRetainedConversation;
+    recoverNativeGateway?: () => Promise<void>;
   } = {},
 ): ProviderAdapter {
   const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1391,17 +1393,35 @@ export function createChatGptWebAdapter(
             const initialBatchRevision = session.runtime.mode === "tools"
               ? session.runtime.externalProgress.snapshot().lastToolBatchRevision
               : undefined;
-            const validateConnectorOutcome = (answer: string): void => {
+            const validateConnectorOutcome = async (answer: string): Promise<void> => {
               if (parsed._compactionRequest || session.runtime.mode !== "tools"
                 || session.runtime.manualControl || initialBatchRevision === undefined
                 || !hasNativeConnectorInternalFailure(answer)) return;
-              const progress = session.runtime.externalProgress.snapshot();
-              if (!canRetryNativeConnectorFailure({
-                initialBatchRevision,
-                currentBatchRevision: progress.lastToolBatchRevision,
-                activeToolCalls: progress.activeToolCalls,
-                outstandingToolCalls: session.outstanding().length,
-              })) return;
+              const retryIsSafe = (): boolean => {
+                if (session.runtime.mode !== "tools" || incoming.abortSignal?.aborted) return false;
+                const progress = session.runtime.externalProgress.snapshot();
+                return canRetryNativeConnectorFailure({
+                  initialBatchRevision,
+                  currentBatchRevision: progress.lastToolBatchRevision,
+                  activeToolCalls: progress.activeToolCalls,
+                  outstandingToolCalls: session.outstanding().length,
+                });
+              };
+              if (!retryIsSafe()) return;
+              try {
+                await (dependencies.recoverNativeGateway ?? recoverNativeGateway)();
+              } catch (cause) {
+                throw new ChatGptWebAdapterError(
+                  "Native gateway recovery could not be verified. No automatic resend was attempted.",
+                  { status: 502, errorType: "server_error", code: "native_gateway_recovery_failed", retryable: false, cause },
+                );
+              }
+              if (!retryIsSafe()) {
+                throw new ChatGptWebAdapterError(
+                  "Native dispatch state changed or the request was cancelled during gateway recovery. No automatic resend was attempted.",
+                  { status: 502, errorType: "server_error", code: "native_gateway_recovery_unsafe", retryable: false },
+                );
+              }
               throw new ChatGptWebAdapterError(
                 "The ChatGPT connector reported an internal tool failure before a new native dispatch. Retrying this request with the confirmed native results preserved.",
                 { status: 502, errorType: "server_error", code: "native_connector_internal_error", retryable: true },
@@ -1445,7 +1465,7 @@ export function createChatGptWebAdapter(
             if (settled && (settled.type === "error" || session.outstanding().length === 0)) {
               if (session.runtime.mode === "tools") currentToolResults(parsed, session);
               if (settled.type === "error") throw settled.error;
-              validateConnectorOutcome(settled.answer);
+              await validateConnectorOutcome(settled.answer);
               if (session.finalResponseConsumedByCompaction()) {
                 emitRoundEvent({ type: "done", stopReason: "stop", endTurn: true });
                 session.completeRound(roundKey);
@@ -1590,7 +1610,7 @@ export function createChatGptWebAdapter(
                 if (session.runtime.text.value() !== completedOutcome.answer) {
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
                 }
-                validateConnectorOutcome(completedOutcome.answer);
+                await validateConnectorOutcome(completedOutcome.answer);
                 structuredOutputValidator?.(completedOutcome.answer);
                 if (bufferStructuredOutput) {
                   emitRoundBatch(buffer => emitTextDeltas([completedOutcome.answer], buffer));

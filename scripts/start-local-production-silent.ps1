@@ -126,6 +126,12 @@ function Start-DevSpaceIntegration {
     $integrationSettings = Get-DevSpaceSettings -IgnoreInheritedPort
     $env:PORT = [string]$integrationSettings.Port
     Start-DevSpaceIfNeeded | ForEach-Object { Add-Content -LiteralPath $integrationLog -Value $_ -Encoding UTF8; Write-Output $_ }
+    $watchdogPath = Join-Path $PSScriptRoot 'watch-native-gateway.ps1'
+    if (Test-Path -LiteralPath $watchdogPath) {
+      Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $watchdogPath + '"')
+      ) -WorkingDirectory $repoRoot | Out-Null
+    }
     & (Join-Path $PSScriptRoot 'ensure-devspace-tunnel.ps1') | ForEach-Object { Add-Content -LiteralPath $integrationLog -Value $_ -Encoding UTF8; Write-Output $_ }
   } catch {
     Add-Content -LiteralPath $integrationLog -Value "$(Get-Date -Format o) FAILED: $($_.Exception.Message)"

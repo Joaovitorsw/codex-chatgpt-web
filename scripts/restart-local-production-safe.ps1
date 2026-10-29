@@ -186,17 +186,17 @@ if ($ownedLauncherConsoles.Count -gt 0) {
   Start-Sleep -Milliseconds 500
 }
 
-# Restart the exact OpenCodex web runner and this checkout's native gateway.
+# Worker-only resets preserve both independent gateways. Full restarts own both.
 # Tailscale is shared infrastructure: the startup integration verifies its route.
 $openCodexEntry = Join-Path (Split-Path -Parent $repoRoot) 'OpenCodex\gateway\dev\run-gateway.cjs'
 $nativeGatewayEntry = Join-Path $PSScriptRoot 'devspace-native-gateway.mjs'
 $companionRoots = @(Get-CimInstance Win32_Process | Where-Object {
   $_.Name -ieq 'node.exe' -and (
     (-not $PreserveOpenCodex -and $_.CommandLine -match [regex]::Escape($openCodexEntry)) -or
-    $_.CommandLine -match [regex]::Escape($nativeGatewayEntry)
+    (-not $PreserveOpenCodex -and $_.CommandLine -match [regex]::Escape($nativeGatewayEntry))
   )
 })
-if ($PreserveOpenCodex) { Write-RestartLog 'Codex worker reset: preserving the OpenCodex service and its process tree.' }
+if ($PreserveOpenCodex) { Write-RestartLog 'Codex worker reset: preserving OpenCodex and the Native2 gateway and their process trees.' }
 foreach ($companion in $companionRoots) {
   Write-RestartLog "Stopping companion service tree PID $($companion.ProcessId)."
   Stop-ProcessTree -RootPid ([int]$companion.ProcessId)
